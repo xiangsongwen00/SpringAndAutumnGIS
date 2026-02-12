@@ -1,0 +1,16 @@
+.sag-tool-placeholder {
+  display: grid;
+  gap: 8px;
+}
+
+.sag-tool-placeholder .sag-tool-title {
+  margin: 0;
+  color: #93c5fd;
+  font-size: 14px;
+}
+
+.sag-tool-placeholder .sag-tool-desc {
+  margin: 0;
+  color: #bfdbfe;
+  line-height: 1.45;
+}

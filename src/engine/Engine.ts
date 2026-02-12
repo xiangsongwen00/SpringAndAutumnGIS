@@ -1,6 +1,8 @@
 ﻿import * as THREE from 'three';
 import { GeoCoordinator, type LonLatHeight, type Vec3, type Wgs84OriginInput } from '../geo/coords';
 import { CameraController, type CameraControllerOptions } from './CameraController';
+import { ToolManager } from './ToolManager';
+import { PlanarValidation, type PlanarValidationOptions } from './validation/PlanarValidation';
 
 export type EngineOptions = {
   container: HTMLElement;
@@ -11,6 +13,7 @@ export type EngineOptions = {
   cameraFar?: number;
   geo?: GeoCoordinator;
   cameraController?: false | CameraControllerOptions;
+  planarValidation?: false | PlanarValidationOptions;
 };
 
 export class Engine {
@@ -20,11 +23,13 @@ export class Engine {
   readonly geo: GeoCoordinator;
   readonly worldRoot: THREE.Group;
   readonly cameraController: CameraController | null;
+  readonly toolManager: ToolManager | null;
 
   private _rafId: number | null = null;
   private _onResize: (() => void) | null = null;
   private _lastFrameTimeMs = 0;
   private readonly _updateHandlers = new Set<(dtSeconds: number, timeSeconds: number) => void>();
+  private readonly _planarValidation: PlanarValidation | null;
 
   constructor(options: EngineOptions) {
     const {
@@ -32,10 +37,11 @@ export class Engine {
       clearColor = 0x0d1117,
       pixelRatio = window.devicePixelRatio,
       cameraFov = 60,
-      cameraNear = 0.1,
-      cameraFar = 1_000_000,
+      cameraNear = 10,
+      cameraFar = 80_000_000,
       geo,
-      cameraController
+      cameraController,
+      planarValidation
     } = options;
 
     this.scene = new THREE.Scene();
@@ -56,10 +62,27 @@ export class Engine {
       cameraController === false
         ? null
         : new CameraController(this.camera, this.renderer.domElement, cameraController);
+    this.toolManager = typeof document !== 'undefined' ? new ToolManager({ root: document.body }) : null;
 
     container.appendChild(this.renderer.domElement);
 
     this.addDefaultLights();
+    this._planarValidation =
+      planarValidation === undefined || planarValidation === false
+        ? null
+        : new PlanarValidation(
+            {
+              renderer: this.renderer,
+              camera: this.camera,
+              cameraController: this.cameraController,
+              toolManager: this.toolManager,
+              geo: this.geo,
+              worldRoot: this.worldRoot,
+              setRenderOrigin: (threeWorld, keepWorldCamera = true) =>
+                this.setRenderOrigin(threeWorld, keepWorldCamera)
+            },
+            planarValidation
+          );
     this.handleResize(container);
   }
 
@@ -78,6 +101,7 @@ export class Engine {
       for (const handler of this._updateHandlers) {
         handler(dtSeconds, nowMs / 1000);
       }
+      this._planarValidation?.update(this.getCameraWorldPosition());
 
       this.renderer.render(this.scene, this.camera);
     };
@@ -98,6 +122,8 @@ export class Engine {
       window.removeEventListener('resize', this._onResize);
       this._onResize = null;
     }
+    this._planarValidation?.dispose();
+    this.toolManager?.dispose();
     this.cameraController?.dispose();
     this.renderer.dispose();
     const canvas = this.renderer.domElement;

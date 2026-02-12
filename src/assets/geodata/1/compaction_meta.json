@@ -1,0 +1,27 @@
+{
+  "center": {
+    "lon": 114.5964639770838,
+    "lat": 29.755359541975388
+  },
+  "bbox": {
+    "west": 114.5957772471208,
+    "south": 29.75483889497991,
+    "east": 114.5971507070468,
+    "north": 29.755880188970863
+  },
+  "crs": "EPSG:4326",
+  "utm_epsg": 32650,
+  "cell_size_m": 0.25,
+  "compaction_width_m": 2.5,
+  "image_px": {
+    "width": 542,
+    "height": 451
+  },
+  "source": {
+    "gdb": "E:\\BIMCC\\BIMCCwork\\地图包测试\\新建文件地理数据库.gdb",
+    "layer": "kml2",
+    "segmentize": false,
+    "split_reversals": true,
+    "min_along": 0.2
+  }
+}

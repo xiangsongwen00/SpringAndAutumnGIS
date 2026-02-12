@@ -1,51 +1,44 @@
-import * as THREE from 'three';
-import { Viewer } from '../index';
+﻿import { Viewer } from '../index';
 
 const container = document.getElementById('app');
 if (!container) {
   throw new Error('Missing #app container');
 }
 
-const viewer = new Viewer({ container });
-const geo = viewer.geo;
-
-geo.setFrontLonDeg(0);
-viewer.setRenderOrigin({ x: 0, y: 0, z: 0 }, false);
-viewer.camera.position.set(0, 0, 12000);
-viewer.camera.lookAt(0, 0, 0);
-viewer.cameraController?.setTarget({ x: 0, y: 0, z: 0 });
-
-const axes = new THREE.AxesHelper(10000);
-viewer.addWorldObject(axes);
-
-const xian = geo.wgs84ToThree(34.34, 108, 0);
-const marker = new THREE.Mesh(
-  new THREE.SphereGeometry(120, 16, 16),
-  new THREE.MeshBasicMaterial({ color: 0xf97316 })
-);
-marker.position.set(xian.x, xian.y, xian.z);
-viewer.addWorldObject(marker);
-
-const hud = document.querySelector('.hud') as HTMLElement | null;
-viewer.addUpdateHandler(() => {
-  if (!hud) return;
-  const camWorld = viewer.getCameraWorldPosition();
-  const camGeo = geo.threeToWgs84(camWorld);
-
-  hud.textContent = [
-    'Core coordinate refactor mode',
-    `camera lon=${camGeo.lon.toFixed(5)} lat=${camGeo.lat.toFixed(5)} h=${camGeo.height.toFixed(1)}m`,
-    'axes length=10000',
-    'LMB rotate | RMB/MMB pan | wheel zoom | T top-view'
-  ].join(' | ');
-});
-
-window.addEventListener('keydown', (event) => {
-  if (event.key.toLowerCase() !== 't') return;
-  const target = viewer.cameraController?.target ?? { x: 0, y: 0, z: 0 };
-  viewer.camera.position.set(target.x, target.y, target.z + 12000);
-  viewer.camera.lookAt(target.x, target.y, target.z);
-  viewer.cameraController?.setTarget(target);
+const viewer = new Viewer({
+  container,
+  planarValidation: {
+    frontLonDeg: 0,
+    initialCameraHeight: 12_000,
+    lodGrid: false,
+    mapTiles: {
+      enabled: true,
+      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      minZoom: 0,
+      maxZoom: 18,
+      tileRadius: 3,
+      maxDynamicTileRadius: 10,
+      updateThrottleMs: 80,
+      zoomThrottleMs: 140,
+      immediateTileShift: 2,
+      lodLevels: [
+        { zoom: 18, maxTiles: 49, marginTiles: 1, updateThrottleMs: 100, zoomThrottleMs: 180 },
+        { zoom: 16, maxTiles: 64, marginTiles: 1, updateThrottleMs: 90, zoomThrottleMs: 160 },
+        { zoom: 14, maxTiles: 81, marginTiles: 1, updateThrottleMs: 80, zoomThrottleMs: 140 },
+        { zoom: 12, maxTiles: 100, marginTiles: 1, updateThrottleMs: 70, zoomThrottleMs: 120 },
+        { zoom: 10, maxTiles: 121, marginTiles: 2, updateThrottleMs: 60, zoomThrottleMs: 100 },
+        { zoom: 8, maxTiles: 144, marginTiles: 2, updateThrottleMs: 50, zoomThrottleMs: 90 },
+        { zoom: 6, maxTiles: 196, marginTiles: 3, updateThrottleMs: 40, zoomThrottleMs: 80 },
+        { zoom: 4, maxTiles: 256, marginTiles: 3, updateThrottleMs: 32, zoomThrottleMs: 64 }
+      ],
+      debugOverlay: true,
+      enableProgressiveBlend: false,
+      fadeDurationMs: 180,
+      maxParentSearchDepth: 6,
+      opacity: 1,
+      yType: 'xyz'
+    }
+  }
 });
 
 viewer.start();
