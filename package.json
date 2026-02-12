@@ -1,0 +1,33 @@
+{
+  "name": "spring-and-autumn-gis",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Lightweight 3D GIS engine (library + demo).",
+  "main": "./dist/spring-and-autumn-gis.umd.js",
+  "module": "./dist/spring-and-autumn-gis.es.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/spring-and-autumn-gis.es.js",
+      "require": "./dist/spring-and-autumn-gis.umd.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "three": "^0.182.0",
+    "@types/three": "^0.182.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.1.4"
+  }
+}
