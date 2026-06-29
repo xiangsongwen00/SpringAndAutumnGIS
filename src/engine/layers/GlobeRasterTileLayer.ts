@@ -1,15 +1,13 @@
 import * as THREE from 'three';
 import type { GeoCoordinator } from '../../geo/coords';
-import { getZoomLevelByDistance } from '../validation/PlanarMapTileLayer';
+import { getZoomLevelByDistance, RASTER_TILE_MAX_ZOOM } from '../validation/PlanarMapTileLayer';
 
-export type TerrainLayerOptions = {
+export type GlobeRasterTileLayerOptions = {
   enabled?: boolean;
-  rgbUrlTemplate?: string;
+  urlTemplate?: string;
   yType?: 'xyz' | 'tms';
-  imageryUrlTemplate?: string;
-  imageryYType?: 'xyz' | 'tms';
-  imagerySubdomains?: readonly string[] | string;
-  imageryOpacity?: number;
+  subdomains?: readonly string[] | string;
+  opacity?: number;
   minZoom?: number;
   maxZoom?: number;
   tileRadius?: number;
@@ -21,18 +19,15 @@ export type TerrainLayerOptions = {
   retainFrames?: number;
   retryLimit?: number;
   tileSegments?: number;
-  exaggeration?: number;
-  zOffset?: number;
-  decodeScale?: number;
-  decodeOffset?: number;
-  decodeMode?: 'auto' | 'mapbox' | 'terrarium';
   seamOverlapMeters?: number;
-  showOrientationHelper?: boolean;
+  surfaceOffsetMeters?: number;
+  maxAnisotropy?: number;
 };
 
-export type TerrainLayerDebugInfo = {
+export type GlobeRasterTileLayerDebugInfo = {
   enabled: boolean;
   zoom: number;
+  maxZoom: number;
   centerX: number;
   centerY: number;
   tileRadius: number;
@@ -61,32 +56,27 @@ type DesiredTile = {
   priority: number;
 };
 
-type TerrainTile = {
+type RasterTile = {
   tileId: TileId;
   key: string;
   state: 'idle' | 'queued' | 'loading' | 'ready' | 'error';
   attempts: number;
   lastWantedFrame: number;
   priority: number;
-  heightTexture: THREE.Texture | null;
-  colorTexture: THREE.Texture | null;
-  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> | null;
+  texture: THREE.Texture | null;
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | null;
 };
 
-const DEFAULT_RGB_URL_TEMPLATE = '';
-const DEFAULT_IMAGERY_URL_TEMPLATE = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-const DEFAULT_IMAGERY_SUBDOMAINS = ['a', 'b', 'c'];
-const MAX_SUPPORTED_ZOOM = 13;
+const DEFAULT_URL_TEMPLATE = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const DEFAULT_SUBDOMAINS = ['a', 'b', 'c'];
 
-export class TerrainLayer {
+export class GlobeRasterTileLayer {
   private readonly _root = new THREE.Group();
   private readonly _geo: GeoCoordinator;
-  private readonly _rgbUrlTemplate: string;
+  private readonly _urlTemplate: string;
   private readonly _yType: 'xyz' | 'tms';
-  private readonly _imageryUrlTemplate: string;
-  private readonly _imageryYType: 'xyz' | 'tms';
-  private readonly _imagerySubdomains: readonly string[];
-  private readonly _imageryOpacity: number;
+  private readonly _subdomains: readonly string[];
+  private readonly _opacity: number;
   private readonly _minZoom: number;
   private readonly _maxZoom: number;
   private readonly _tileRadius: number;
@@ -98,18 +88,12 @@ export class TerrainLayer {
   private readonly _retainFrames: number;
   private readonly _retryLimit: number;
   private readonly _tileSegments: number;
-  private readonly _exaggeration: number;
-  private readonly _zOffset: number;
-  private readonly _decodeScale: number;
-  private readonly _decodeOffset: number;
-  private readonly _decodeMode: 'auto' | 'mapbox' | 'terrarium';
   private readonly _seamOverlapWorld: number;
-  private readonly _showOrientationHelper: boolean;
-  private readonly _orientationHelper = new THREE.Group();
-  private _northArrow: THREE.ArrowHelper | null = null;
-  private _eastArrow: THREE.ArrowHelper | null = null;
+  private readonly _surfaceOffsetMeters: number;
+  private readonly _maxAnisotropy: number;
+  private readonly _textureLoader = new THREE.TextureLoader();
 
-  private readonly _tiles = new Map<string, TerrainTile>();
+  private readonly _tiles = new Map<string, RasterTile>();
   private readonly _queuedKeys = new Set<string>();
   private _loadQueue: string[] = [];
   private _inflight = 0;
@@ -119,47 +103,39 @@ export class TerrainLayer {
   private _fullCoverage = false;
   private _enabled = false;
   private _disposed = false;
-  private _debugInfo: TerrainLayerDebugInfo;
+  private _debugInfo: GlobeRasterTileLayerDebugInfo;
 
-  constructor(geo: GeoCoordinator, options?: TerrainLayerOptions) {
+  constructor(geo: GeoCoordinator, options?: GlobeRasterTileLayerOptions) {
     this._geo = geo;
-    this._rgbUrlTemplate = options?.rgbUrlTemplate ?? DEFAULT_RGB_URL_TEMPLATE;
-    this._yType = options?.yType ?? 'tms';
-    this._imageryUrlTemplate = options?.imageryUrlTemplate ?? DEFAULT_IMAGERY_URL_TEMPLATE;
-    this._imageryYType = options?.imageryYType ?? 'xyz';
-    this._imagerySubdomains = normalizeSubdomains(options?.imagerySubdomains);
-    this._imageryOpacity = clampNumber(options?.imageryOpacity ?? 1, 0, 1);
-    this._minZoom = clampInt(options?.minZoom ?? 0, 0, MAX_SUPPORTED_ZOOM);
-    this._maxZoom = clampInt(options?.maxZoom ?? 13, this._minZoom, MAX_SUPPORTED_ZOOM);
-    this._tileRadius = Math.max(0, Math.floor(options?.tileRadius ?? 1));
-    this._maxConcurrentRequests = Math.max(1, Math.floor(options?.maxConcurrentRequests ?? 8));
-    this._maxCachedTiles = Math.max(9, Math.floor(options?.maxCachedTiles ?? 64));
+    this._urlTemplate = options?.urlTemplate ?? DEFAULT_URL_TEMPLATE;
+    this._yType = options?.yType ?? 'xyz';
+    this._subdomains = normalizeSubdomains(options?.subdomains);
+    this._opacity = clampNumber(options?.opacity ?? 1, 0, 1);
+    this._minZoom = clampInt(options?.minZoom ?? 0, 0, RASTER_TILE_MAX_ZOOM);
+    this._maxZoom = clampInt(options?.maxZoom ?? RASTER_TILE_MAX_ZOOM, this._minZoom, RASTER_TILE_MAX_ZOOM);
+    this._tileRadius = Math.max(0, Math.floor(options?.tileRadius ?? 2));
+    this._maxConcurrentRequests = Math.max(1, Math.floor(options?.maxConcurrentRequests ?? 16));
+    this._maxCachedTiles = Math.max(16, Math.floor(options?.maxCachedTiles ?? 1200));
     this._fullCoverageMaxZoom = clampInt(options?.fullCoverageMaxZoom ?? 4, 0, this._maxZoom);
     this._coverageScale = Math.max(1, Number(options?.coverageScale ?? 4.2));
-    this._maxDynamicTileRadius = Math.max(this._tileRadius, Math.floor(options?.maxDynamicTileRadius ?? 24));
+    this._maxDynamicTileRadius = Math.max(this._tileRadius, Math.floor(options?.maxDynamicTileRadius ?? 20));
     this._retainFrames = Math.max(0, Math.floor(options?.retainFrames ?? 75));
     this._retryLimit = Math.max(0, Math.floor(options?.retryLimit ?? 1));
-    this._tileSegments = Math.max(8, Math.floor(options?.tileSegments ?? 48));
-    this._exaggeration = Math.max(0.1, Number(options?.exaggeration ?? 1));
-    this._zOffset = Number(options?.zOffset ?? 0);
-    this._decodeScale = Number(options?.decodeScale ?? 0.1);
-    this._decodeOffset = Number(options?.decodeOffset ?? -10000);
-    this._decodeMode = options?.decodeMode ?? 'auto';
+    this._tileSegments = Math.max(4, Math.floor(options?.tileSegments ?? 16));
     this._seamOverlapWorld = Math.max(
       0,
       Number(options?.seamOverlapMeters ?? 0.5) / this._geo.metersPerUnit
     );
-    this._showOrientationHelper = options?.showOrientationHelper ?? true;
+    this._surfaceOffsetMeters = Math.max(0, Number(options?.surfaceOffsetMeters ?? 80));
+    this._maxAnisotropy = Math.max(1, Math.floor(options?.maxAnisotropy ?? 1));
+    this._textureLoader.setCrossOrigin('anonymous');
 
-    this._enabled = options?.enabled ?? false;
-    if (this._showOrientationHelper) {
-      this.createOrientationHelper();
-      this._root.add(this._orientationHelper);
-    }
+    this._enabled = options?.enabled ?? true;
     this._root.visible = this._enabled;
     this._debugInfo = {
       enabled: this._enabled,
       zoom: this._minZoom,
+      maxZoom: this._maxZoom,
       centerX: 0,
       centerY: 0,
       tileRadius: this._tileRadius,
@@ -186,7 +162,7 @@ export class TerrainLayer {
     return this._enabled;
   }
 
-  get debugInfo(): TerrainLayerDebugInfo {
+  get debugInfo(): GlobeRasterTileLayerDebugInfo {
     return { ...this._debugInfo };
   }
 
@@ -194,28 +170,24 @@ export class TerrainLayer {
     if (this._disposed) return;
     this._enabled = enabled;
     this._root.visible = enabled;
-    this._debugInfo = {
-      ...this._debugInfo,
-      enabled
-    };
+    this._debugInfo = { ...this._debugInfo, enabled };
   }
 
   update(focusLon: number, focusLat: number, cameraDistance: number): void {
-    if (this._disposed || !this._enabled) return;
+    if (this._disposed || !this._enabled || this._urlTemplate.length === 0) return;
 
     this._frame += 1;
     const safeLon = normalizeLon(focusLon);
     const safeLat = clampNumber(focusLat, -85.05112878, 85.05112878);
-    this.updateOrientationHelper(safeLon, safeLat);
     const zoom = this.pickZoom(cameraDistance);
     const centerTile = this._geo.lonLatToTile(safeLon, safeLat, zoom);
     const fullCoverage = zoom <= this._fullCoverageMaxZoom;
     const effectiveTileRadius = fullCoverage ? 2 ** zoom : this.resolveTileRadius(zoom, cameraDistance);
-
     const desired =
       fullCoverage
         ? this.collectFullCoverageTiles(zoom, centerTile)
         : this.collectLocalTiles(zoom, centerTile, effectiveTileRadius);
+
     this._requestedCount = desired.length;
     this._effectiveTileRadius = effectiveTileRadius;
     this._fullCoverage = fullCoverage;
@@ -234,8 +206,7 @@ export class TerrainLayer {
           attempts: 0,
           lastWantedFrame: this._frame,
           priority: Number.POSITIVE_INFINITY,
-          heightTexture: null,
-          colorTexture: null,
+          texture: null,
           mesh: null
         };
         this._tiles.set(key, tile);
@@ -264,8 +235,7 @@ export class TerrainLayer {
         tile.mesh.geometry.dispose();
         tile.mesh.material.dispose();
       }
-      tile.heightTexture?.dispose();
-      tile.colorTexture?.dispose();
+      tile.texture?.dispose();
     }
     this._tiles.clear();
     this._debugInfo = {
@@ -301,6 +271,7 @@ export class TerrainLayer {
     this._debugInfo = {
       enabled: this._enabled,
       zoom,
+      maxZoom: this._maxZoom,
       centerX,
       centerY,
       tileRadius: this._tileRadius,
@@ -320,7 +291,7 @@ export class TerrainLayer {
   }
 
   private pickZoom(cameraHeight: number): number {
-    const byDistance = getZoomLevelByDistance(cameraHeight);
+    const byDistance = getZoomLevelByDistance(cameraHeight, this._maxZoom);
     return clampInt(byDistance, this._minZoom, this._maxZoom);
   }
 
@@ -332,10 +303,7 @@ export class TerrainLayer {
     return clampInt(Math.max(this._tileRadius, formulaRadius), this._tileRadius, this._maxDynamicTileRadius);
   }
 
-  private collectFullCoverageTiles(
-    zoom: number,
-    centerTile: { x: number; y: number }
-  ): DesiredTile[] {
+  private collectFullCoverageTiles(zoom: number, centerTile: { x: number; y: number }): DesiredTile[] {
     const desired: DesiredTile[] = [];
     const n = 2 ** zoom;
     const centerY = clampInt(centerTile.y, 0, n - 1);
@@ -416,67 +384,67 @@ export class TerrainLayer {
     return bestIndex;
   }
 
-  private async startLoad(tile: TerrainTile): Promise<void> {
+  private startLoad(tile: RasterTile): void {
     tile.state = 'loading';
     tile.attempts += 1;
     const attempt = tile.attempts;
     this._inflight += 1;
 
-    try {
-      const heightPromise =
-        this._rgbUrlTemplate.length > 0
-          ? loadHeightTexture(this.buildUrl(this._rgbUrlTemplate, tile.tileId, this._yType)).catch(() => null)
-          : Promise.resolve(null);
-      const colorPromise = this._imageryUrlTemplate
-        ? loadColorTexture(
-            this.buildUrl(this._imageryUrlTemplate, tile.tileId, this._imageryYType, this._imagerySubdomains)
-          ).catch(() => null)
-        : Promise.resolve(null);
-      const [heightTexture, colorTexture] = await Promise.all([heightPromise, colorPromise]);
-      const current = this._tiles.get(tile.key);
-      if (!current || current.attempts !== attempt || this._disposed) {
-        heightTexture?.dispose();
-        colorTexture?.dispose();
-        return;
-      }
+    this._textureLoader.load(
+      this.buildUrl(tile.tileId),
+      (texture) => {
+        this._inflight = Math.max(0, this._inflight - 1);
+        const current = this._tiles.get(tile.key);
+        if (!current || current.attempts !== attempt || this._disposed) {
+          texture.dispose();
+          this.processQueue();
+          return;
+        }
 
-      const mesh = this.buildTileMesh(current.tileId, heightTexture, colorTexture);
-      if (current.mesh) {
-        this._root.remove(current.mesh);
-        current.mesh.geometry.dispose();
-        current.mesh.material.dispose();
-        current.heightTexture?.dispose();
-        current.colorTexture?.dispose();
+        texture.generateMipmaps = true;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.wrapS = THREE.ClampToEdgeWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.anisotropy = this._maxAnisotropy;
+        texture.colorSpace = THREE.SRGBColorSpace;
+
+        const mesh = this.buildTileMesh(current.tileId, texture);
+        if (current.mesh) {
+          this._root.remove(current.mesh);
+          current.mesh.geometry.dispose();
+          current.mesh.material.dispose();
+          current.texture?.dispose();
+        }
+        current.texture = texture;
+        current.mesh = mesh;
+        current.state = 'ready';
+        this._root.add(mesh);
+        this.processQueue();
+      },
+      undefined,
+      () => {
+        this._inflight = Math.max(0, this._inflight - 1);
+        const current = this._tiles.get(tile.key);
+        if (current && current.attempts === attempt) {
+          current.state = 'error';
+        }
+        this.processQueue();
       }
-      current.heightTexture = heightTexture;
-      current.colorTexture = colorTexture;
-      current.mesh = mesh;
-      current.state = 'ready';
-      this._root.add(mesh);
-    } catch {
-      const current = this._tiles.get(tile.key);
-      if (current && current.attempts === attempt) {
-        current.state = 'error';
-      }
-    } finally {
-      this._inflight = Math.max(0, this._inflight - 1);
-      this.processQueue();
-    }
+    );
   }
 
   private buildTileMesh(
     tileId: TileId,
-    heightTexture: THREE.Texture | null,
-    colorTexture: THREE.Texture | null
-  ): THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> {
+    texture: THREE.Texture
+  ): THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> {
     const bounds = tileBounds(tileId, this._geo, this._seamOverlapWorld);
     const targetSegments = this.pickSegmentsByZoom(tileId.z);
-    const segmentsX = Math.max(8, targetSegments);
-    const segmentsY = Math.max(8, targetSegments);
+    const segmentsX = Math.max(4, targetSegments);
+    const segmentsY = Math.max(4, targetSegments);
     const cols = segmentsX + 1;
     const rows = segmentsY + 1;
     const vertexCount = cols * rows;
-
     const positions = new Float32Array(vertexCount * 3);
     const uvs = new Float32Array(vertexCount * 2);
     const indices = createGridIndices(segmentsX, segmentsY);
@@ -486,11 +454,10 @@ export class TerrainLayer {
     for (let iy = 0; iy <= segmentsY; iy += 1) {
       const v = iy / segmentsY;
       const lat = lerp(bounds.northLat, bounds.southLat, v);
-
       for (let ix = 0; ix <= segmentsX; ix += 1) {
         const u = ix / segmentsX;
         const lon = lerp(bounds.westLon, bounds.eastLon, u);
-        const world = this._geo.wgs84ToThree(lat, lon, 0);
+        const world = this._geo.wgs84ToThree(lat, lon, this._surfaceOffsetMeters);
         positions[p++] = world.x;
         positions[p++] = world.y;
         positions[p++] = world.z;
@@ -503,100 +470,39 @@ export class TerrainLayer {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.computeVertexNormals();
 
-    const material = heightTexture
-      ? createGpuTerrainMaterial({
-          heightTexture,
-          colorTexture,
-          imageryOpacity: this._imageryOpacity,
-          decodeMode: resolveDecodeMode(this._decodeMode),
-          decodeScale: this._decodeScale,
-          decodeOffset: this._decodeOffset,
-          exaggeration: this._exaggeration,
-          zOffsetMeters: this._zOffset * this._geo.metersPerUnit,
-          metersPerUnit: this._geo.metersPerUnit
-        })
-      : createEllipsoidImageryMaterial({
-          colorTexture,
-          imageryOpacity: this._imageryOpacity
-        });
-
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      map: texture,
+      transparent: this._opacity < 0.999,
+      opacity: this._opacity,
+      depthWrite: false,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1
+    });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = 1;
+    mesh.renderOrder = 3;
     mesh.frustumCulled = false;
     return mesh;
   }
 
   private pickSegmentsByZoom(zoom: number): number {
     const high = this._tileSegments;
-    if (zoom >= 12) return Math.max(24, high);
-    if (zoom >= 10) return Math.max(20, Math.min(high, 36));
-    if (zoom >= 8) return Math.max(16, Math.min(high, 28));
-    return Math.max(12, Math.min(high, 20));
+    if (zoom >= 14) return Math.max(8, Math.min(high, 16));
+    if (zoom >= 10) return Math.max(8, Math.min(high, 20));
+    return Math.max(8, Math.min(high, 24));
   }
 
-  private createOrientationHelper(): void {
-    this._northArrow = new THREE.ArrowHelper(
-      new THREE.Vector3(0, 1, 0),
-      new THREE.Vector3(0, 0, 0),
-      90,
-      0x22c55e,
-      12,
-      6
-    );
-    this._eastArrow = new THREE.ArrowHelper(
-      new THREE.Vector3(1, 0, 0),
-      new THREE.Vector3(0, 0, 0),
-      90,
-      0xef4444,
-      12,
-      6
-    );
-    this._northArrow.renderOrder = 30;
-    this._eastArrow.renderOrder = 30;
-    this._orientationHelper.add(this._northArrow, this._eastArrow);
-  }
-
-  private updateOrientationHelper(focusLon: number, focusLat: number): void {
-    if (!this._showOrientationHelper) return;
-    if (!this._northArrow || !this._eastArrow) return;
-
-    const base = this._geo.wgs84ToThree(focusLat, focusLon, 150);
-    const northSample = this._geo.wgs84ToThree(clampNumber(focusLat + 0.08, -89.9, 89.9), focusLon, 150);
-    const eastSample = this._geo.wgs84ToThree(focusLat, normalizeLon(focusLon + 0.08), 150);
-
-    const northDir = new THREE.Vector3(
-      northSample.x - base.x,
-      northSample.y - base.y,
-      northSample.z - base.z
-    ).normalize();
-    const eastDir = new THREE.Vector3(
-      eastSample.x - base.x,
-      eastSample.y - base.y,
-      eastSample.z - base.z
-    ).normalize();
-
-    this._orientationHelper.position.set(base.x, base.y, base.z);
-    this._northArrow.setDirection(northDir);
-    this._eastArrow.setDirection(eastDir);
-    this._orientationHelper.visible = true;
-  }
-
-  private buildUrl(
-    template: string,
-    tileId: TileId,
-    yType: 'xyz' | 'tms',
-    subdomains?: readonly string[]
-  ): string {
+  private buildUrl(tileId: TileId): string {
     const n = 2 ** tileId.z;
-    const y = yType === 'tms' ? n - 1 - tileId.y : tileId.y;
-    const domainList = subdomains ?? [];
+    const y = this._yType === 'tms' ? n - 1 - tileId.y : tileId.y;
     const domain =
-      domainList.length > 0
-        ? domainList[Math.abs(tileId.x + tileId.y + tileId.z) % domainList.length] ?? ''
+      this._subdomains.length > 0
+        ? this._subdomains[Math.abs(tileId.x + tileId.y + tileId.z) % this._subdomains.length] ?? ''
         : '';
-    return template
+    return this._urlTemplate
       .replace('{z}', String(tileId.z))
       .replace('{x}', String(tileId.x))
       .replace('{y}', String(y))
@@ -605,7 +511,6 @@ export class TerrainLayer {
 
   private evict(wantedKeys: Set<string>): void {
     const staleKeys: string[] = [];
-
     for (const [key, tile] of this._tiles) {
       const age = this._frame - tile.lastWantedFrame;
       if (wantedKeys.has(key)) continue;
@@ -616,15 +521,7 @@ export class TerrainLayer {
     for (const key of staleKeys) {
       const tile = this._tiles.get(key);
       if (!tile) continue;
-      if (tile.mesh) {
-        this._root.remove(tile.mesh);
-        tile.mesh.geometry.dispose();
-        tile.mesh.material.dispose();
-      }
-      tile.heightTexture?.dispose();
-      tile.colorTexture?.dispose();
-      this._tiles.delete(key);
-      this._queuedKeys.delete(key);
+      this.disposeTile(key, tile);
     }
 
     if (this._tiles.size <= this._maxCachedTiles) return;
@@ -632,109 +529,22 @@ export class TerrainLayer {
     const candidates = [...this._tiles.values()]
       .filter((tile) => !wantedKeys.has(tile.key) && tile.state !== 'loading')
       .sort((a, b) => a.lastWantedFrame - b.lastWantedFrame);
-
     for (const tile of candidates) {
       if (this._tiles.size <= this._maxCachedTiles) break;
-      if (tile.mesh) {
-        this._root.remove(tile.mesh);
-        tile.mesh.geometry.dispose();
-        tile.mesh.material.dispose();
-      }
-      tile.heightTexture?.dispose();
-      tile.colorTexture?.dispose();
-      this._tiles.delete(tile.key);
-      this._queuedKeys.delete(tile.key);
+      this.disposeTile(tile.key, tile);
     }
   }
-}
 
-function createEllipsoidImageryMaterial(options: {
-  colorTexture: THREE.Texture | null;
-  imageryOpacity: number;
-}): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
-    color: options.colorTexture ? 0xffffff : 0x6b7280,
-    map: options.colorTexture,
-    roughness: 0.95,
-    metalness: 0,
-    transparent: options.imageryOpacity < 0.999,
-    opacity: options.imageryOpacity
-  });
-}
-
-function resolveDecodeMode(mode: 'auto' | 'mapbox' | 'terrarium'): 'mapbox' | 'terrarium' {
-  return mode === 'terrarium' ? 'terrarium' : 'mapbox';
-}
-
-function createGpuTerrainMaterial(options: {
-  heightTexture: THREE.Texture;
-  colorTexture: THREE.Texture | null;
-  imageryOpacity: number;
-  decodeMode: 'mapbox' | 'terrarium';
-  decodeScale: number;
-  decodeOffset: number;
-  exaggeration: number;
-  zOffsetMeters: number;
-  metersPerUnit: number;
-}): THREE.MeshStandardMaterial {
-  const {
-    heightTexture,
-    colorTexture,
-    imageryOpacity,
-    decodeMode,
-    decodeScale,
-    decodeOffset,
-    exaggeration,
-    zOffsetMeters,
-    metersPerUnit
-  } = options;
-
-  const material = new THREE.MeshStandardMaterial({
-    color: 0x6b7280,
-    map: colorTexture,
-    roughness: 0.95,
-    metalness: 0,
-    transparent: imageryOpacity < 0.999,
-    opacity: imageryOpacity
-  });
-  material.defines = { ...(material.defines ?? {}), USE_UV: '' };
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.sagHeightMap = { value: heightTexture };
-    shader.uniforms.sagDecodeScale = { value: decodeScale };
-    shader.uniforms.sagDecodeOffset = { value: decodeOffset };
-    shader.uniforms.sagDecodeMode = { value: decodeMode === 'terrarium' ? 1 : 0 };
-    shader.uniforms.sagExaggeration = { value: exaggeration };
-    shader.uniforms.sagZOffsetMeters = { value: zOffsetMeters };
-    shader.uniforms.sagMetersPerUnit = { value: metersPerUnit };
-
-    shader.vertexShader = `
-uniform sampler2D sagHeightMap;
-uniform float sagDecodeScale;
-uniform float sagDecodeOffset;
-uniform int sagDecodeMode;
-uniform float sagExaggeration;
-uniform float sagZOffsetMeters;
-uniform float sagMetersPerUnit;
-${shader.vertexShader}
-`;
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <displacementmap_vertex>',
-      `
-vec3 sagRgb = texture2D(sagHeightMap, vUv).rgb;
-float sagHeightMeters;
-if (sagDecodeMode == 1) {
-  sagHeightMeters = sagRgb.r * 255.0 * 256.0 + sagRgb.g * 255.0 + (sagRgb.b * 255.0) / 256.0 - 32768.0;
-} else {
-  float sagRaw = sagRgb.r * 255.0 * 256.0 * 256.0 + sagRgb.g * 255.0 * 256.0 + sagRgb.b * 255.0;
-  sagHeightMeters = sagDecodeOffset + sagRaw * sagDecodeScale;
-}
-float sagHeightUnits = (sagHeightMeters * sagExaggeration + sagZOffsetMeters) / max(sagMetersPerUnit, 1e-6);
-transformed += normalize(position) * sagHeightUnits;
-`
-    );
-  };
-  material.customProgramCacheKey = () => `sag_terrain_gpu_${decodeMode}`;
-  return material;
+  private disposeTile(key: string, tile: RasterTile): void {
+    this._queuedKeys.delete(key);
+    if (tile.mesh) {
+      this._root.remove(tile.mesh);
+      tile.mesh.geometry.dispose();
+      tile.mesh.material.dispose();
+    }
+    tile.texture?.dispose();
+    this._tiles.delete(key);
+  }
 }
 
 function tileBounds(
@@ -793,50 +603,6 @@ function createGridIndices(segmentsX: number, segmentsY: number): Uint16Array | 
   return out;
 }
 
-function loadHeightTexture(url: string): Promise<THREE.Texture> {
-  return new Promise((resolve, reject) => {
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin('anonymous');
-    loader.load(
-      url,
-      (texture) => {
-        texture.generateMipmaps = true;
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        (texture as THREE.Texture & { colorSpace?: THREE.ColorSpace }).colorSpace =
-          (THREE as unknown as { NoColorSpace?: THREE.ColorSpace }).NoColorSpace ??
-          THREE.LinearSRGBColorSpace;
-        resolve(texture);
-      },
-      undefined,
-      (err) => reject(err)
-    );
-  });
-}
-
-function loadColorTexture(url: string): Promise<THREE.Texture> {
-  return new Promise((resolve, reject) => {
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin('anonymous');
-    loader.load(
-      url,
-      (texture) => {
-        texture.generateMipmaps = true;
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.colorSpace = THREE.SRGBColorSpace;
-        resolve(texture);
-      },
-      undefined,
-      (err) => reject(err)
-    );
-  });
-}
-
 function tileKey(tileId: TileId): string {
   return `${tileId.z}/${tileId.x}/${tileId.y}`;
 }
@@ -872,12 +638,12 @@ function lerp(a: number, b: number, t: number): number {
 function normalizeSubdomains(input: readonly string[] | string | undefined): readonly string[] {
   if (Array.isArray(input)) {
     const out = input.map((x) => String(x).trim()).filter((x) => x.length > 0);
-    return out.length > 0 ? out : DEFAULT_IMAGERY_SUBDOMAINS;
+    return out.length > 0 ? out : DEFAULT_SUBDOMAINS;
   }
 
   if (typeof input === 'string') {
     const trimmed = input.trim();
-    if (trimmed.length === 0) return DEFAULT_IMAGERY_SUBDOMAINS;
+    if (trimmed.length === 0) return DEFAULT_SUBDOMAINS;
     const split = trimmed
       .split(',')
       .map((x) => x.trim())
@@ -886,5 +652,5 @@ function normalizeSubdomains(input: readonly string[] | string | undefined): rea
     return [trimmed];
   }
 
-  return DEFAULT_IMAGERY_SUBDOMAINS;
+  return DEFAULT_SUBDOMAINS;
 }

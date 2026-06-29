@@ -16,6 +16,11 @@ export type {
 
 export { ImageryLayer } from './engine/layers/ImageryLayer';
 export type { LayerVisibility } from './engine/layers/ImageryLayer';
+export { GlobeRasterTileLayer } from './engine/layers/GlobeRasterTileLayer';
+export type {
+  GlobeRasterTileLayerDebugInfo,
+  GlobeRasterTileLayerOptions
+} from './engine/layers/GlobeRasterTileLayer';
 export { LayerManager } from './engine/layers/LayerManager';
 
 export { TileCache } from './engine/tiles/TileCache';

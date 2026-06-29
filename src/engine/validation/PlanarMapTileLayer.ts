@@ -102,34 +102,20 @@ type LayerViewState = {
 
 const DEFAULT_URL_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const DEFAULT_SUBDOMAINS = ['a', 'b', 'c'];
+export const RASTER_TILE_MAX_ZOOM = 22;
+export const VECTOR_TILE_MAX_ZOOM = 29;
 const WEB_MERCATOR_HALF_WORLD = Math.PI * 6378137;
 const WEB_MERCATOR_WORLD_SIZE = WEB_MERCATOR_HALF_WORLD * 2;
+const WEB_MERCATOR_METERS_PER_PIXEL_Z0 = 156543.03392804097;
+const REFERENCE_VIEWPORT_PIXELS = 768;
+const REFERENCE_CAMERA_FOV_RAD = Math.PI / 3;
 
-export function getZoomLevelByDistance(distanceMeters: number): number {
-  const d = Math.max(0, Number(distanceMeters) || 0);
-  if (d <= 9) return 24;
-  if (d <= 19) return 23;
-  if (d <= 29) return 22;
-  if (d <= 59) return 21;
-  if (d <= 79) return 20;
-  if (d <= 150) return 19;
-  if (d <= 300) return 18;
-  if (d <= 660) return 17;
-  if (d <= 1300) return 16;
-  if (d <= 2600) return 15;
-  if (d <= 6400) return 14;
-  if (d <= 13200) return 13;
-  if (d <= 26000) return 12;
-  if (d <= 68985) return 11;
-  if (d <= 139780) return 10;
-  if (d <= 250600) return 9;
-  if (d <= 380000) return 8;
-  if (d <= 640000) return 7;
-  if (d <= 1280000) return 6;
-  if (d <= 2600000) return 5;
-  if (d <= 6100000) return 4;
-  if (d <= 11900000) return 3;
-  return 2;
+export function getZoomLevelByDistance(distanceMeters: number, maxZoom = RASTER_TILE_MAX_ZOOM): number {
+  const d = Math.max(0.05, Number(distanceMeters) || 0.05);
+  const visibleMeters = 2 * d * Math.tan(REFERENCE_CAMERA_FOV_RAD * 0.5);
+  const metersPerPixel = visibleMeters / REFERENCE_VIEWPORT_PIXELS;
+  const zoom = Math.round(Math.log2(WEB_MERCATOR_METERS_PER_PIXEL_Z0 / Math.max(1e-9, metersPerPixel)));
+  return clampInt(zoom, 2, maxZoom);
 }
 
 export class PlanarMapTileLayer {
@@ -198,8 +184,8 @@ export class PlanarMapTileLayer {
     const originLon = options?.originLon ?? 0;
     const originLat = options?.originLat ?? 0;
     this._originMercator = this._geo.lonLatToWebMercator(originLon, originLat);
-    this._minZoom = clampInt(options?.minZoom ?? 0, 0, 22);
-    this._maxZoom = clampInt(options?.maxZoom ?? 18, 0, 22);
+    this._minZoom = clampInt(options?.minZoom ?? 0, 0, RASTER_TILE_MAX_ZOOM);
+    this._maxZoom = clampInt(options?.maxZoom ?? RASTER_TILE_MAX_ZOOM, this._minZoom, RASTER_TILE_MAX_ZOOM);
     this._tileRadius = Math.max(0, Math.floor(options?.tileRadius ?? 2));
     this._maxDynamicTileRadius = Math.max(this._tileRadius, Math.floor(options?.maxDynamicTileRadius ?? 10));
     this._opacity = clampNumber(options?.opacity ?? 1, 0, 1);
@@ -1113,7 +1099,7 @@ function sanitizeViewportBounds(bounds: ViewportWorldBounds | null): ViewportWor
 function normalizeLodLevels(levels: readonly TileLodLevel[] | undefined): readonly TileLodLevel[] {
   if (!levels || levels.length === 0) return [];
   const out = levels
-    .filter((level) => Number.isInteger(level.zoom) && level.zoom >= 0 && level.zoom <= 22)
+    .filter((level) => Number.isInteger(level.zoom) && level.zoom >= 0 && level.zoom <= RASTER_TILE_MAX_ZOOM)
     .map((level) => ({
       zoom: Math.floor(level.zoom),
       maxTiles: level.maxTiles,

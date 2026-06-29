@@ -8,10 +8,18 @@ export type CameraControllerOptions = {
   dampingFactor?: number;
   minDampingDelta?: number;
   rotateSpeed?: number;
+  minRotateScale?: number;
+  rotateAltitudeReference?: number;
+  orbitRadius?: number;
+  horizontalDragOnly?: boolean;
   panSpeed?: number;
+  panMercatorScale?: number;
+  maxPanMetersPerPixel?: number;
   zoomSpeed?: number;
   minZoomScale?: number;
   maxZoomScale?: number;
+  minWheelZoomFactor?: number;
+  maxWheelZoomFactor?: number;
   minDistance?: number;
   maxDistance?: number;
   minPolarAngle?: number;
@@ -30,10 +38,18 @@ export class CameraController {
   dampingFactor: number;
   minDampingDelta: number;
   rotateSpeed: number;
+  minRotateScale: number;
+  rotateAltitudeReference: number;
+  orbitRadius: number;
+  horizontalDragOnly: boolean;
   panSpeed: number;
+  panMercatorScale: number;
+  maxPanMetersPerPixel: number;
   zoomSpeed: number;
   minZoomScale: number;
   maxZoomScale: number;
+  minWheelZoomFactor: number;
+  maxWheelZoomFactor: number;
   minDistance: number;
   maxDistance: number;
   minPolarAngle: number;
@@ -52,6 +68,19 @@ export class CameraController {
   private readonly _offset = new THREE.Vector3();
   private readonly _right = new THREE.Vector3();
   private readonly _up = new THREE.Vector3();
+  private readonly _dragPrevGlobeDir = new THREE.Vector3();
+  private readonly _dragNextGlobeDir = new THREE.Vector3();
+  private readonly _dragStartGlobeDir = new THREE.Vector3();
+  private readonly _dragStartCameraPosition = new THREE.Vector3();
+  private readonly _dragStartCameraUp = new THREE.Vector3();
+  private readonly _dragStartCameraMatrixWorld = new THREE.Matrix4();
+  private readonly _dragStartProjectionMatrixInverse = new THREE.Matrix4();
+  private readonly _rayPoint = new THREE.Vector3();
+  private readonly _rayDirection = new THREE.Vector3();
+  private readonly _rayOriginRel = new THREE.Vector3();
+  private readonly _dragRotation = new THREE.Quaternion();
+  private _hasDragPrevGlobeDir = false;
+  private _hasDragStartGlobeDir = false;
 
   private readonly _onContextMenuBound: (event: Event) => void;
   private readonly _onPointerDownBound: (event: PointerEvent) => void;
@@ -68,10 +97,18 @@ export class CameraController {
     this.dampingFactor = options?.dampingFactor ?? 0.28;
     this.minDampingDelta = options?.minDampingDelta ?? 1e-5;
     this.rotateSpeed = options?.rotateSpeed ?? 1;
+    this.minRotateScale = options?.minRotateScale ?? 0.035;
+    this.rotateAltitudeReference = options?.rotateAltitudeReference ?? 1_500_000;
+    this.orbitRadius = Math.max(1, options?.orbitRadius ?? 1);
+    this.horizontalDragOnly = options?.horizontalDragOnly ?? false;
     this.panSpeed = options?.panSpeed ?? 1;
+    this.panMercatorScale = options?.panMercatorScale ?? 0.12;
+    this.maxPanMetersPerPixel = options?.maxPanMetersPerPixel ?? 50_000;
     this.zoomSpeed = options?.zoomSpeed ?? 1;
     this.minZoomScale = options?.minZoomScale ?? 0.2;
     this.maxZoomScale = options?.maxZoomScale ?? 5;
+    this.minWheelZoomFactor = options?.minWheelZoomFactor ?? 0.88;
+    this.maxWheelZoomFactor = options?.maxWheelZoomFactor ?? 1.14;
     this.minDistance = options?.minDistance ?? 1;
     this.maxDistance = options?.maxDistance ?? Number.POSITIVE_INFINITY;
     this.minPolarAngle = options?.minPolarAngle ?? 0;
@@ -145,7 +182,7 @@ export class CameraController {
 
     this._spherical.theta += this._sphericalDelta.theta * damping;
     this._spherical.phi += this._sphericalDelta.phi * damping;
-    this._spherical.radius *= 1 + (this._zoomScale - 1) * damping;
+    this._spherical.radius = this.resolveDampedZoomRadius(this._spherical.radius, damping);
 
     this._spherical.phi = Math.max(this.minPolarAngle, Math.min(this.maxPolarAngle, this._spherical.phi));
     this._spherical.makeSafe();
@@ -157,7 +194,11 @@ export class CameraController {
 
     this._offset.setFromSpherical(this._spherical);
     this.camera.position.copy(this._target).add(this._offset);
-    this.camera.up.set(0, 1, 0);
+    if (!this.lockTarget || this.orbitRadius <= 1) {
+      this.camera.up.set(0, 1, 0);
+    } else {
+      this.camera.up.normalize();
+    }
     this.camera.lookAt(this._target);
 
     if (this.enableDamping) {
@@ -189,6 +230,16 @@ export class CameraController {
     if (event.button === 0) {
       this._action = 'rotate';
       this._rotateStart.set(event.clientX, event.clientY);
+      this.captureDragStartCamera();
+      this._hasDragStartGlobeDir = this.resolveGlobeDirectionAtClientFromDragStart(
+        event.clientX,
+        event.clientY,
+        this._dragStartGlobeDir
+      );
+      this._hasDragPrevGlobeDir = this._hasDragStartGlobeDir;
+      if (this._hasDragStartGlobeDir) {
+        this._dragPrevGlobeDir.copy(this._dragStartGlobeDir);
+      }
     } else if (event.button === 1 || event.button === 2) {
       this._action = 'pan';
       this._panStart.set(event.clientX, event.clientY);
@@ -217,6 +268,8 @@ export class CameraController {
 
   private onPointerUp(event: PointerEvent): void {
     this._action = 'none';
+    this._hasDragPrevGlobeDir = false;
+    this._hasDragStartGlobeDir = false;
     try {
       this.domElement.releasePointerCapture(event.pointerId);
     } catch {
@@ -230,20 +283,99 @@ export class CameraController {
     if (!this.enabled) return;
     event.preventDefault();
 
-    const normalizedDelta = clampNumber(event.deltaY, -240, 240);
-    const zoom = Math.exp(normalizedDelta * 0.001 * this.zoomSpeed);
+    const normalizedDelta = clampNumber(event.deltaY, -120, 120);
+    const rawZoom = Math.exp(normalizedDelta * 0.001 * this.zoomSpeed);
+    const zoom = clampNumber(rawZoom, this.minWheelZoomFactor, this.maxWheelZoomFactor);
     this._zoomScale = clampNumber(this._zoomScale * zoom, this.minZoomScale, this.maxZoomScale);
   }
 
   private handleRotate(event: PointerEvent): void {
+    if (this.lockTarget && this.orbitRadius > 1 && this.handleGlobeSurfaceDrag(event)) {
+      return;
+    }
+
     const dx = event.clientX - this._rotateStart.x;
     const dy = event.clientY - this._rotateStart.y;
 
     this._rotateStart.set(event.clientX, event.clientY);
 
     const height = Math.max(this.domElement.clientHeight, 1);
-    this._sphericalDelta.theta -= (2 * Math.PI * dx * this.rotateSpeed) / height;
-    this._sphericalDelta.phi -= (2 * Math.PI * dy * this.rotateSpeed) / height;
+    const radiansPerPixel = this.resolveOrbitRadiansPerPixel(height);
+    this._sphericalDelta.theta -= dx * radiansPerPixel * this.rotateSpeed;
+    if (!this.horizontalDragOnly) {
+      this._sphericalDelta.phi -= dy * radiansPerPixel * this.rotateSpeed;
+    }
+  }
+
+  private handleGlobeSurfaceDrag(event: PointerEvent): boolean {
+    const hasNext = this.resolveGlobeDirectionAtClientFromDragStart(
+      event.clientX,
+      event.clientY,
+      this._dragNextGlobeDir
+    );
+    if (!hasNext || !this._hasDragStartGlobeDir) {
+      this._rotateStart.set(event.clientX, event.clientY);
+      return false;
+    }
+
+    const dot = clampNumber(this._dragNextGlobeDir.dot(this._dragStartGlobeDir), -1, 1);
+    if (dot > 0.999999) {
+      this._rotateStart.set(event.clientX, event.clientY);
+      return true;
+    }
+
+    this._dragRotation.setFromUnitVectors(this._dragNextGlobeDir, this._dragStartGlobeDir);
+    this._offset.copy(this._dragStartCameraPosition).sub(this._target).applyQuaternion(this._dragRotation);
+    this.camera.position.copy(this._target).add(this._offset);
+    this.camera.up.copy(this._dragStartCameraUp).applyQuaternion(this._dragRotation).normalize();
+    this.camera.lookAt(this._target);
+    this.syncSphericalFromCamera();
+    this._sphericalDelta.theta = 0;
+    this._sphericalDelta.phi = 0;
+    this._zoomScale = 1;
+    this._rotateStart.set(event.clientX, event.clientY);
+    return true;
+  }
+
+  private captureDragStartCamera(): void {
+    this.camera.updateMatrixWorld();
+    this.camera.updateProjectionMatrix();
+    this._dragStartCameraPosition.copy(this.camera.position);
+    this._dragStartCameraUp.copy(this.camera.up).normalize();
+    this._dragStartCameraMatrixWorld.copy(this.camera.matrixWorld);
+    this._dragStartProjectionMatrixInverse.copy(this.camera.projectionMatrixInverse);
+  }
+
+  private resolveGlobeDirectionAtClientFromDragStart(
+    clientX: number,
+    clientY: number,
+    out: THREE.Vector3
+  ): boolean {
+    const rect = this.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    this._rayPoint
+      .set(ndcX, ndcY, 0.5)
+      .applyMatrix4(this._dragStartProjectionMatrixInverse)
+      .applyMatrix4(this._dragStartCameraMatrixWorld);
+    this._rayDirection.copy(this._rayPoint).sub(this._dragStartCameraPosition).normalize();
+    this._rayOriginRel.copy(this._dragStartCameraPosition).sub(this._target);
+
+    const b = this._rayOriginRel.dot(this._rayDirection);
+    const c = this._rayOriginRel.lengthSq() - this.orbitRadius * this.orbitRadius;
+    const disc = b * b - c;
+    if (disc < 0) return false;
+
+    const sqrtDisc = Math.sqrt(disc);
+    const t0 = -b - sqrtDisc;
+    const t1 = -b + sqrtDisc;
+    const t = t0 > 1e-6 ? t0 : t1 > 1e-6 ? t1 : -1;
+    if (t <= 0) return false;
+
+    out.copy(this._rayOriginRel).addScaledVector(this._rayDirection, t).normalize();
+    return Number.isFinite(out.x) && Number.isFinite(out.y) && Number.isFinite(out.z);
   }
 
   private handlePan(event: PointerEvent): void {
@@ -257,8 +389,7 @@ export class CameraController {
     this._panStart.set(event.clientX, event.clientY);
 
     const height = Math.max(this.domElement.clientHeight, 1);
-    const distance = this.camera.position.distanceTo(this._target);
-    const worldPerPixel = (2 * distance * Math.tan((this.camera.fov * Math.PI) / 360)) / height;
+    const worldPerPixel = this.resolvePanWorldPerPixel(height);
 
     const panX = -dx * worldPerPixel * this.panSpeed;
     const panY = dy * worldPerPixel * this.panSpeed;
@@ -285,8 +416,57 @@ export class CameraController {
       this._zoomScale = 1;
     }
   }
+
+  private resolveDampedZoomRadius(radius: number, damping: number): number {
+    const safeMinDistance = Math.max(1, this.minDistance);
+    const minAltitude = 1e-3;
+    const altitude = Math.max(minAltitude, radius - safeMinDistance);
+    const altitudeScale = 1 + (this._zoomScale - 1) * damping;
+    const nextAltitude = altitude * Math.max(0.01, altitudeScale);
+    return safeMinDistance + nextAltitude;
+  }
+
+  private resolveNavigationAltitude(): number {
+    return Math.max(1e-3, this.camera.position.distanceTo(this._target) - Math.max(1, this.minDistance));
+  }
+
+  private resolveRotateScale(): number {
+    const altitude = this.resolveNavigationAltitude();
+    const reference = Math.max(1, this.rotateAltitudeReference);
+    return clampNumber(Math.sqrt(altitude / reference), this.minRotateScale, 1);
+  }
+
+  private resolveOrbitRadiansPerPixel(viewportHeight: number): number {
+    if (!this.lockTarget || this.orbitRadius <= 1) {
+      const rotateScale = this.resolveRotateScale();
+      return (2 * Math.PI * rotateScale) / Math.max(viewportHeight, 1);
+    }
+
+    const distance = Math.max(1, this.camera.position.distanceTo(this._target));
+    const fovRad = (this.camera.fov * Math.PI) / 180;
+    const projectedRadiusPx =
+      (Math.max(viewportHeight, 1) * this.orbitRadius) / (2 * distance * Math.tan(fovRad * 0.5));
+    const safeProjectedRadiusPx = clampNumber(projectedRadiusPx, viewportHeight * 0.35, viewportHeight * 4);
+    return 1 / safeProjectedRadiusPx;
+  }
+
+  private resolvePanWorldPerPixel(viewportHeight: number): number {
+    const altitude = this.resolveNavigationAltitude();
+    const distance = Math.max(altitude, this.minDistance * 0.0005);
+    const perspectiveMetersPerPixel =
+      (2 * distance * Math.tan((this.camera.fov * Math.PI) / 360)) / Math.max(viewportHeight, 1);
+    const zoom = altitudeToContinuousZoom(altitude);
+    const mercatorMetersPerPixel = (156543.03392804097 / 2 ** zoom) * this.panMercatorScale;
+    return Math.min(perspectiveMetersPerPixel, mercatorMetersPerPixel, this.maxPanMetersPerPixel);
+  }
 }
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function altitudeToContinuousZoom(altitudeMeters: number): number {
+  const earthCircumferenceMeters = 40_075_016.68557849;
+  const altitude = Math.max(0.001, altitudeMeters);
+  return clampNumber(Math.log2(earthCircumferenceMeters / Math.max(0.001, altitude)) - 1, 0, 29);
 }

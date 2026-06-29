@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { GeoCoordinator, Vec3 } from '../../geo/coords';
 import type { CameraController } from '../CameraController';
+import { GlobeRasterTileLayer, type GlobeRasterTileLayerOptions } from '../layers/GlobeRasterTileLayer';
 import type { ToolManager } from '../ToolManager';
 import { TerrainLayer, type TerrainLayerOptions } from '../terrain/TerrainLayer';
 import { PlanarLodGrid, type PlanarLodGridOptions } from './PlanarLodGrid';
@@ -13,11 +14,13 @@ import {
 export type PlanarValidationOptions = {
   frontLonDeg?: number;
   initialCameraHeight?: number;
+  minCameraAltitudeMeters?: number;
   planeSize?: number;
   hud?: boolean;
   lockCameraTargetToGlobeCenter?: boolean;
   lodGrid?: false | PlanarLodGridOptions;
   terrain?: false | TerrainLayerOptions;
+  globeImagery?: false | GlobeRasterTileLayerOptions;
   mapTiles?: false | PlanarMapTileLayerOptions;
 };
 
@@ -48,10 +51,13 @@ export class PlanarValidation {
   private readonly _globeProxy: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial>;
   private readonly _lodGrid: PlanarLodGrid | null;
   private readonly _terrain: TerrainLayer | null;
+  private readonly _globeImagery: GlobeRasterTileLayer | null;
   private readonly _mapTiles: PlanarMapTileLayer | null;
   private readonly _initialCameraHeight: number;
   private readonly _earthRadius: number;
   private readonly _globeRadius: number;
+  private readonly _interactionRadius: number;
+  private readonly _minCameraAltitudeMeters: number;
   private readonly _hudEnabled: boolean;
   private readonly _lockCameraTargetToGlobeCenter: boolean;
 
@@ -84,13 +90,23 @@ export class PlanarValidation {
       1,
       this._earthRadius - GLOBE_BASE_RADIUS_OFFSET_METERS / this._geo.metersPerUnit
     );
+    this._interactionRadius = this._earthRadius;
+    this._minCameraAltitudeMeters = Math.max(
+      0.001,
+      Number(options?.minCameraAltitudeMeters ?? MIN_CAMERA_ALTITUDE_METERS)
+    );
     this._hudEnabled = options?.hud ?? true;
     this._lockCameraTargetToGlobeCenter = options?.lockCameraTargetToGlobeCenter ?? true;
     if (this._cameraController && this._lockCameraTargetToGlobeCenter) {
       this._cameraController.lockTarget = true;
+      this._cameraController.orbitRadius = this._interactionRadius;
+      this._cameraController.horizontalDragOnly = false;
       this._cameraController.minDistance =
-        this._globeRadius + MIN_CAMERA_ALTITUDE_METERS / this._geo.metersPerUnit;
-      this._cameraController.maxDistance = Math.max(this._cameraController.maxDistance, this._globeRadius * 12);
+        this._interactionRadius + this._minCameraAltitudeMeters / this._geo.metersPerUnit;
+      this._cameraController.maxDistance = Math.max(
+        this._cameraController.maxDistance,
+        this._interactionRadius * 12
+      );
     }
     this._toolManager = context.toolManager;
     this._hudPanelId = this._hudEnabled ? 'planar-validation-hud' : null;
@@ -108,6 +124,7 @@ export class PlanarValidation {
     }
     this._root.add(createAxes());
     this._root.add(createDirectionArrows());
+    const anisotropy = Math.max(1, Math.min(8, this._renderer.capabilities.getMaxAnisotropy()));
 
     const terrainOptions: TerrainLayerOptions | undefined =
       options?.terrain === false ? undefined : options?.terrain;
@@ -117,12 +134,23 @@ export class PlanarValidation {
       this._terrain.setEnabled(true);
     }
 
+    this._globeImagery =
+      options?.globeImagery === false
+        ? null
+        : new GlobeRasterTileLayer(this._geo, {
+            maxAnisotropy: anisotropy,
+            ...(options?.globeImagery ?? {})
+          });
+    if (this._globeImagery) {
+      this._root.add(this._globeImagery.object3d);
+      this._globeImagery.setEnabled(true);
+    }
+
     this._lodGrid = options?.lodGrid === false ? null : new PlanarLodGrid(options?.lodGrid);
     if (this._lodGrid) {
       this._root.add(this._lodGrid.object3d);
     }
 
-    const anisotropy = Math.max(1, Math.min(8, this._renderer.capabilities.getMaxAnisotropy()));
     this._mapTiles =
       options?.mapTiles === false
         ? null
@@ -202,6 +230,7 @@ export class PlanarValidation {
 
     this._lodGrid?.update(focus.x, focus.y, cameraAltitude);
     this._terrain?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
+    this._globeImagery?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._mapTiles?.update(focus.x, focus.y, cameraDistance, viewRadius, viewportBounds);
 
     this.updateFps();
@@ -221,6 +250,7 @@ export class PlanarValidation {
 
     this._lodGrid?.dispose();
     this._terrain?.dispose();
+    this._globeImagery?.dispose();
     this._mapTiles?.dispose();
     if (this._toolManager && this._hudPanelId) this._toolManager.removePanel(this._hudPanelId);
     if (this._toolManager && this._fpsPanelId) this._toolManager.removePanel(this._fpsPanelId);
@@ -244,6 +274,7 @@ export class PlanarValidation {
       activeSteps: []
     };
     const terrain = this._terrain?.debugInfo;
+    const globeImagery = this._globeImagery?.debugInfo;
     const tile = this._mapTiles?.debugInfo;
     this._camera.getWorldDirection(this._tmpCameraDir);
     const headingDeg = normalizeDeg((Math.atan2(this._tmpCameraDir.x, this._tmpCameraDir.y) * 180) / Math.PI);
@@ -254,15 +285,26 @@ export class PlanarValidation {
       tile && tile.renderedZoomStats.length > 0
         ? tile.renderedZoomStats.map((item) => `z${item.zoom}:${item.count}`).join(',')
         : 'none';
+    const terrainRenderedLevelText =
+      terrain && terrain.renderedZoomStats.length > 0
+        ? terrain.renderedZoomStats.map((item) => `z${item.zoom}:${item.count}`).join(',')
+        : 'none';
+    const globeImageryRenderedLevelText =
+      globeImagery && globeImagery.renderedZoomStats.length > 0
+        ? globeImagery.renderedZoomStats.map((item) => `z${item.zoom}:${item.count}`).join(',')
+        : 'none';
 
     const terrainText = terrain
-      ? `terrainZoom=${terrain.zoom} centerTile=${terrain.centerX},${terrain.centerY} radius=${terrain.tileRadius} cache=${terrain.tileCount} ready=${terrain.readyCount} loading=${terrain.loadingCount} queued=${terrain.queuedCount} error=${terrain.errorCount}`
+      ? `terrainTiles z=${terrain.zoom} center=${terrain.centerX},${terrain.centerY} radius=${terrain.tileRadius} effectiveRadius=${terrain.effectiveTileRadius} requested=${terrain.requestedCount} cache=${terrain.tileCount} ready=${terrain.readyCount} loading=${terrain.loadingCount} queued=${terrain.queuedCount} error=${terrain.errorCount} fullCoverage=${terrain.fullCoverage ? 'yes' : 'no'} fullCoverageMaxZoom=${terrain.fullCoverageMaxZoom} coverageScale=${terrain.coverageScale.toFixed(2)} maxDynamicRadius=${terrain.maxDynamicTileRadius} readyByZoom=${terrainRenderedLevelText}`
       : 'terrain=disabled';
+    const globeImageryText = globeImagery
+      ? `globeImageryTiles z=${globeImagery.zoom} maxZoom=${globeImagery.maxZoom} center=${globeImagery.centerX},${globeImagery.centerY} radius=${globeImagery.tileRadius} effectiveRadius=${globeImagery.effectiveTileRadius} requested=${globeImagery.requestedCount} cache=${globeImagery.tileCount} ready=${globeImagery.readyCount} loading=${globeImagery.loadingCount} queued=${globeImagery.queuedCount} error=${globeImagery.errorCount} fullCoverage=${globeImagery.fullCoverage ? 'yes' : 'no'} fullCoverageMaxZoom=${globeImagery.fullCoverageMaxZoom} coverageScale=${globeImagery.coverageScale.toFixed(2)} maxDynamicRadius=${globeImagery.maxDynamicTileRadius} readyByZoom=${globeImageryRenderedLevelText}`
+      : 'globeImagery=disabled';
     const tileText =
       tile && tile.enabled
         ? `mapZoom=${tile.zoom} centerTile=${tile.centerX},${tile.centerY} radius=${tile.tileRadius} req=${tile.requestedCount} cache=${tile.tileCount} ready=${tile.readyCount} loading=${tile.loadingCount} queued=${tile.queuedCount} error=${tile.errorCount} rendered=${tile.renderedCount} renderedByZoom=${renderedLevelText}`
         : 'mapTiles=disabled';
-    const cameraText = `camPos=(${this._camera.position.x.toFixed(1)},${this._camera.position.y.toFixed(1)},${this._camera.position.z.toFixed(1)}) target=(${focus.x.toFixed(1)},${focus.y.toFixed(1)},${focus.z.toFixed(1)}) altitude=${cameraAltitude.toFixed(1)} rayDistance=${cameraDistance.toFixed(1)} dir=(${this._tmpCameraDir.x.toFixed(3)},${this._tmpCameraDir.y.toFixed(3)},${this._tmpCameraDir.z.toFixed(3)}) heading=${headingDeg.toFixed(1)} pitch=${pitchDeg.toFixed(1)} fov=${this._camera.fov.toFixed(1)} aspect=${this._camera.aspect.toFixed(3)} near=${this._camera.near.toFixed(2)} far=${this._camera.far.toFixed(0)}`;
+    const cameraText = `camPos=(${this._camera.position.x.toFixed(1)},${this._camera.position.y.toFixed(1)},${this._camera.position.z.toFixed(1)}) target=(${focus.x.toFixed(1)},${focus.y.toFixed(1)},${focus.z.toFixed(1)}) altitude=${cameraAltitude.toFixed(3)} minAltitude=${this._minCameraAltitudeMeters.toFixed(3)} rayDistance=${cameraDistance.toFixed(1)} dir=(${this._tmpCameraDir.x.toFixed(3)},${this._tmpCameraDir.y.toFixed(3)},${this._tmpCameraDir.z.toFixed(3)}) heading=${headingDeg.toFixed(1)} pitch=${pitchDeg.toFixed(1)} fov=${this._camera.fov.toFixed(1)} aspect=${this._camera.aspect.toFixed(3)} near=${this._camera.near.toFixed(2)} far=${this._camera.far.toFixed(0)}`;
 
     this._toolManager.setPanelLines(this._hudPanelId, [
       '3D terrain mode',
@@ -273,6 +315,7 @@ export class PlanarValidation {
         ? `baseStep=${lod.baseStep} activeSteps=${lod.activeSteps.join('/')}`
         : 'lodGrid=disabled',
       terrainText,
+      globeImageryText,
       tileText,
       '+X east | +Y north | R reset'
     ]);
@@ -288,6 +331,7 @@ export class PlanarValidation {
   private onTerrainToggle(_event: Event): void {
     if (!this._terrain) return;
     this._terrain.setEnabled(true);
+    this._globeImagery?.setEnabled(true);
     if (this._mapTiles) {
       this._mapTiles.setEnabled(false);
     }
@@ -328,7 +372,7 @@ export class PlanarValidation {
   }
 
   private enforceCameraOutsideGlobe(): void {
-    const minRadius = this._globeRadius + MIN_CAMERA_ALTITUDE_METERS / this._geo.metersPerUnit;
+    const minRadius = this._interactionRadius + this._minCameraAltitudeMeters / this._geo.metersPerUnit;
     const minRadiusSq = minRadius * minRadius;
     const cam = this._camera.position;
     const lenSq = cam.lengthSq();
@@ -343,7 +387,7 @@ export class PlanarValidation {
 
   private getCameraAltitudeToGlobe(): number {
     const radiusFromCenter = this._camera.position.length();
-    return Math.max(0, radiusFromCenter - this._globeRadius);
+    return Math.max(0, radiusFromCenter - this._interactionRadius);
   }
 
   private resolveFocusOnGlobe(cameraWorld: Vec3): THREE.Vector3 {
@@ -360,16 +404,16 @@ export class PlanarValidation {
     }
     this._tmpRayDir.normalize();
 
-    const hit = intersectRaySphere(rayOrigin, this._tmpRayDir, this._globeRadius);
+    const hit = intersectRaySphere(rayOrigin, this._tmpRayDir, this._interactionRadius);
     if (hit) {
       return hit;
     }
 
     this._tmpFallbackDir.set(cameraWorld.x, cameraWorld.y, cameraWorld.z);
     if (this._tmpFallbackDir.lengthSq() < 1e-6) {
-      this._tmpFallbackDir.set(0, this._globeRadius, 0);
+      this._tmpFallbackDir.set(0, this._interactionRadius, 0);
     } else {
-      this._tmpFallbackDir.setLength(this._globeRadius);
+      this._tmpFallbackDir.setLength(this._interactionRadius);
     }
     return this._tmpFallbackDir.clone();
   }
