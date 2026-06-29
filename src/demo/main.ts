@@ -5,39 +5,46 @@ if (!container) {
   throw new Error('Missing #app container');
 }
 
+const terrainRgbUrlTemplate = import.meta.env.VITE_SAG_TERRAIN_RGB_URL_TEMPLATE;
+const imageryUrlTemplate =
+  import.meta.env.VITE_SAG_IMAGERY_URL_TEMPLATE || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
 const viewer = new Viewer({
   container,
+  cameraController: {
+    target: { x: 0, y: 0, z: 0 },
+    lockTarget: true,
+    dampingFactor: 0.32,
+    minDampingDelta: 0.0005,
+    zoomSpeed: 0.75,
+    minPolarAngle: 0.02,
+    maxPolarAngle: Math.PI - 0.02
+  },
   planarValidation: {
     frontLonDeg: 0,
-    initialCameraHeight: 12_000,
+    initialCameraHeight: 2_800_000,
+    lockCameraTargetToGlobeCenter: true,
     lodGrid: false,
-    mapTiles: {
+    terrain: {
       enabled: true,
-      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      rgbUrlTemplate: terrainRgbUrlTemplate,
+      imageryUrlTemplate,
+      imageryYType: 'xyz',
+      imagerySubdomains: ['a', 'b', 'c'],
+      imageryOpacity: 1,
       minZoom: 0,
-      maxZoom: 18,
-      tileRadius: 3,
-      maxDynamicTileRadius: 10,
-      updateThrottleMs: 80,
-      zoomThrottleMs: 140,
-      immediateTileShift: 2,
-      lodLevels: [
-        { zoom: 18, maxTiles: 49, marginTiles: 1, updateThrottleMs: 100, zoomThrottleMs: 180 },
-        { zoom: 16, maxTiles: 64, marginTiles: 1, updateThrottleMs: 90, zoomThrottleMs: 160 },
-        { zoom: 14, maxTiles: 81, marginTiles: 1, updateThrottleMs: 80, zoomThrottleMs: 140 },
-        { zoom: 12, maxTiles: 100, marginTiles: 1, updateThrottleMs: 70, zoomThrottleMs: 120 },
-        { zoom: 10, maxTiles: 121, marginTiles: 2, updateThrottleMs: 60, zoomThrottleMs: 100 },
-        { zoom: 8, maxTiles: 144, marginTiles: 2, updateThrottleMs: 50, zoomThrottleMs: 90 },
-        { zoom: 6, maxTiles: 196, marginTiles: 3, updateThrottleMs: 40, zoomThrottleMs: 80 },
-        { zoom: 4, maxTiles: 256, marginTiles: 3, updateThrottleMs: 32, zoomThrottleMs: 64 }
-      ],
-      debugOverlay: true,
-      enableProgressiveBlend: false,
-      fadeDurationMs: 180,
-      maxParentSearchDepth: 6,
-      opacity: 1,
-      yType: 'xyz'
-    }
+      maxZoom: 13,
+      tileRadius: 2,
+      fullCoverageMaxZoom: 4,
+      maxConcurrentRequests: 12,
+      maxCachedTiles: 420,
+      tileSegments: 48,
+      exaggeration: 1.2,
+      zOffset: 0,
+      decodeMode: 'auto',
+      yType: 'tms'
+    },
+    mapTiles: false
   }
 });
 

@@ -146,7 +146,7 @@ export class PlanarMapTileLayer {
   private readonly _yType: 'xyz' | 'tms';
   private readonly _subdomains: readonly string[];
   private readonly _maxAnisotropy: number;
-  private readonly _enabled: boolean;
+  private _enabled: boolean;
   private readonly _maxConcurrentRequests: number;
   private readonly _maxCachedTiles: number;
   private readonly _retainFrames: number;
@@ -241,10 +241,24 @@ export class PlanarMapTileLayer {
 
     this._debugRoot.renderOrder = 50;
     this._root.add(this._debugRoot);
+    this._root.visible = this._enabled;
   }
 
   get object3d(): THREE.Object3D {
     return this._root;
+  }
+
+  get enabled(): boolean {
+    return this._enabled;
+  }
+
+  setEnabled(enabled: boolean): void {
+    this._enabled = enabled;
+    this._root.visible = enabled;
+    this._debugInfo = {
+      ...this._debugInfo,
+      enabled
+    };
   }
 
   get debugInfo(): PlanarMapTileDebugInfo {

@@ -1,5 +1,9 @@
 export { Viewer } from './engine/Viewer';
 export type { ViewerOptions } from './engine/Viewer';
+
+export { Engine } from './engine/Engine';
+export type { EngineOptions } from './engine/Engine';
+
 export { ToolManager } from './engine/ToolManager';
 export type {
   BuiltinToolId,
@@ -9,3 +13,28 @@ export type {
   ToolPanelStyle,
   ToolTriggerContext
 } from './engine/ToolManager';
+
+export { ImageryLayer } from './engine/layers/ImageryLayer';
+export type { LayerVisibility } from './engine/layers/ImageryLayer';
+export { LayerManager } from './engine/layers/LayerManager';
+
+export { TileCache } from './engine/tiles/TileCache';
+export { UrlTileProvider } from './engine/tiles/TileProvider';
+export type { TileCoord, TileProvider, UrlTileProviderOptions, TileYType } from './engine/tiles/TileProvider';
+export { TileScheduler } from './engine/tiles/TileScheduler';
+export type { ScheduledTileRequest } from './engine/tiles/TileScheduler';
+
+export { BaseView } from './engine/views/BaseView';
+export {
+  DEFAULT_VIEW_STATE,
+  heightToZoom,
+  normalizeViewState,
+  zoomToHeight
+} from './engine/views/BaseView';
+export type { ViewContext, ViewMode, ViewState, ViewStateInput } from './engine/views/BaseView';
+export { GlobeView3D } from './engine/views/GlobeView3D';
+export { MapView2D } from './engine/views/MapView2D';
+export { ViewManager } from './engine/views/ViewManager';
+export type { ViewChangeEvent, ViewChangeHandler } from './engine/views/ViewManager';
+
+export type { LonLatHeight, Vec3 } from './geo/coords';

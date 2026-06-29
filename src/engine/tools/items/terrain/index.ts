@@ -1,16 +1,22 @@
 import panelHtml from './TerrainTool.html?raw';
 import panelCss from './TerrainTool.css?raw';
-import { createIconDataUrl } from '../icon';
+import terrainIcon from '../../../../assets/img/toolIcons/terrain.svg';
 import type { ToolModule } from '../../types';
 
 export const terrainToolModule: ToolModule = {
   id: 'terrain-toggle',
   label: 'Terrain',
   order: 1,
-  iconUrl: createIconDataUrl('TR', '#0f766e'),
+  iconUrl: terrainIcon,
   hasPanel: false,
-  onTrigger: ({ isActive, setActive }) => {
-    setActive(!isActive);
+  onTrigger: ({ root, setActive }) => {
+    const enabled = true;
+    setActive(true);
+    root.dispatchEvent(
+      new CustomEvent('sag:terrain-toggle', {
+        detail: { enabled }
+      })
+    );
   },
   panelHtml,
   panelCss

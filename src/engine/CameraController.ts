@@ -6,13 +6,17 @@ export type CameraControllerOptions = {
   enabled?: boolean;
   enableDamping?: boolean;
   dampingFactor?: number;
+  minDampingDelta?: number;
   rotateSpeed?: number;
   panSpeed?: number;
   zoomSpeed?: number;
+  minZoomScale?: number;
+  maxZoomScale?: number;
   minDistance?: number;
   maxDistance?: number;
   minPolarAngle?: number;
   maxPolarAngle?: number;
+  lockTarget?: boolean;
 };
 
 type PointerAction = 'none' | 'rotate' | 'pan';
@@ -24,13 +28,17 @@ export class CameraController {
   enabled: boolean;
   enableDamping: boolean;
   dampingFactor: number;
+  minDampingDelta: number;
   rotateSpeed: number;
   panSpeed: number;
   zoomSpeed: number;
+  minZoomScale: number;
+  maxZoomScale: number;
   minDistance: number;
   maxDistance: number;
   minPolarAngle: number;
   maxPolarAngle: number;
+  lockTarget: boolean;
 
   private readonly _target = new THREE.Vector3();
   private readonly _spherical = new THREE.Spherical();
@@ -57,14 +65,19 @@ export class CameraController {
 
     this.enabled = options?.enabled ?? true;
     this.enableDamping = options?.enableDamping ?? true;
-    this.dampingFactor = options?.dampingFactor ?? 0.12;
+    this.dampingFactor = options?.dampingFactor ?? 0.28;
+    this.minDampingDelta = options?.minDampingDelta ?? 1e-5;
     this.rotateSpeed = options?.rotateSpeed ?? 1;
     this.panSpeed = options?.panSpeed ?? 1;
     this.zoomSpeed = options?.zoomSpeed ?? 1;
+    this.minZoomScale = options?.minZoomScale ?? 0.2;
+    this.maxZoomScale = options?.maxZoomScale ?? 5;
     this.minDistance = options?.minDistance ?? 1;
     this.maxDistance = options?.maxDistance ?? Number.POSITIVE_INFINITY;
     this.minPolarAngle = options?.minPolarAngle ?? 0;
     this.maxPolarAngle = options?.maxPolarAngle ?? Math.PI;
+    this.lockTarget = options?.lockTarget ?? false;
+    this.camera.up.set(0, 1, 0);
 
     if (options?.target) {
       this._target.set(options.target.x, options.target.y, options.target.z);
@@ -107,6 +120,13 @@ export class CameraController {
   }
 
   setTarget(target: Vec3): void {
+    if (
+      Math.abs(this._target.x - target.x) < 1e-6 &&
+      Math.abs(this._target.y - target.y) < 1e-6 &&
+      Math.abs(this._target.z - target.z) < 1e-6
+    ) {
+      return;
+    }
     this._target.set(target.x, target.y, target.z);
     this.syncSphericalFromCamera();
   }
@@ -131,10 +151,13 @@ export class CameraController {
     this._spherical.makeSafe();
     this._spherical.radius = Math.max(this.minDistance, Math.min(this.maxDistance, this._spherical.radius));
 
-    this._target.addScaledVector(this._panOffset, damping);
+    if (!this.lockTarget) {
+      this._target.addScaledVector(this._panOffset, damping);
+    }
 
     this._offset.setFromSpherical(this._spherical);
     this.camera.position.copy(this._target).add(this._offset);
+    this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this._target);
 
     if (this.enableDamping) {
@@ -143,6 +166,7 @@ export class CameraController {
       this._sphericalDelta.phi *= remain;
       this._panOffset.multiplyScalar(remain);
       this._zoomScale = 1 + (this._zoomScale - 1) * remain;
+      this.snapDampingResiduals();
     } else {
       this._sphericalDelta.theta = 0;
       this._sphericalDelta.phi = 0;
@@ -206,8 +230,9 @@ export class CameraController {
     if (!this.enabled) return;
     event.preventDefault();
 
-    const zoom = Math.exp(event.deltaY * 0.001 * this.zoomSpeed);
-    this._zoomScale *= zoom;
+    const normalizedDelta = clampNumber(event.deltaY, -240, 240);
+    const zoom = Math.exp(normalizedDelta * 0.001 * this.zoomSpeed);
+    this._zoomScale = clampNumber(this._zoomScale * zoom, this.minZoomScale, this.maxZoomScale);
   }
 
   private handleRotate(event: PointerEvent): void {
@@ -222,6 +247,11 @@ export class CameraController {
   }
 
   private handlePan(event: PointerEvent): void {
+    if (this.lockTarget) {
+      this._panStart.set(event.clientX, event.clientY);
+      return;
+    }
+
     const dx = event.clientX - this._panStart.x;
     const dy = event.clientY - this._panStart.y;
     this._panStart.set(event.clientX, event.clientY);
@@ -240,4 +270,23 @@ export class CameraController {
     this._panOffset.addScaledVector(this._right, panX);
     this._panOffset.addScaledVector(this._up, panY);
   }
+
+  private snapDampingResiduals(): void {
+    if (Math.abs(this._sphericalDelta.theta) < this.minDampingDelta) {
+      this._sphericalDelta.theta = 0;
+    }
+    if (Math.abs(this._sphericalDelta.phi) < this.minDampingDelta) {
+      this._sphericalDelta.phi = 0;
+    }
+    if (this._panOffset.lengthSq() < this.minDampingDelta * this.minDampingDelta) {
+      this._panOffset.set(0, 0, 0);
+    }
+    if (Math.abs(this._zoomScale - 1) < this.minDampingDelta) {
+      this._zoomScale = 1;
+    }
+  }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }

@@ -1,8 +1,11 @@
 ﻿import * as THREE from 'three';
 import { GeoCoordinator, type LonLatHeight, type Vec3, type Wgs84OriginInput } from '../geo/coords';
 import { CameraController, type CameraControllerOptions } from './CameraController';
+import { LayerManager } from './layers/LayerManager';
 import { ToolManager } from './ToolManager';
 import { PlanarValidation, type PlanarValidationOptions } from './validation/PlanarValidation';
+import type { ViewMode, ViewStateInput } from './views/BaseView';
+import { ViewManager } from './views/ViewManager';
 
 export type EngineOptions = {
   container: HTMLElement;
@@ -11,9 +14,16 @@ export type EngineOptions = {
   cameraFov?: number;
   cameraNear?: number;
   cameraFar?: number;
+  logarithmicDepthBuffer?: boolean;
   geo?: GeoCoordinator;
   cameraController?: false | CameraControllerOptions;
   planarValidation?: false | PlanarValidationOptions;
+  viewMode?: ViewMode;
+  viewState?: ViewStateInput;
+  floatingOrigin?: false | {
+    enabled?: boolean;
+    rebaseDistance?: number;
+  };
 };
 
 export class Engine {
@@ -22,6 +32,8 @@ export class Engine {
   readonly renderer: THREE.WebGLRenderer;
   readonly geo: GeoCoordinator;
   readonly worldRoot: THREE.Group;
+  readonly viewManager: ViewManager;
+  readonly layerManager: LayerManager;
   readonly cameraController: CameraController | null;
   readonly toolManager: ToolManager | null;
 
@@ -30,6 +42,8 @@ export class Engine {
   private _lastFrameTimeMs = 0;
   private readonly _updateHandlers = new Set<(dtSeconds: number, timeSeconds: number) => void>();
   private readonly _planarValidation: PlanarValidation | null;
+  private readonly _floatingOriginEnabled: boolean;
+  private readonly _floatingOriginRebaseDistance: number;
 
   constructor(options: EngineOptions) {
     const {
@@ -39,21 +53,36 @@ export class Engine {
       cameraFov = 60,
       cameraNear = 10,
       cameraFar = 80_000_000,
+      logarithmicDepthBuffer = true,
       geo,
       cameraController,
-      planarValidation
+      planarValidation,
+      viewMode,
+      viewState,
+      floatingOrigin
     } = options;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(cameraFov, 1, cameraNear, cameraFar);
     this.camera.position.set(0, 120, 240);
     this.geo = geo ?? new GeoCoordinator();
+    this.layerManager = new LayerManager();
+    const floatingOriginOptions = floatingOrigin === false ? undefined : floatingOrigin;
+    this._floatingOriginEnabled = floatingOriginOptions?.enabled ?? false;
+    this._floatingOriginRebaseDistance = Math.max(
+      1,
+      floatingOriginOptions?.rebaseDistance ?? 100_000
+    );
 
     this.worldRoot = new THREE.Group();
     this.scene.add(this.worldRoot);
     this.applyRenderOriginOffset();
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      logarithmicDepthBuffer
+    });
     this.renderer.setClearColor(clearColor, 1);
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(container.clientWidth, container.clientHeight);
@@ -62,6 +91,19 @@ export class Engine {
       cameraController === false
         ? null
         : new CameraController(this.camera, this.renderer.domElement, cameraController);
+    this.viewManager = new ViewManager({
+      context: {
+        scene: this.scene,
+        worldRoot: this.worldRoot,
+        camera: this.camera,
+        renderer: this.renderer,
+        geo: this.geo,
+        layers: this.layerManager,
+        cameraController: this.cameraController
+      },
+      mode: viewMode,
+      state: viewState
+    });
     this.toolManager = typeof document !== 'undefined' ? new ToolManager({ root: document.body }) : null;
 
     container.appendChild(this.renderer.domElement);
@@ -97,10 +139,14 @@ export class Engine {
       this._lastFrameTimeMs = nowMs;
 
       this.cameraController?.update();
+      if (this._floatingOriginEnabled && this.shouldRebaseRenderOrigin()) {
+        this.rebaseRenderOriginToCamera();
+      }
 
       for (const handler of this._updateHandlers) {
         handler(dtSeconds, nowMs / 1000);
       }
+      this.viewManager.update(dtSeconds, nowMs / 1000);
       this._planarValidation?.update(this.getCameraWorldPosition());
 
       this.renderer.render(this.scene, this.camera);
@@ -123,6 +169,7 @@ export class Engine {
       this._onResize = null;
     }
     this._planarValidation?.dispose();
+    this.viewManager.dispose();
     this.toolManager?.dispose();
     this.cameraController?.dispose();
     this.renderer.dispose();
@@ -134,6 +181,14 @@ export class Engine {
 
   addWorldObject(object: THREE.Object3D): void {
     this.worldRoot.add(object);
+  }
+
+  setViewMode(mode: ViewMode, state?: ViewStateInput): void {
+    this.viewManager.setMode(mode, state);
+  }
+
+  setViewState(state: ViewStateInput): void {
+    this.viewManager.setViewState(state);
   }
 
   addUpdateHandler(handler: (dtSeconds: number, timeSeconds: number) => void): () => void {
@@ -193,6 +248,10 @@ export class Engine {
   rebaseRenderOriginToCamera(): Vec3 {
     const cameraWorld = this.getCameraWorldPosition();
     return this.setRenderOrigin(cameraWorld, true);
+  }
+
+  private shouldRebaseRenderOrigin(): boolean {
+    return this.camera.position.length() > this._floatingOriginRebaseDistance;
   }
 
   private addDefaultLights(): void {

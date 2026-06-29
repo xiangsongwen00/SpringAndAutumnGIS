@@ -266,7 +266,6 @@ export class ToolManager {
         setActive(!currentActive);
       }
 
-      this.closeToolPopup();
       return;
     }
 
