@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import { BaseView, zoomToHeight, type ViewContext, type ViewState } from './BaseView';
 
 export class MapView2D extends BaseView {
@@ -8,16 +7,24 @@ export class MapView2D extends BaseView {
 
   override applyViewState(state: ViewState): void {
     const { camera, cameraController, geo } = this.context;
-    const target = geo.wgs84ToThree(state.centerLat, state.centerLon, 0);
-    const normal = new THREE.Vector3(target.x, target.y, target.z).normalize();
+    const center = geo.lonLatToWebMercator(state.centerLon, state.centerLat);
+    const target = {
+      x: center.x / geo.metersPerUnit,
+      y: center.y / geo.metersPerUnit,
+      z: 0
+    };
     const heightMeters = state.height > 0 ? state.height : zoomToHeight(state.zoom);
-    const position = new THREE.Vector3(target.x, target.y, target.z).addScaledVector(
-      normal,
-      Math.max(1, heightMeters) / geo.metersPerUnit
-    );
+    const heightWorld = Math.max(1, heightMeters) / geo.metersPerUnit;
 
-    camera.position.copy(position);
+    camera.up.set(0, 1, 0);
+    camera.position.set(target.x, target.y, heightWorld);
     camera.lookAt(target.x, target.y, target.z);
-    cameraController?.setTarget(target);
+    if (cameraController) {
+      cameraController.lockTarget = false;
+      cameraController.orbitRadius = 1;
+      cameraController.horizontalDragOnly = true;
+      cameraController.minDistance = 1;
+      cameraController.setTarget(target);
+    }
   }
 }
