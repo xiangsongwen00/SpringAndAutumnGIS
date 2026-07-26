@@ -29,6 +29,12 @@ export type { TileCoord, TileProvider, UrlTileProviderOptions, TileYType } from 
 export { TileScheduler } from './engine/tiles/TileScheduler';
 export type { ScheduledTileRequest } from './engine/tiles/TileScheduler';
 
+export { GlobeLodGrid } from './engine/validation/GlobeLodGrid';
+export type {
+  GlobeLodGridDebugInfo,
+  GlobeLodGridOptions
+} from './engine/validation/GlobeLodGrid';
+
 export { BaseView } from './engine/views/BaseView';
 export {
   DEFAULT_VIEW_STATE,

@@ -5,6 +5,7 @@ import { GlobeRasterTileLayer, type GlobeRasterTileLayerOptions } from '../layer
 import type { ToolManager } from '../ToolManager';
 import type { ViewMode } from '../views/BaseView';
 import { TerrainLayer, type TerrainLayerOptions } from '../terrain/TerrainLayer';
+import { GlobeLodGrid, type GlobeLodGridOptions } from './GlobeLodGrid';
 import { PlanarLodGrid, type PlanarLodGridOptions } from './PlanarLodGrid';
 import {
   PlanarMapTileLayer,
@@ -19,6 +20,7 @@ export type PlanarValidationOptions = {
   planeSize?: number;
   hud?: boolean;
   lockCameraTargetToGlobeCenter?: boolean;
+  globeLod?: false | GlobeLodGridOptions;
   lodGrid?: false | PlanarLodGridOptions;
   terrain?: false | TerrainLayerOptions;
   globeImagery?: false | GlobeRasterTileLayerOptions;
@@ -39,7 +41,7 @@ const DEFAULT_PLANE_SIZE = 240_000;
 const DEFAULT_VIEW_DISTANCE = 2_800_000;
 const MAX_VIEWPORT_EXTENT = 20_000_000;
 const MIN_CAMERA_ALTITUDE_METERS = 2_000;
-const GLOBE_BASE_RADIUS_OFFSET_METERS = 15_000;
+const GLOBE_BASE_INSET_METERS = 3_000;
 
 export class PlanarValidation {
   private readonly _renderer: THREE.WebGLRenderer;
@@ -50,13 +52,13 @@ export class PlanarValidation {
   private readonly _setRenderOrigin: (threeWorld: Vec3, keepWorldCamera?: boolean) => Vec3;
   private readonly _root = new THREE.Group();
   private readonly _globeProxy: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial>;
+  private readonly _globeLod: GlobeLodGrid | null;
   private readonly _lodGrid: PlanarLodGrid | null;
   private readonly _terrain: TerrainLayer | null;
   private readonly _globeImagery: GlobeRasterTileLayer | null;
   private readonly _mapTiles: PlanarMapTileLayer | null;
   private readonly _initialCameraHeight: number;
   private readonly _earthRadius: number;
-  private readonly _globeRadius: number;
   private readonly _interactionRadius: number;
   private readonly _minCameraAltitudeMeters: number;
   private readonly _hudEnabled: boolean;
@@ -88,10 +90,6 @@ export class PlanarValidation {
     this._setRenderOrigin = context.setRenderOrigin;
     this._initialCameraHeight = options?.initialCameraHeight ?? DEFAULT_VIEW_DISTANCE;
     this._earthRadius = this._geo.earthRadiusInThreeUnits();
-    this._globeRadius = Math.max(
-      1,
-      this._earthRadius - GLOBE_BASE_RADIUS_OFFSET_METERS / this._geo.metersPerUnit
-    );
     this._interactionRadius = this._earthRadius;
     this._minCameraAltitudeMeters = Math.max(
       0.001,
@@ -117,8 +115,15 @@ export class PlanarValidation {
 
     this._geo.setFrontLonDeg(options?.frontLonDeg ?? 0);
     this._setRenderOrigin({ x: 0, y: 0, z: 0 }, false);
-    this._globeProxy = createGlobeProxy(this._globeRadius);
+    this._globeProxy = createGlobeProxy(this._earthRadius, this._geo.metersPerUnit);
     this._root.add(this._globeProxy);
+
+    this._globeLod =
+      options?.globeLod === false ? null : new GlobeLodGrid(this._geo, options?.globeLod);
+    if (this._globeLod) {
+      this._root.add(this._globeLod.object3d);
+      this._globeLod.setEnabled(true);
+    }
 
     const planeSize = options?.planeSize ?? DEFAULT_PLANE_SIZE;
     if (options?.terrain === false && options?.mapTiles === false) {
@@ -128,20 +133,20 @@ export class PlanarValidation {
     this._root.add(createDirectionArrows());
     const anisotropy = Math.max(1, Math.min(8, this._renderer.capabilities.getMaxAnisotropy()));
 
-    const terrainOptions: TerrainLayerOptions | undefined =
-      options?.terrain === false ? undefined : options?.terrain;
-    this._terrain = options?.terrain === false ? null : new TerrainLayer(this._geo, terrainOptions);
+    const terrainOptions: TerrainLayerOptions | null =
+      options?.terrain === undefined || options.terrain === false ? null : options.terrain;
+    this._terrain = terrainOptions ? new TerrainLayer(this._geo, terrainOptions) : null;
     if (this._terrain) {
       this._root.add(this._terrain.object3d);
       this._terrain.setEnabled(true);
     }
 
     this._globeImagery =
-      options?.globeImagery === false
+      options?.globeImagery === undefined || options.globeImagery === false
         ? null
         : new GlobeRasterTileLayer(this._geo, {
             maxAnisotropy: anisotropy,
-            ...(options?.globeImagery ?? {})
+            ...options.globeImagery
           });
     if (this._globeImagery) {
       this._root.add(this._globeImagery.object3d);
@@ -183,6 +188,7 @@ export class PlanarValidation {
     const isGlobe = mode === '3d';
 
     this._globeProxy.visible = isGlobe;
+    this._globeLod?.setEnabled(isGlobe);
     this._terrain?.setEnabled(isGlobe);
     this._globeImagery?.setEnabled(isGlobe);
     this._mapTiles?.setEnabled(!isGlobe);
@@ -258,6 +264,7 @@ export class PlanarValidation {
     const viewportBounds = mapEnabled ? this.computeViewportBoundsOnZ0() : null;
 
     this._lodGrid?.update(focus.x, focus.y, cameraAltitude);
+    this._globeLod?.update(this._camera, this._renderer.domElement.clientHeight);
     this._terrain?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._globeImagery?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._mapTiles?.update(focus.x, focus.y, cameraDistance, viewRadius, viewportBounds);
@@ -305,6 +312,7 @@ export class PlanarValidation {
     }
 
     this._lodGrid?.dispose();
+    this._globeLod?.dispose();
     this._terrain?.dispose();
     this._globeImagery?.dispose();
     this._mapTiles?.dispose();
@@ -334,6 +342,7 @@ export class PlanarValidation {
     };
     const terrain = this._terrain?.debugInfo;
     const globeImagery = this._globeImagery?.debugInfo;
+    const globeLod = this._globeLod?.debugInfo;
     const tile = this._mapTiles?.debugInfo;
     this._camera.getWorldDirection(this._tmpCameraDir);
     const headingDeg = normalizeDeg((Math.atan2(this._tmpCameraDir.x, this._tmpCameraDir.y) * 180) / Math.PI);
@@ -359,6 +368,12 @@ export class PlanarValidation {
     const globeImageryText = globeImagery
       ? `globeImageryTiles z=${globeImagery.zoom} maxZoom=${globeImagery.maxZoom} center=${globeImagery.centerX},${globeImagery.centerY} radius=${globeImagery.tileRadius} effectiveRadius=${globeImagery.effectiveTileRadius} requested=${globeImagery.requestedCount} cache=${globeImagery.tileCount} ready=${globeImagery.readyCount} loading=${globeImagery.loadingCount} queued=${globeImagery.queuedCount} error=${globeImagery.errorCount} fullCoverage=${globeImagery.fullCoverage ? 'yes' : 'no'} fullCoverageMaxZoom=${globeImagery.fullCoverageMaxZoom} coverageScale=${globeImagery.coverageScale.toFixed(2)} maxDynamicRadius=${globeImagery.maxDynamicTileRadius} readyByZoom=${globeImageryRenderedLevelText}`
       : 'globeImagery=disabled';
+    const globeLodLevels = globeLod && globeLod.levels.length > 0
+      ? globeLod.levels.map((item) => `L${item.level}:${item.count}`).join(',')
+      : 'none';
+    const globeLodText = globeLod?.enabled
+      ? `globeLod selected=${globeLod.selectedCount} tested=${globeLod.testedCount} culled=${globeLod.culledCount} triangles=${globeLod.triangleCount} rebuilds=${globeLod.geometryRebuilds} levels=${globeLodLevels}`
+      : 'globeLod=disabled';
     const tileText =
       tile && tile.enabled
         ? `mapZoom=${tile.zoom} centerTile=${tile.centerX},${tile.centerY} radius=${tile.tileRadius} req=${tile.requestedCount} cache=${tile.tileCount} ready=${tile.readyCount} loading=${tile.loadingCount} queued=${tile.queuedCount} error=${tile.errorCount} rendered=${tile.renderedCount} renderedByZoom=${renderedLevelText}`
@@ -366,13 +381,14 @@ export class PlanarValidation {
     const cameraText = `camPos=(${this._camera.position.x.toFixed(1)},${this._camera.position.y.toFixed(1)},${this._camera.position.z.toFixed(1)}) target=(${focus.x.toFixed(1)},${focus.y.toFixed(1)},${focus.z.toFixed(1)}) altitude=${cameraAltitude.toFixed(3)} minAltitude=${this._minCameraAltitudeMeters.toFixed(3)} rayDistance=${cameraDistance.toFixed(1)} dir=(${this._tmpCameraDir.x.toFixed(3)},${this._tmpCameraDir.y.toFixed(3)},${this._tmpCameraDir.z.toFixed(3)}) heading=${headingDeg.toFixed(1)} pitch=${pitchDeg.toFixed(1)} fov=${this._camera.fov.toFixed(1)} aspect=${this._camera.aspect.toFixed(3)} near=${this._camera.near.toFixed(2)} far=${this._camera.far.toFixed(0)}`;
 
     this._toolManager.setPanelLines(this._hudPanelId, [
-      this._viewMode === '3d' ? '3D terrain mode' : '2D Web Mercator mode',
+      this._viewMode === '3d' ? '3D globe LOD mode' : '2D Web Mercator mode',
       `focus lon=${focusLonLat.lon.toFixed(5)} lat=${focusLonLat.lat.toFixed(5)} z=${focus.z.toFixed(1)}`,
       `focus=(${lod.focusX.toFixed(1)},${lod.focusY.toFixed(1)},${focus.z.toFixed(1)}) cameraAltitude=${lod.cameraHeight.toFixed(1)}`,
       cameraText,
       this._lodGrid
         ? `baseStep=${lod.baseStep} activeSteps=${lod.activeSteps.join('/')}`
         : 'lodGrid=disabled',
+      globeLodText,
       terrainText,
       globeImageryText,
       tileText,
@@ -390,8 +406,9 @@ export class PlanarValidation {
   }
 
   private onTerrainToggle(_event: Event): void {
-    if (!this._terrain || this._viewMode !== '3d') return;
-    this._terrain.setEnabled(true);
+    if (this._viewMode !== '3d') return;
+    this._globeLod?.setEnabled(true);
+    this._terrain?.setEnabled(true);
     this._globeImagery?.setEnabled(true);
     if (this._mapTiles) {
       this._mapTiles.setEnabled(false);
@@ -608,13 +625,18 @@ function createDirectionArrows(): THREE.Group {
   return group;
 }
 
-function createGlobeProxy(radius: number): THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial> {
+function createGlobeProxy(
+  earthRadius: number,
+  metersPerUnit: number
+): THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial> {
+  const flattening = 1 / 298.257223563;
+  const radius = Math.max(1, earthRadius - GLOBE_BASE_INSET_METERS / metersPerUnit);
   const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 192, 128),
+    new THREE.SphereGeometry(radius, 128, 96),
     new THREE.MeshPhongMaterial({
-      color: 0x1e40af,
-      emissive: 0x0a1a44,
-      shininess: 20,
+      color: 0x092a38,
+      emissive: 0x03141c,
+      shininess: 8,
       transparent: false,
       opacity: 1,
       depthWrite: true,
@@ -624,6 +646,7 @@ function createGlobeProxy(radius: number): THREE.Mesh<THREE.SphereGeometry, THRE
       polygonOffsetUnits: 1
     })
   );
+  mesh.scale.set(1, 1 - flattening, 1);
   mesh.visible = true;
   mesh.renderOrder = -10;
   return mesh;
