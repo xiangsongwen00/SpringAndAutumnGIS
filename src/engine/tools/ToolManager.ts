@@ -369,9 +369,14 @@ export class ToolManager {
     if (existing) return;
 
     const style = document.createElement('style');
-    style.dataset.styleId = styleId;
+    style.dataset.sagStyleId = styleId;
     style.textContent = cssText;
-    document.head.appendChild(style);
+    const rootNode = this._root.getRootNode();
+    const styleHost =
+      typeof ShadowRoot !== 'undefined' && rootNode instanceof ShadowRoot
+        ? rootNode
+        : document.head;
+    styleHost.appendChild(style);
     this._toolStyles.set(styleId, style);
   }
 
