@@ -115,11 +115,17 @@ export class PlanarValidation {
 
     this._geo.setFrontLonDeg(options?.frontLonDeg ?? 0);
     this._setRenderOrigin({ x: 0, y: 0, z: 0 }, false);
+    const anisotropy = Math.max(1, Math.min(8, this._renderer.capabilities.getMaxAnisotropy()));
     this._globeProxy = createGlobeProxy(this._earthRadius, this._geo.metersPerUnit);
     this._root.add(this._globeProxy);
 
     this._globeLod =
-      options?.globeLod === false ? null : new GlobeLodGrid(this._geo, options?.globeLod);
+      options?.globeLod === false
+        ? null
+        : new GlobeLodGrid(this._geo, {
+            maxAnisotropy: anisotropy,
+            ...options?.globeLod
+          });
     if (this._globeLod) {
       this._root.add(this._globeLod.object3d);
       this._globeLod.setEnabled(true);
@@ -131,8 +137,6 @@ export class PlanarValidation {
     }
     this._root.add(createAxes());
     this._root.add(createDirectionArrows());
-    const anisotropy = Math.max(1, Math.min(8, this._renderer.capabilities.getMaxAnisotropy()));
-
     const terrainOptions: TerrainLayerOptions | null =
       options?.terrain === undefined || options.terrain === false ? null : options.terrain;
     this._terrain = terrainOptions ? new TerrainLayer(this._geo, terrainOptions) : null;
@@ -372,7 +376,7 @@ export class PlanarValidation {
       ? globeLod.levels.map((item) => `L${item.level}:${item.count}`).join(',')
       : 'none';
     const globeLodText = globeLod?.enabled
-      ? `globeLod selected=${globeLod.selectedCount} tested=${globeLod.testedCount} culled=${globeLod.culledCount} triangles=${globeLod.triangleCount} rebuilds=${globeLod.geometryRebuilds} levels=${globeLodLevels}`
+      ? `globeLod selected=${globeLod.selectedCount} tested=${globeLod.testedCount} culled=${globeLod.culledCount} triangles=${globeLod.triangleCount} rebuilds=${globeLod.geometryRebuilds} ready=${globeLod.readyCount} loading=${globeLod.loadingCount} queued=${globeLod.queuedCount} error=${globeLod.errorCount} fallback=${globeLod.fallbackCount} levels=${globeLodLevels}`
       : 'globeLod=disabled';
     const tileText =
       tile && tile.enabled

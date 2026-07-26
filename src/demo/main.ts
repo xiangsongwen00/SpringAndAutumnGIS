@@ -6,6 +6,9 @@ if (!container) {
 }
 
 const demoCenter = { lon: 105.7184, lat: 28.0564, height: 0 };
+const imageryUrlTemplate =
+  import.meta.env.VITE_SAG_IMAGERY_URL_TEMPLATE ||
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 const viewer = new Viewer({
   container,
@@ -44,17 +47,22 @@ const viewer = new Viewer({
     lockCameraTargetToGlobeCenter: true,
     globeLod: {
       minLevel: 1,
-      maxLevel: 9,
-      targetTilePixels: 180,
+      maxLevel: 6,
+      targetTilePixels: 220,
       collapseHysteresis: 0.72,
-      maxVisibleTiles: 384,
-      tileSegments: 4,
+      maxVisibleTiles: 192,
+      tileSegments: 6,
       maxTileSegments: 32,
       surfaceOffsetMeters: 30,
       lineOffsetMeters: 150,
       horizonPaddingDeg: 1.5,
       fillOpacity: 1,
-      gridOpacity: 0.82
+      gridOpacity: 0.5,
+      showGrid: true,
+      imageryUrlTemplate,
+      imageryYType: 'xyz',
+      maxConcurrentRequests: 8,
+      maxCachedTiles: 384
     },
     lodGrid: false,
     terrain: false,
@@ -82,7 +90,7 @@ const setMode = (mode: '2d' | '3d'): void => {
   description.textContent =
     mode === '2d'
       ? 'MapView2D · Web Mercator / 无影像调试平面'
-      : 'GlobeView3D · WGS84 椭球 / Cube-sphere LOD 网格';
+      : 'GlobeView3D · WGS84 椭球 / Web Mercator XYZ 瓦片 · © OpenStreetMap contributors';
 };
 
 view2dButton.addEventListener('click', () => setMode('2d'));
