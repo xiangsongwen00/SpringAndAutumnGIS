@@ -1,31 +1,39 @@
 ﻿<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SpringAndAutumnGIS Demo</title>
-    <style>
-      html, body, #app { height: 100%; margin: 0; }
-      #app { background: #0d1117; }
-      .hud {
-        position: absolute;
-        top: 12px;
-        left: 12px;
-        color: #60a5fa;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        font-size: 12px;
-        line-height: 1.45;
-        padding: 8px 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(59, 130, 246, 0.55);
-        background: rgba(0, 0, 0, 0.62);
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
-        pointer-events: none;
-      }
-    </style>
+    <meta name="theme-color" content="#07111d" />
+    <title>SpringAndAutumnGIS · 2D / 3D Engine</title>
+    <!-- 显式加载，避免依赖 JS 运行时注入 Demo 样式。 -->
+    <link rel="stylesheet" href="/src/demo/demo.css" />
   </head>
   <body>
     <div id="app"></div>
+    <header class="demo-header">
+      <div>
+        <span class="demo-eyebrow">SPRING AND AUTUMN GIS</span>
+        <h1>统一 GIS Core · 双视图渲染</h1>
+      </div>
+      <div class="demo-mode-switch" role="group" aria-label="视图模式">
+        <button id="view-2d" type="button">2D 平面</button>
+        <button id="view-3d" class="is-active" type="button">3D 地球</button>
+      </div>
+    </header>
+    <aside class="demo-panel">
+      <h2>坐标链路</h2>
+      <dl>
+        <dt>WGS84</dt>
+        <dd id="coord-wgs84">105.7184, 28.0564</dd>
+        <dt>ECEF</dt>
+        <dd id="coord-ecef">—</dd>
+        <dt>Mercator</dt>
+        <dd id="coord-mercator">—</dd>
+        <dt>Tile z12</dt>
+        <dd id="coord-tile">—</dd>
+      </dl>
+      <p id="view-description">GlobeView3D · WGS84 / ECEF / 地形表面</p>
+    </aside>
     <div class="hud">SpringAndAutumnGIS demo</div>
     <script type="module" src="/src/demo/main.ts"></script>
   </body>

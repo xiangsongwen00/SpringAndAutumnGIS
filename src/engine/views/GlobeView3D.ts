@@ -32,8 +32,16 @@ export class GlobeView3D extends BaseView {
       .addScaledVector(normal, heightWorld)
       .addScaledVector(headingDir, horizontalWorld);
 
+    camera.up.copy(normal);
     camera.position.copy(position);
     camera.lookAt(0, 0, 0);
-    cameraController?.setTarget({ x: 0, y: 0, z: 0 });
+    if (cameraController) {
+      cameraController.lockTarget = true;
+      cameraController.orbitRadius = geo.earthRadiusInThreeUnits();
+      cameraController.horizontalDragOnly = false;
+      cameraController.minDistance =
+        geo.earthRadiusInThreeUnits() + Math.max(0.1, 2_000 / geo.metersPerUnit);
+      cameraController.setTarget({ x: 0, y: 0, z: 0 });
+    }
   }
 }
