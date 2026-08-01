@@ -21,6 +21,12 @@ export type {
   GlobeRasterTileLayerDebugInfo,
   GlobeRasterTileLayerOptions
 } from './engine/layers/GlobeRasterTileLayer';
+export { GlobeVectorTileLayer } from './engine/layers/GlobeVectorTileLayer';
+export type {
+  GlobeVectorTileLayerDebugInfo,
+  GlobeVectorTileLayerOptions,
+  VectorTileStyle
+} from './engine/layers/GlobeVectorTileLayer';
 export { LayerManager } from './engine/layers/LayerManager';
 
 export { TileCache } from './engine/tiles/TileCache';

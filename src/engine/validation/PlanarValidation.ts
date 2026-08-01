@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { GeoCoordinator, Vec3 } from '../../geo/coords';
 import type { CameraController } from '../CameraController';
 import { GlobeRasterTileLayer, type GlobeRasterTileLayerOptions } from '../layers/GlobeRasterTileLayer';
+import { GlobeVectorTileLayer, type GlobeVectorTileLayerOptions } from '../layers/GlobeVectorTileLayer';
 import type { ToolManager } from '../ToolManager';
 import { TerrainLayer, type TerrainLayerOptions } from '../terrain/TerrainLayer';
 import { PlanarLodGrid, type PlanarLodGridOptions } from './PlanarLodGrid';
@@ -21,6 +22,8 @@ export type PlanarValidationOptions = {
   lodGrid?: false | PlanarLodGridOptions;
   terrain?: false | TerrainLayerOptions;
   globeImagery?: false | GlobeRasterTileLayerOptions;
+  vectorTiles?: false | GlobeVectorTileLayerOptions;
+  vectorTileTestUrl?: string;
   mapTiles?: false | PlanarMapTileLayerOptions;
 };
 
@@ -52,6 +55,7 @@ export class PlanarValidation {
   private readonly _lodGrid: PlanarLodGrid | null;
   private readonly _terrain: TerrainLayer | null;
   private readonly _globeImagery: GlobeRasterTileLayer | null;
+  private _vectorTiles: GlobeVectorTileLayer | null;
   private readonly _mapTiles: PlanarMapTileLayer | null;
   private readonly _initialCameraHeight: number;
   private readonly _earthRadius: number;
@@ -60,6 +64,7 @@ export class PlanarValidation {
   private readonly _minCameraAltitudeMeters: number;
   private readonly _hudEnabled: boolean;
   private readonly _lockCameraTargetToGlobeCenter: boolean;
+  private readonly _vectorTileTestUrl: string;
 
   private readonly _toolManager: ToolManager | null;
   private readonly _hudPanelId: string | null;
@@ -97,6 +102,7 @@ export class PlanarValidation {
     );
     this._hudEnabled = options?.hud ?? true;
     this._lockCameraTargetToGlobeCenter = options?.lockCameraTargetToGlobeCenter ?? true;
+    this._vectorTileTestUrl = options?.vectorTileTestUrl ?? '';
     if (this._cameraController && this._lockCameraTargetToGlobeCenter) {
       this._cameraController.lockTarget = true;
       this._cameraController.orbitRadius = this._interactionRadius;
@@ -144,6 +150,15 @@ export class PlanarValidation {
     if (this._globeImagery) {
       this._root.add(this._globeImagery.object3d);
       this._globeImagery.setEnabled(true);
+    }
+
+    this._vectorTiles =
+      options?.vectorTiles === false || !options?.vectorTiles
+        ? null
+        : new GlobeVectorTileLayer(this._geo, options.vectorTiles);
+    if (this._vectorTiles) {
+      this._root.add(this._vectorTiles.object3d);
+      this._vectorTiles.setEnabled(true);
     }
 
     this._lodGrid = options?.lodGrid === false ? null : new PlanarLodGrid(options?.lodGrid);
@@ -231,6 +246,7 @@ export class PlanarValidation {
     this._lodGrid?.update(focus.x, focus.y, cameraAltitude);
     this._terrain?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._globeImagery?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
+    this._vectorTiles?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._mapTiles?.update(focus.x, focus.y, cameraDistance, viewRadius, viewportBounds);
 
     this.updateFps();
@@ -251,6 +267,7 @@ export class PlanarValidation {
     this._lodGrid?.dispose();
     this._terrain?.dispose();
     this._globeImagery?.dispose();
+    this._vectorTiles?.dispose();
     this._mapTiles?.dispose();
     if (this._toolManager && this._hudPanelId) this._toolManager.removePanel(this._hudPanelId);
     if (this._toolManager && this._fpsPanelId) this._toolManager.removePanel(this._fpsPanelId);
@@ -276,6 +293,7 @@ export class PlanarValidation {
     const terrain = this._terrain?.debugInfo;
     const globeImagery = this._globeImagery?.debugInfo;
     const tile = this._mapTiles?.debugInfo;
+    const vt = this._vectorTiles?.debugInfo;
     this._camera.getWorldDirection(this._tmpCameraDir);
     const headingDeg = normalizeDeg((Math.atan2(this._tmpCameraDir.x, this._tmpCameraDir.y) * 180) / Math.PI);
     const pitchDeg = (Math.asin(clampNumber(this._tmpCameraDir.z, -1, 1)) * 180) / Math.PI;
@@ -304,6 +322,9 @@ export class PlanarValidation {
       tile && tile.enabled
         ? `mapZoom=${tile.zoom} centerTile=${tile.centerX},${tile.centerY} radius=${tile.tileRadius} req=${tile.requestedCount} cache=${tile.tileCount} ready=${tile.readyCount} loading=${tile.loadingCount} queued=${tile.queuedCount} error=${tile.errorCount} rendered=${tile.renderedCount} renderedByZoom=${renderedLevelText}`
         : 'mapTiles=disabled';
+    const vtText = vt
+      ? `vectorTiles z=${vt.zoom} tiles=${vt.loadedTiles}/${vt.tileCount} features=${vt.featureCount} errors=${vt.errorCount}`
+      : 'vectorTiles=disabled';
     const cameraText = `camPos=(${this._camera.position.x.toFixed(1)},${this._camera.position.y.toFixed(1)},${this._camera.position.z.toFixed(1)}) target=(${focus.x.toFixed(1)},${focus.y.toFixed(1)},${focus.z.toFixed(1)}) altitude=${cameraAltitude.toFixed(3)} minAltitude=${this._minCameraAltitudeMeters.toFixed(3)} rayDistance=${cameraDistance.toFixed(1)} dir=(${this._tmpCameraDir.x.toFixed(3)},${this._tmpCameraDir.y.toFixed(3)},${this._tmpCameraDir.z.toFixed(3)}) heading=${headingDeg.toFixed(1)} pitch=${pitchDeg.toFixed(1)} fov=${this._camera.fov.toFixed(1)} aspect=${this._camera.aspect.toFixed(3)} near=${this._camera.near.toFixed(2)} far=${this._camera.far.toFixed(0)}`;
 
     this._toolManager.setPanelLines(this._hudPanelId, [
@@ -316,16 +337,39 @@ export class PlanarValidation {
         : 'lodGrid=disabled',
       terrainText,
       globeImageryText,
+      vtText,
       tileText,
-      '+X east | +Y north | R reset'
+      '+X east | +Y north | R reset | V vector tiles'
     ]);
   }
 
   private onKeyDown(event: KeyboardEvent): void {
     const key = event.key.toLowerCase();
-    if (key !== 'r') return;
+    if (key === 'r') {
+      this.applyInitial3DView(this._initialCameraHeight);
+      return;
+    }
+    if (key === 'v') {
+      this.toggleVectorTiles();
+    }
+  }
 
-    this.applyInitial3DView(this._initialCameraHeight);
+  private toggleVectorTiles(): void {
+    if (this._vectorTiles) {
+      this._vectorTiles.setEnabled(!this._vectorTiles.enabled);
+      return;
+    }
+    if (!this._vectorTileTestUrl) return;
+
+    const layer = new GlobeVectorTileLayer(this._geo, {
+      urlTemplate: this._vectorTileTestUrl,
+      yType: 'tms',
+      enabled: true
+    });
+    this._vectorTiles = layer;
+    layer.object3d.renderOrder = 4;
+    this._root.add(layer.object3d);
+    layer.setEnabled(true);
   }
 
   private onTerrainToggle(_event: Event): void {
@@ -368,7 +412,9 @@ export class PlanarValidation {
 
   private lockCameraTargetToGlobeCenter(): void {
     if (!this._lockCameraTargetToGlobeCenter) return;
-    this._cameraController?.setTarget({ x: 0, y: 0, z: 0 });
+    if (!this._cameraController) return;
+
+    this._cameraController.setTarget({ x: 0, y: 0, z: 0 });
   }
 
   private enforceCameraOutsideGlobe(): void {

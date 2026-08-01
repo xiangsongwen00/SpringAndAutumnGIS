@@ -22,6 +22,7 @@ export type GlobeRasterTileLayerOptions = {
   seamOverlapMeters?: number;
   surfaceOffsetMeters?: number;
   maxAnisotropy?: number;
+  maxTilesPerFrame?: number;
 };
 
 export type GlobeRasterTileLayerDebugInfo = {
@@ -91,6 +92,7 @@ export class GlobeRasterTileLayer {
   private readonly _seamOverlapWorld: number;
   private readonly _surfaceOffsetMeters: number;
   private readonly _maxAnisotropy: number;
+  private readonly _maxTilesPerFrame: number;
   private readonly _textureLoader = new THREE.TextureLoader();
 
   private readonly _tiles = new Map<string, RasterTile>();
@@ -124,10 +126,11 @@ export class GlobeRasterTileLayer {
     this._tileSegments = Math.max(4, Math.floor(options?.tileSegments ?? 16));
     this._seamOverlapWorld = Math.max(
       0,
-      Number(options?.seamOverlapMeters ?? 0.5) / this._geo.metersPerUnit
+      Number(options?.seamOverlapMeters ?? 1) / this._geo.metersPerUnit
     );
     this._surfaceOffsetMeters = Math.max(0, Number(options?.surfaceOffsetMeters ?? 80));
     this._maxAnisotropy = Math.max(1, Math.floor(options?.maxAnisotropy ?? 1));
+    this._maxTilesPerFrame = Math.max(16, Math.floor(options?.maxTilesPerFrame ?? this.defaultMaxTilesByZoom(0)));
     this._textureLoader.setCrossOrigin('anonymous');
 
     this._enabled = options?.enabled ?? true;
@@ -181,24 +184,22 @@ export class GlobeRasterTileLayer {
     const safeLat = clampNumber(focusLat, -85.05112878, 85.05112878);
     const zoom = this.pickZoom(cameraDistance);
     const centerTile = this._geo.lonLatToTile(safeLon, safeLat, zoom);
-    const fullCoverage = zoom <= this._fullCoverageMaxZoom;
-    const effectiveTileRadius = fullCoverage ? 2 ** zoom : this.resolveTileRadius(zoom, cameraDistance);
-    const desired =
-      fullCoverage
-        ? this.collectFullCoverageTiles(zoom, centerTile)
-        : this.collectLocalTiles(zoom, centerTile, effectiveTileRadius);
+
+    const desired = this.collectLODTiles(zoom, safeLon, safeLat, cameraDistance);
 
     this._requestedCount = desired.length;
-    this._effectiveTileRadius = effectiveTileRadius;
-    this._fullCoverage = fullCoverage;
+    this._effectiveTileRadius = 0;
 
     const wantedKeys = new Set<string>();
+    let newTileCount = 0;
     for (const desiredTile of desired) {
       const tileId = desiredTile.tileId;
       const key = tileKey(tileId);
       wantedKeys.add(key);
       let tile = this._tiles.get(key);
       if (!tile) {
+        if (newTileCount >= this._maxTilesPerFrame) continue;
+        newTileCount += 1;
         tile = {
           tileId,
           key,
@@ -222,6 +223,33 @@ export class GlobeRasterTileLayer {
     this.evict(wantedKeys);
     this.processQueue();
     this.refreshDebugInfo(zoom, centerTile.x, centerTile.y);
+  }
+
+  private collectLODTiles(
+    primaryZoom: number,
+    focusLon: number,
+    focusLat: number,
+    cameraDistance: number
+  ): DesiredTile[] {
+    const result: DesiredTile[] = [];
+
+    if (primaryZoom <= this._fullCoverageMaxZoom) {
+      const centerTile = this._geo.lonLatToTile(focusLon, focusLat, primaryZoom);
+      return this.collectFullCoverageTiles(primaryZoom, centerTile);
+    }
+
+    const radiusZ = this.resolveTileRadius(primaryZoom, cameraDistance);
+    const centerTileZ = this._geo.lonLatToTile(focusLon, focusLat, primaryZoom);
+    const tilesZ = this.collectLocalTiles(primaryZoom, centerTileZ, radiusZ);
+    for (const t of tilesZ) result.push(t);
+
+    const lodZoom = Math.max(this._minZoom, primaryZoom - 1);
+    const radiusZ1 = Math.max(4, Math.ceil(radiusZ * 2.5));
+    const centerTileZ1 = this._geo.lonLatToTile(focusLon, focusLat, lodZoom);
+    const tilesZ1 = this.collectLocalTiles(lodZoom, centerTileZ1, radiusZ1);
+    for (const t of tilesZ1) result.push(t);
+
+    return result;
   }
 
   dispose(): void {
@@ -292,33 +320,32 @@ export class GlobeRasterTileLayer {
 
   private pickZoom(cameraHeight: number): number {
     const byDistance = getZoomLevelByDistance(cameraHeight, this._maxZoom);
-    return clampInt(byDistance, this._minZoom, this._maxZoom);
+    return clampInt(byDistance - 1, this._minZoom, this._maxZoom);
   }
 
   private resolveTileRadius(zoom: number, cameraDistance: number): number {
     const altitudeMeters = Math.max(0, cameraDistance * this._geo.metersPerUnit);
     const tileSizeMeters = 40_075_016.68557849 / 2 ** zoom;
     const visibleWidthMeters = 2 * altitudeMeters * Math.tan(Math.PI / 6) * this._coverageScale;
-    const formulaRadius = Math.ceil(visibleWidthMeters / Math.max(1, tileSizeMeters)) + 2;
-    return clampInt(Math.max(this._tileRadius, formulaRadius), this._tileRadius, this._maxDynamicTileRadius);
+    const formulaRadius = Math.ceil(visibleWidthMeters / Math.max(1, tileSizeMeters)) + 1;
+
+    const maxByZoom = Math.max(2, Math.ceil(Math.sqrt(this.defaultMaxTilesByZoom(zoom)) / 2) - 1);
+    const maxRadius = Math.min(this._maxDynamicTileRadius, maxByZoom);
+    return clampInt(Math.max(this._tileRadius, formulaRadius), this._tileRadius, maxRadius);
   }
 
   private collectFullCoverageTiles(zoom: number, centerTile: { x: number; y: number }): DesiredTile[] {
     const desired: DesiredTile[] = [];
     const n = 2 ** zoom;
-    const centerY = clampInt(centerTile.y, 0, n - 1);
-
-    for (let y = 0; y < n; y += 1) {
-      for (let x = 0; x < n; x += 1) {
-        const dx = shortestTileDx(centerTile.x, x, n);
-        const dy = y - centerY;
+    for (let dy = 0; dy < n; dy += 1) {
+      for (let dx = 0; dx < n; dx += 1) {
         desired.push({
-          tileId: { x, y, z: zoom },
-          priority: dx * dx + dy * dy
+          tileId: { x: dx, y: dy, z: zoom },
+          priority: shortestTileDx(centerTile.x, dx, n) ** 2 + Math.abs(dy - centerTile.y) ** 2
         });
       }
     }
-
+    desired.sort((a, b) => a.priority - b.priority);
     return desired;
   }
 
@@ -329,6 +356,7 @@ export class GlobeRasterTileLayer {
   ): DesiredTile[] {
     const desired: DesiredTile[] = [];
     const n = 2 ** zoom;
+    const maxTiles = Math.min((radius * 2 + 1) ** 2, this.defaultMaxTilesByZoom(zoom));
     for (let dy = -radius; dy <= radius; dy += 1) {
       for (let dx = -radius; dx <= radius; dx += 1) {
         const y = centerTile.y + dy;
@@ -339,6 +367,10 @@ export class GlobeRasterTileLayer {
           priority: shortestTileDx(centerTile.x, x, n) ** 2 + dy * dy
         });
       }
+    }
+    desired.sort((a, b) => a.priority - b.priority);
+    if (desired.length > maxTiles) {
+      return desired.slice(0, maxTiles);
     }
     return desired;
   }
@@ -478,9 +510,7 @@ export class GlobeRasterTileLayer {
       opacity: this._opacity,
       depthWrite: false,
       depthTest: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1
+      side: THREE.DoubleSide
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.renderOrder = 3;
@@ -488,11 +518,23 @@ export class GlobeRasterTileLayer {
     return mesh;
   }
 
+  private defaultMaxTilesByZoom(zoom: number): number {
+    if (zoom >= 16) return 64;
+    if (zoom >= 14) return 100;
+    if (zoom >= 12) return 144;
+    if (zoom >= 10) return 196;
+    if (zoom >= 8) return 256;
+    if (zoom >= 6) return 400;
+    return 1024;
+  }
+
   private pickSegmentsByZoom(zoom: number): number {
     const high = this._tileSegments;
     if (zoom >= 14) return Math.max(8, Math.min(high, 16));
     if (zoom >= 10) return Math.max(8, Math.min(high, 20));
-    return Math.max(8, Math.min(high, 24));
+    if (zoom >= 6) return Math.max(12, Math.min(high, 28));
+    if (zoom >= 2) return Math.max(16, Math.min(high, 32));
+    return Math.max(20, Math.min(high, 40));
   }
 
   private buildUrl(tileId: TileId): string {
@@ -554,20 +596,15 @@ function tileBounds(
 ): { westLon: number; eastLon: number; northLat: number; southLat: number } {
   const nw = geo.tileToLonLat(tileId.x, tileId.y, tileId.z);
   const se = geo.tileToLonLat(tileId.x + 1, tileId.y + 1, tileId.z);
-  if (seamOverlapWorld <= 0) {
-    return {
-      westLon: nw.lon,
-      eastLon: se.lon,
-      northLat: nw.lat,
-      southLat: se.lat
-    };
-  }
 
-  const earthRadius = geo.earthRadiusInThreeUnits();
-  const overlapRad = seamOverlapWorld / Math.max(earthRadius, 1);
-  const overlapDeg = (overlapRad * 180) / Math.PI;
+  const tileLonSpan = Math.abs(se.lon - nw.lon);
+  const tileLatSpan = Math.abs(nw.lat - se.lat);
+  const maxSpan = Math.max(tileLonSpan, tileLatSpan, 1e-10);
+  const pctOverlap = Math.max(0.001, seamOverlapWorld / 50);
+  const overlapDeg = maxSpan * pctOverlap;
+
   const meanLatRad = ((nw.lat + se.lat) * 0.5 * Math.PI) / 180;
-  const lonOverlapDeg = overlapDeg / Math.max(0.05, Math.cos(meanLatRad));
+  const lonOverlapDeg = overlapDeg / Math.max(0.05, Math.cos(Math.abs(meanLatRad)));
 
   return {
     westLon: nw.lon - lonOverlapDeg,

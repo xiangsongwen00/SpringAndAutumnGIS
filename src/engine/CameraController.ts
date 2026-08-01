@@ -27,7 +27,7 @@ export type CameraControllerOptions = {
   lockTarget?: boolean;
 };
 
-type PointerAction = 'none' | 'rotate' | 'pan';
+type PointerAction = 'none' | 'rotate' | 'pan' | 'look';
 
 export class CameraController {
   readonly camera: THREE.PerspectiveCamera;
@@ -240,9 +240,22 @@ export class CameraController {
       if (this._hasDragStartGlobeDir) {
         this._dragPrevGlobeDir.copy(this._dragStartGlobeDir);
       }
-    } else if (event.button === 1 || event.button === 2) {
+    } else if (event.button === 1) {
       this._action = 'pan';
       this._panStart.set(event.clientX, event.clientY);
+    } else if (event.button === 2) {
+      this._action = 'rotate';
+      this._rotateStart.set(event.clientX, event.clientY);
+      this.captureDragStartCamera();
+      this._hasDragStartGlobeDir = this.resolveGlobeDirectionAtClientFromDragStart(
+        event.clientX,
+        event.clientY,
+        this._dragStartGlobeDir
+      );
+      this._hasDragPrevGlobeDir = this._hasDragStartGlobeDir;
+      if (this._hasDragStartGlobeDir) {
+        this._dragPrevGlobeDir.copy(this._dragStartGlobeDir);
+      }
     } else {
       this._action = 'none';
       return;
@@ -263,6 +276,7 @@ export class CameraController {
 
     if (this._action === 'pan') {
       this.handlePan(event);
+      return;
     }
   }
 
