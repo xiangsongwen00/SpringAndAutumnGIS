@@ -1,40 +1,31 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#07111d" />
-    <title>SpringAndAutumnGIS · 2D / 3D Engine</title>
-    <!-- 显式加载，避免依赖 JS 运行时注入 Demo 样式。 -->
+    <meta name="theme-color" content="#07131d" />
+    <title>SpringAndAutumnGIS · 3D 经纬网 LOD</title>
     <link rel="stylesheet" href="/src/demo/demo.css" />
   </head>
   <body>
-    <div id="app"></div>
-    <header class="demo-header">
-      <div>
-        <span class="demo-eyebrow">SPRING AND AUTUMN GIS</span>
-        <h1>统一 GIS Core · 双视图渲染</h1>
-      </div>
-      <div class="demo-mode-switch" role="group" aria-label="视图模式">
-        <button id="view-2d" type="button">2D 平面</button>
-        <button id="view-3d" class="is-active" type="button">3D 地球</button>
-      </div>
+    <main id="globe" aria-label="3D 经纬网地球"></main>
+    <header class="brand">
+      <div class="brand__eyebrow">SPRING &amp; AUTUMN GIS / CORE 01</div>
+      <h1>3D 经纬网 LOD</h1>
+      <p>WGS84 椭球 · Web Mercator 四叉树 · 屏幕空间误差</p>
     </header>
-    <aside class="demo-panel">
-      <h2>坐标链路</h2>
-      <dl>
-        <dt>WGS84</dt>
-        <dd id="coord-wgs84">105.7184, 28.0564</dd>
-        <dt>ECEF</dt>
-        <dd id="coord-ecef">—</dd>
-        <dt>Mercator</dt>
-        <dd id="coord-mercator">—</dd>
-        <dt>Tile z12</dt>
-        <dd id="coord-tile">—</dd>
-      </dl>
-      <p id="view-description">GlobeView3D · WGS84 / ECEF / 地形表面</p>
+    <aside class="stats" aria-live="polite">
+      <div class="stats__label">实时四叉树状态</div>
+      <div class="stats__grid">
+        <div class="stats__item"><span>可见瓦片</span><strong id="selected-value">0</strong></div>
+        <div class="stats__item"><span>遍历节点</span><strong id="visited-value">0</strong></div>
+        <div class="stats__item"><span>裁剪节点</span><strong id="culled-value">0</strong></div>
+      </div>
+      <div id="levels-value">—</div>
+      <div id="imagery-value">纹理等待中</div>
     </aside>
-    <div class="hud">SpringAndAutumnGIS demo</div>
+    <div class="hint">拖动旋转 · 滚轮缩放</div>
+    <a class="attribution" href="https://maps.google.com/" target="_blank" rel="noreferrer">Google Maps · Satellite</a>
     <script type="module" src="/src/demo/main.ts"></script>
   </body>
 </html>
