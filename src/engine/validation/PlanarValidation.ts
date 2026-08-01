@@ -4,6 +4,7 @@ import type { CameraController } from '../CameraController';
 import { GlobeRasterTileLayer, type GlobeRasterTileLayerOptions } from '../layers/GlobeRasterTileLayer';
 import { GlobeVectorTileLayer, type GlobeVectorTileLayerOptions } from '../layers/GlobeVectorTileLayer';
 import type { ToolManager } from '../ToolManager';
+import type { ViewMode } from '../views/BaseView';
 import { TerrainLayer, type TerrainLayerOptions } from '../terrain/TerrainLayer';
 import { PlanarLodGrid, type PlanarLodGridOptions } from './PlanarLodGrid';
 import {
@@ -81,6 +82,7 @@ export class PlanarValidation {
   private _fpsFrames = 0;
   private _fps = 0;
   private _disposed = false;
+  private _viewMode: ViewMode = '3d';
 
   constructor(context: PlanarValidationContext, options?: PlanarValidationOptions) {
     this._renderer = context.renderer;
@@ -191,6 +193,28 @@ export class PlanarValidation {
     }
   }
 
+  setViewMode(mode: ViewMode): void {
+    this._viewMode = mode;
+    const isGlobe = mode === '3d';
+
+    this._globeProxy.visible = isGlobe;
+    this._terrain?.setEnabled(isGlobe);
+    this._globeImagery?.setEnabled(isGlobe);
+    this._mapTiles?.setEnabled(!isGlobe);
+    if (this._lodGrid) {
+      this._lodGrid.object3d.visible = !isGlobe;
+    }
+
+    if (this._cameraController) {
+      this._cameraController.lockTarget = isGlobe && this._lockCameraTargetToGlobeCenter;
+      this._cameraController.orbitRadius = isGlobe ? this._interactionRadius : 1;
+      this._cameraController.horizontalDragOnly = !isGlobe;
+      this._cameraController.minDistance = isGlobe
+        ? this._interactionRadius + this._minCameraAltitudeMeters / this._geo.metersPerUnit
+        : 1;
+    }
+  }
+
   private setupPanels(): void {
     if (!this._toolManager || typeof document === 'undefined') return;
 
@@ -227,6 +251,11 @@ export class PlanarValidation {
   update(cameraWorld: Vec3): void {
     if (this._disposed) return;
 
+    if (this._viewMode === '2d') {
+      this.updatePlanarMode(cameraWorld);
+      return;
+    }
+
     this.lockCameraTargetToGlobeCenter();
     this.enforceCameraOutsideGlobe();
     const focus = this.resolveFocusOnGlobe(cameraWorld);
@@ -249,6 +278,33 @@ export class PlanarValidation {
     this._vectorTiles?.update(this._focusLonLat.lon, this._focusLonLat.lat, cameraAltitude);
     this._mapTiles?.update(focus.x, focus.y, cameraDistance, viewRadius, viewportBounds);
 
+    this.updateFps();
+    this.updateHud(cameraWorld);
+  }
+
+  private updatePlanarMode(cameraWorld: Vec3): void {
+    const target = this._cameraController?.target ?? {
+      x: this._camera.position.x,
+      y: this._camera.position.y,
+      z: 0
+    };
+    const focus = this._tmpFocus.set(target.x, target.y, 0);
+    const cameraHeight = Math.max(1, Math.abs(this._camera.position.z));
+    const focusLonLat = this._mapTiles?.worldXYToLonLat(focus.x, focus.y) ??
+      this._geo.webMercatorToLonLat(
+        focus.x * this._geo.metersPerUnit,
+        focus.y * this._geo.metersPerUnit
+      );
+    this._focusLonLat.lon = focusLonLat.lon;
+    this._focusLonLat.lat = focusLonLat.lat;
+
+    const halfHeight = cameraHeight * Math.tan((this._camera.fov * Math.PI) / 360);
+    const halfWidth = halfHeight * Math.max(1, this._camera.aspect);
+    const viewRadius = Math.max(halfWidth, halfHeight);
+    const viewportBounds = this.computeViewportBoundsOnZ0();
+
+    this._lodGrid?.update(focus.x, focus.y, cameraHeight);
+    this._mapTiles?.update(focus.x, focus.y, cameraHeight, viewRadius, viewportBounds);
     this.updateFps();
     this.updateHud(cameraWorld);
   }
@@ -282,7 +338,10 @@ export class PlanarValidation {
     }
     const focus = { x: this._tmpFocus.x, y: this._tmpFocus.y, z: this._tmpFocus.z };
     const cameraDistance = this._camera.position.distanceTo(this._tmpFocus);
-    const cameraAltitude = this.getCameraAltitudeToGlobe();
+    const cameraAltitude =
+      this._viewMode === '2d'
+        ? Math.max(1, Math.abs(this._camera.position.z))
+        : this.getCameraAltitudeToGlobe();
     const lod = this._lodGrid?.debugInfo ?? {
       baseStep: 0,
       cameraHeight: cameraAltitude,
@@ -328,7 +387,7 @@ export class PlanarValidation {
     const cameraText = `camPos=(${this._camera.position.x.toFixed(1)},${this._camera.position.y.toFixed(1)},${this._camera.position.z.toFixed(1)}) target=(${focus.x.toFixed(1)},${focus.y.toFixed(1)},${focus.z.toFixed(1)}) altitude=${cameraAltitude.toFixed(3)} minAltitude=${this._minCameraAltitudeMeters.toFixed(3)} rayDistance=${cameraDistance.toFixed(1)} dir=(${this._tmpCameraDir.x.toFixed(3)},${this._tmpCameraDir.y.toFixed(3)},${this._tmpCameraDir.z.toFixed(3)}) heading=${headingDeg.toFixed(1)} pitch=${pitchDeg.toFixed(1)} fov=${this._camera.fov.toFixed(1)} aspect=${this._camera.aspect.toFixed(3)} near=${this._camera.near.toFixed(2)} far=${this._camera.far.toFixed(0)}`;
 
     this._toolManager.setPanelLines(this._hudPanelId, [
-      '3D terrain mode',
+      this._viewMode === '3d' ? '3D terrain mode' : '2D Web Mercator mode',
       `focus lon=${focusLonLat.lon.toFixed(5)} lat=${focusLonLat.lat.toFixed(5)} z=${focus.z.toFixed(1)}`,
       `focus=(${lod.focusX.toFixed(1)},${lod.focusY.toFixed(1)},${focus.z.toFixed(1)}) cameraAltitude=${lod.cameraHeight.toFixed(1)}`,
       cameraText,
@@ -373,7 +432,7 @@ export class PlanarValidation {
   }
 
   private onTerrainToggle(_event: Event): void {
-    if (!this._terrain) return;
+    if (!this._terrain || this._viewMode !== '3d') return;
     this._terrain.setEnabled(true);
     this._globeImagery?.setEnabled(true);
     if (this._mapTiles) {

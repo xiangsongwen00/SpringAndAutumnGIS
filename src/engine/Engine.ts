@@ -42,6 +42,7 @@ export class Engine {
   private _lastFrameTimeMs = 0;
   private readonly _updateHandlers = new Set<(dtSeconds: number, timeSeconds: number) => void>();
   private readonly _planarValidation: PlanarValidation | null;
+  private readonly _removeViewChangeHandler: (() => void) | null;
   private readonly _floatingOriginEnabled: boolean;
   private readonly _floatingOriginRebaseDistance: number;
 
@@ -125,6 +126,11 @@ export class Engine {
             },
             planarValidation
           );
+    this._planarValidation?.setViewMode(this.viewManager.mode);
+    this.viewManager.setViewState(this.viewManager.state);
+    this._removeViewChangeHandler = this.viewManager.onChange((event) => {
+      this._planarValidation?.setViewMode(event.mode);
+    });
     this.handleResize(container);
   }
 
@@ -169,6 +175,7 @@ export class Engine {
       this._onResize = null;
     }
     this._planarValidation?.dispose();
+    this._removeViewChangeHandler?.();
     this.viewManager.dispose();
     this.toolManager?.dispose();
     this.cameraController?.dispose();
