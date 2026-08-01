@@ -51,6 +51,9 @@ export class RasterTileLayer {
   private readonly maxCachedTiles: number;
   private readonly surfaceOffset: number;
   private readonly maxAnisotropy: number;
+  private readonly cameraHigh = new THREE.Vector3();
+  private readonly cameraLow = new THREE.Vector3();
+  private readonly tileOrigin = new THREE.Vector3();
   private frame = 0;
   private activeRequests = 0;
   private disposed = false;
@@ -66,14 +69,18 @@ export class RasterTileLayer {
     this.geometry = createGridGeometry(options.segments ?? 16);
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 8));
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 512));
-    this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 120);
+    this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
     this.loader.setCrossOrigin('anonymous');
     this.object3d.renderOrder = 1;
   }
 
-  update(selection: readonly SelectedTile[]): RasterTileLayerStats {
+  update(
+    selection: readonly SelectedTile[],
+    cameraPosition?: THREE.Vector3
+  ): RasterTileLayerStats {
     if (this.disposed) return this.stats;
+    if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
     this.frame += 1;
     this.syncRenderTiles(selection);
     this.queueVisibleTextures(selection);
@@ -118,6 +125,9 @@ export class RasterTileLayer {
       const mesh = new THREE.Mesh(this.geometry, material);
       mesh.frustumCulled = false;
       mesh.renderOrder = 1;
+      mesh.onBeforeRender = (_renderer, _scene, camera) => {
+        splitVector3(camera.position, this.cameraHigh, this.cameraLow);
+      };
       this.renderTiles.set(key, { id: tile.id, mesh, textureKey: '' });
       this.object3d.add(mesh);
     }
@@ -129,6 +139,33 @@ export class RasterTileLayer {
     const east = -Math.PI + ((tile.x + 1) / size) * Math.PI * 2;
     const northMercator = Math.PI - (tile.y / size) * Math.PI * 2;
     const southMercator = Math.PI - ((tile.y + 1) / size) * Math.PI * 2;
+    const longitudeCenter = (west + east) * 0.5;
+    const longitudeSpan = east - west;
+    const mercatorCenter = (northMercator + southMercator) * 0.5;
+    const mercatorSpan = southMercator - northMercator;
+    const latitudeCenter = Math.atan(Math.sinh(mercatorCenter));
+    const sinLongitude = Math.sin(longitudeCenter);
+    const cosLongitude = Math.cos(longitudeCenter);
+    const sinLatitude = Math.sin(latitudeCenter);
+    const cosLatitude = Math.cos(latitudeCenter);
+    this.ellipsoid.cartographicToCartesian(
+      {
+        longitude: THREE.MathUtils.radToDeg(longitudeCenter),
+        latitude: THREE.MathUtils.radToDeg(latitudeCenter),
+        height: this.surfaceOffset
+      },
+      this.tileOrigin
+    );
+    const originHigh = new THREE.Vector3();
+    const originLow = new THREE.Vector3();
+    splitVector3(this.tileOrigin, originHigh, originLow);
+    const a = this.ellipsoid.equatorialRadius;
+    const b = this.ellipsoid.polarRadius;
+    const eccentricitySquared = 1 - (b * b) / (a * a);
+    const latitudeTerm = 1 - eccentricitySquared * sinLatitude * sinLatitude;
+    const primeVerticalRadius = a / Math.sqrt(latitudeTerm) + this.surfaceOffset;
+    const meridionalRadius =
+      (a * (1 - eccentricitySquared)) / latitudeTerm ** 1.5 + this.surfaceOffset;
     return new THREE.ShaderMaterial({
       uniforms: {
         sag_ellipsoidRadii: {
@@ -138,8 +175,40 @@ export class RasterTileLayer {
           )
         },
         sag_heightOffset: { value: this.surfaceOffset },
-        tileLongitude: { value: new THREE.Vector2(west, east) },
-        tileMercator: { value: new THREE.Vector2(northMercator, southMercator) },
+        sag_cameraHigh: { value: this.cameraHigh },
+        sag_cameraLow: { value: this.cameraLow },
+        sag_originHigh: { value: originHigh },
+        sag_originLow: { value: originLow },
+        sag_east: { value: new THREE.Vector3(cosLongitude, 0, -sinLongitude) },
+        sag_north: {
+          value: new THREE.Vector3(
+            -sinLatitude * sinLongitude,
+            cosLatitude,
+            -sinLatitude * cosLongitude
+          )
+        },
+        sag_up: {
+          value: new THREE.Vector3(
+            cosLatitude * sinLongitude,
+            sinLatitude,
+            cosLatitude * cosLongitude
+          )
+        },
+        sag_curvatureRadii: {
+          value: new THREE.Vector2(primeVerticalRadius, meridionalRadius)
+        },
+        sag_useLocalCoordinates: { value: tile.level >= 18 },
+        tileLongitudeSinCos: {
+          value: new THREE.Vector2(sinLongitude, cosLongitude)
+        },
+        tileLongitudeSpan: { value: longitudeSpan },
+        tileLatitudeSinCos: {
+          value: new THREE.Vector2(sinLatitude, cosLatitude)
+        },
+        tileMercatorSinhCosh: {
+          value: new THREE.Vector2(Math.sinh(mercatorCenter), Math.cosh(mercatorCenter))
+        },
+        tileMercatorSpan: { value: mercatorSpan },
         tileTexture: { value: null },
         uvScale: { value: new THREE.Vector2(1, 1) },
         uvOffset: { value: new THREE.Vector2(0, 0) },
@@ -149,29 +218,84 @@ export class RasterTileLayer {
       vertexShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
-        uniform vec2 tileLongitude;
-        uniform vec2 tileMercator;
+        uniform vec3 sag_originHigh;
+        uniform vec3 sag_originLow;
+        uniform vec3 sag_east;
+        uniform vec3 sag_north;
+        uniform vec3 sag_up;
+        uniform vec2 sag_curvatureRadii;
+        uniform bool sag_useLocalCoordinates;
+        uniform vec2 tileLongitudeSinCos;
+        uniform float tileLongitudeSpan;
+        uniform vec2 tileLatitudeSinCos;
+        uniform vec2 tileMercatorSinhCosh;
+        uniform float tileMercatorSpan;
         uniform vec2 uvScale;
         uniform vec2 uvOffset;
         #include <common>
         #include <logdepthbuf_pars_vertex>
         ${globeCoordinateShader}
         void main() {
-          float longitude = mix(tileLongitude.x, tileLongitude.y, position.x);
-          float mercatorLatitude = mix(tileMercator.x, tileMercator.y, position.y);
-          float hyperbolicSine = 0.5 * (exp(mercatorLatitude) - exp(-mercatorLatitude));
-          float latitude = atan(hyperbolicSine);
+          float deltaLongitude = (position.x - 0.5) * tileLongitudeSpan;
+          float sinDeltaLongitude = sin(deltaLongitude);
+          float cosDeltaLongitude = cos(deltaLongitude);
+          vec2 longitudeSinCos = vec2(
+            tileLongitudeSinCos.x * cosDeltaLongitude +
+              tileLongitudeSinCos.y * sinDeltaLongitude,
+            tileLongitudeSinCos.y * cosDeltaLongitude -
+              tileLongitudeSinCos.x * sinDeltaLongitude
+          );
+          float deltaMercator = (position.y - 0.5) * tileMercatorSpan;
+          float sinhDeltaMercator = 0.5 * (exp(deltaMercator) - exp(-deltaMercator));
+          float coshDeltaMercator = 0.5 * (exp(deltaMercator) + exp(-deltaMercator));
+          float sinhMercator =
+            tileMercatorSinhCosh.x * coshDeltaMercator +
+            tileMercatorSinhCosh.y * sinhDeltaMercator;
+          float cosLatitude = inversesqrt(1.0 + sinhMercator * sinhMercator);
+          float sinLatitude = sinhMercator * cosLatitude;
+          vec2 latitudeSinCos = vec2(sinLatitude, cosLatitude);
           // XYZ rows grow from north to south, while Three.js image textures
           // use v=1 at the visual top. Flip only V after applying the ancestor
           // sub-rectangle so exact tiles and fallback tiles share one convention.
           vec2 xyzUv = uvOffset + uv * uvScale;
           v_uv = vec2(xyzUv.x, 1.0 - xyzUv.y);
           v_globeNormal = normalize(vec3(
-            cos(latitude) * sin(longitude),
-            sin(latitude),
-            cos(latitude) * cos(longitude)
+            cosLatitude * longitudeSinCos.x,
+            sinLatitude,
+            cosLatitude * longitudeSinCos.y
           ));
-          gl_Position = sag_projectGeodetic(vec2(longitude, latitude), 0.0);
+          if (sag_useLocalCoordinates) {
+            float deltaLatitude =
+              tileLatitudeSinCos.y * deltaMercator -
+              0.5 * tileLatitudeSinCos.x * tileLatitudeSinCos.y *
+                deltaMercator * deltaMercator;
+            float latitudeMidpoint = 0.5 * deltaLatitude;
+            float midpointCosLatitude =
+              tileLatitudeSinCos.y * cos(latitudeMidpoint) -
+              tileLatitudeSinCos.x * sin(latitudeMidpoint);
+            float eastMeters =
+              sag_curvatureRadii.x * midpointCosLatitude * deltaLongitude;
+            float northMeters = sag_curvatureRadii.y * deltaLatitude;
+            float upMeters = -0.5 * (
+              eastMeters * eastMeters / sag_curvatureRadii.x +
+              northMeters * northMeters / sag_curvatureRadii.y
+            );
+            vec3 localWorld =
+              sag_east * eastMeters +
+              sag_north * northMeters +
+              sag_up * upMeters;
+            gl_Position = sag_projectLocalToEye(
+              localWorld,
+              sag_originHigh,
+              sag_originLow
+            );
+          } else {
+            gl_Position = sag_projectGeodeticTrig(
+              longitudeSinCos,
+              latitudeSinCos,
+              0.0
+            );
+          }
           #include <logdepthbuf_vertex>
         }
       `,
@@ -377,3 +501,7 @@ function placeholderColor(level: number): THREE.Color {
   return new THREE.Color().setHSL(0.53, 0.56, Math.min(0.3, 0.19 + level * 0.009));
 }
 
+function splitVector3(value: THREE.Vector3, high: THREE.Vector3, low: THREE.Vector3): void {
+  high.set(Math.fround(value.x), Math.fround(value.y), Math.fround(value.z));
+  low.set(value.x - high.x, value.y - high.y, value.z - high.z);
+}

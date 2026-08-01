@@ -46,13 +46,15 @@ export class GlobeLodSelector {
 
   private readonly horizonPaddingRadians: number;
   private readonly previousSplits = new Set<string>();
+  private readonly boundsCache = new Map<string, THREE.Sphere>();
   private readonly cameraDirection = new THREE.Vector3();
   private readonly cameraPosition = new THREE.Vector3();
   private readonly tileDirection = new THREE.Vector3();
   private readonly sampleDirection = new THREE.Vector3();
   private readonly surfacePoint = new THREE.Vector3();
   private readonly projectionView = new THREE.Matrix4();
-  private readonly clipPoint = new THREE.Vector4();
+  private readonly frustum = new THREE.Frustum();
+  private readonly tileBounds = new THREE.Sphere();
   private cameraDistance = 0;
   private cameraLongitude = 0;
   private cameraLatitude = 0;
@@ -64,8 +66,11 @@ export class GlobeLodSelector {
   constructor(options: GlobeLodSelectorOptions = {}) {
     this.ellipsoid = Ellipsoid.WGS84;
     this.tilingScheme = options.tilingScheme ?? new GeographicTilingScheme();
-    this.minLevel = clampInteger(options.minLevel ?? 1, 0, 18);
-    this.maxLevel = clampInteger(options.maxLevel ?? 9, this.minLevel, 22);
+    this.minLevel = clampInteger(options.minLevel ?? 2, 0, 27);
+    // JavaScript numbers can represent XYZ tile coordinates exactly well beyond
+    // level 27. Keep a little headroom for future data sources while making 27
+    // a first-class supported level today.
+    this.maxLevel = clampInteger(options.maxLevel ?? 27, this.minLevel, 30);
     this.targetPixels = Math.max(24, options.targetPixels ?? 150);
     this.collapseFactor = THREE.MathUtils.clamp(options.collapseFactor ?? 0.72, 0.1, 0.99);
     this.maxTiles = Math.max(8, Math.round(options.maxTiles ?? 384));
@@ -93,6 +98,7 @@ export class GlobeLodSelector {
     this.horizonCulled = 0;
     this.frustumCulled = 0;
     this.projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.frustum.setFromProjectionMatrix(this.projectionView);
 
     const leaves = this.tilingScheme
       .rootTiles()
@@ -159,18 +165,17 @@ export class GlobeLodSelector {
     this.tileDirection.copy(
       this.ellipsoid.cartographicToCartesian({ longitude, latitude }, this.tileDirection)
     ).normalize();
-    const angularRadius = this.computeAngularRadius(rectangle);
+    this.ellipsoid.cartographicToCartesian({ longitude, latitude }, this.surfacePoint);
 
     if (id.level > 0 && !this.isAboveHorizon(rectangle)) {
       this.horizonCulled += 1;
       return null;
     }
-    if (id.level > 0 && !this.isInsideFrustum(rectangle)) {
+    if (id.level > 0 && !this.isInsideFrustum(id, rectangle)) {
       this.frustumCulled += 1;
       return null;
     }
 
-    this.ellipsoid.cartographicToCartesian({ longitude, latitude }, this.surfacePoint);
     const distance = Math.max(1, this.surfacePoint.distanceTo(this.cameraPosition));
     const angularSpan = Math.max(
       THREE.MathUtils.degToRad(rectangle.north - rectangle.south),
@@ -185,26 +190,6 @@ export class GlobeLodSelector {
     const foreshortening = 0.2 + 0.8 * facing;
     const screenPixels = (worldSpan * this.focalPixels * foreshortening) / distance;
     return { id, rectangle, screenPixels, canSplit: true };
-  }
-
-  private computeAngularRadius(rectangle: Rectangle): number {
-    let maximum = 0;
-    const center = this.tileDirection;
-    const samples: ReadonlyArray<readonly [number, number]> = [
-      [rectangle.west, rectangle.north],
-      [rectangle.east, rectangle.north],
-      [rectangle.east, rectangle.south],
-      [rectangle.west, rectangle.south],
-      [(rectangle.west + rectangle.east) * 0.5, rectangle.north],
-      [(rectangle.west + rectangle.east) * 0.5, rectangle.south]
-    ];
-    for (const [longitude, latitude] of samples) {
-      this.ellipsoid
-        .cartographicToCartesian({ longitude, latitude }, this.sampleDirection)
-        .normalize();
-      maximum = Math.max(maximum, Math.acos(THREE.MathUtils.clamp(center.dot(this.sampleDirection), -1, 1)));
-    }
-    return maximum;
   }
 
   private isAboveHorizon(rectangle: Rectangle): boolean {
@@ -254,56 +239,38 @@ export class GlobeLodSelector {
     return maximum;
   }
 
-  private isInsideFrustum(rectangle: Rectangle): boolean {
-    const longitudeSamples = [
-      rectangle.west,
-      (rectangle.west + rectangle.east) * 0.5,
-      rectangle.east,
-      closestLongitudeInRectangle(this.cameraLongitude, rectangle.west, rectangle.east)
-    ];
-    const latitudeSamples = [
-      rectangle.south,
-      (rectangle.south + rectangle.north) * 0.5,
-      rectangle.north,
-      THREE.MathUtils.clamp(this.cameraLatitude, rectangle.south, rectangle.north)
-    ];
-    let minimumX = Number.POSITIVE_INFINITY;
-    let maximumX = Number.NEGATIVE_INFINITY;
-    let minimumY = Number.POSITIVE_INFINITY;
-    let maximumY = Number.NEGATIVE_INFINITY;
-    let minimumZ = Number.POSITIVE_INFINITY;
-    let maximumZ = Number.NEGATIVE_INFINITY;
-    let projected = 0;
+  private isInsideFrustum(id: TileId, rectangle: Rectangle): boolean {
+    const key = tileKey(id);
+    const cached = this.boundsCache.get(key);
+    if (cached) return this.frustum.intersectsSphere(cached);
 
-    for (const longitude of longitudeSamples) {
-      for (const latitude of latitudeSamples) {
+    const longitudeCenter = (rectangle.west + rectangle.east) * 0.5;
+    const latitudeCenter = (rectangle.south + rectangle.north) * 0.5;
+    this.ellipsoid.cartographicToCartesian(
+      { longitude: longitudeCenter, latitude: latitudeCenter },
+      this.tileBounds.center
+    );
+
+    // A conservative world-space sphere catches curved tiles that merely cross
+    // a viewport edge. The old projected-point test could reject such a tile
+    // when none of its sparse samples happened to land inside the viewport.
+    let radius = 0;
+    const sampleSteps = 4;
+    for (let y = 0; y <= sampleSteps; y += 1) {
+      const latitude = THREE.MathUtils.lerp(rectangle.south, rectangle.north, y / sampleSteps);
+      for (let x = 0; x <= sampleSteps; x += 1) {
+        const longitude = THREE.MathUtils.lerp(rectangle.west, rectangle.east, x / sampleSteps);
         this.ellipsoid.cartographicToCartesian(
           { longitude, latitude },
-          this.surfacePoint
+          this.sampleDirection
         );
-        this.clipPoint
-          .set(this.surfacePoint.x, this.surfacePoint.y, this.surfacePoint.z, 1)
-          .applyMatrix4(this.projectionView);
-        if (this.clipPoint.w <= 0) continue;
-        const inverseW = 1 / this.clipPoint.w;
-        const x = this.clipPoint.x * inverseW;
-        const y = this.clipPoint.y * inverseW;
-        const z = this.clipPoint.z * inverseW;
-        minimumX = Math.min(minimumX, x);
-        maximumX = Math.max(maximumX, x);
-        minimumY = Math.min(minimumY, y);
-        maximumY = Math.max(maximumY, y);
-        minimumZ = Math.min(minimumZ, z);
-        maximumZ = Math.max(maximumZ, z);
-        projected += 1;
+        radius = Math.max(radius, this.tileBounds.center.distanceTo(this.sampleDirection));
       }
     }
-
-    const padding = 0.03;
-    return projected > 0 &&
-      maximumX >= -1 - padding && minimumX <= 1 + padding &&
-      maximumY >= -1 - padding && minimumY <= 1 + padding &&
-      maximumZ >= -1 && minimumZ <= 1;
+    this.tileBounds.radius = radius * 1.01 + 1;
+    if (this.boundsCache.size >= this.maxTiles * 64) this.boundsCache.clear();
+    this.boundsCache.set(key, this.tileBounds.clone());
+    return this.frustum.intersectsSphere(this.tileBounds);
   }
 }
 
@@ -326,4 +293,3 @@ function closestLongitudeInRectangle(longitude: number, west: number, east: numb
   }
   return closest;
 }
-

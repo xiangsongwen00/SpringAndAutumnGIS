@@ -16,6 +16,7 @@ import {
 } from '../render/RasterTileLayer';
 
 export type GlobeEngineStats = GlobeLodStats & Readonly<{
+  cameraLevel: number;
   imagery: RasterTileLayerStats | null;
 }>;
 
@@ -55,7 +56,7 @@ export type GlobeEngineOptions = {
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(50, 1, 10, 100_000_000);
+  readonly camera = new THREE.PerspectiveCamera(50, 1, 0.02, 100_000_000);
   readonly renderer: THREE.WebGLRenderer;
   readonly controls: OrbitControls;
   readonly ellipsoid = Ellipsoid.WGS84;
@@ -67,6 +68,8 @@ export class GlobeEngine {
   private readonly onStats?: (stats: GlobeEngineStats) => void;
   private frameHandle: number | null = null;
   private lastStatsSignature = '';
+  private viewportWidth = 0;
+  private viewportHeight = 0;
   private readonly resizeObserver: ResizeObserver;
   private readonly navigation: Required<GlobeNavigationOptions>;
 
@@ -75,11 +78,11 @@ export class GlobeEngine {
     this.onStats = options.onStats;
     this.navigation = {
       rotateSpeed: Math.max(0.01, options.navigation?.rotateSpeed ?? 0.4),
-      minRotateSpeed: Math.max(0.001, options.navigation?.minRotateSpeed ?? 0.006),
+      minRotateSpeed: Math.max(0.00000001, options.navigation?.minRotateSpeed ?? 0.000001),
       zoomSpeed: Math.max(0.01, options.navigation?.zoomSpeed ?? 0.5),
-      minZoomSpeed: Math.max(0.00005, options.navigation?.minZoomSpeed ?? 0.0002),
+      minZoomSpeed: Math.max(0.000000001, options.navigation?.minZoomSpeed ?? 0.00000001),
       dampingFactor: THREE.MathUtils.clamp(options.navigation?.dampingFactor ?? 0.12, 0, 1),
-      minAltitude: Math.max(50, options.navigation?.minAltitude ?? 250),
+      minAltitude: Math.max(0.05, options.navigation?.minAltitude ?? 0.25),
       zoomAltitudeGain: Math.max(0.1, options.navigation?.zoomAltitudeGain ?? 5)
     };
     const tilingScheme = options.lod?.tilingScheme ?? new WebMercatorTilingScheme();
@@ -142,7 +145,7 @@ export class GlobeEngine {
     this.controls.rotateSpeed = this.navigation.rotateSpeed;
     this.controls.zoomSpeed = this.navigation.zoomSpeed;
     this.controls.minDistance = radius + this.navigation.minAltitude;
-    this.controls.maxDistance = radius * 8;
+    this.controls.maxDistance = radius * 16;
     this.controls.minPolarAngle = 0.015;
     this.controls.maxPolarAngle = Math.PI - 0.015;
     this.controls.target.set(0, 0, 0);
@@ -156,12 +159,14 @@ export class GlobeEngine {
     if (this.frameHandle !== null) return;
     const renderFrame = () => {
       this.frameHandle = requestAnimationFrame(renderFrame);
+      this.resize();
       this.updateNavigationSensitivity();
       this.controls.update();
+      const cameraLevel = this.getCameraLevel();
       const selection = this.lod.select(this.camera, this.renderer.domElement.clientHeight);
-      const imageryStats = this.imagery?.update(selection.tiles) ?? null;
-      this.grid.update(selection.tiles);
-      this.emitStats(selection.stats, imageryStats);
+      const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
+      this.grid.update(selection.tiles, this.camera.position);
+      this.emitStats(selection.stats, imageryStats, cameraLevel);
       this.renderer.render(this.scene, this.camera);
     };
     this.frameHandle = requestAnimationFrame(renderFrame);
@@ -189,9 +194,21 @@ export class GlobeEngine {
     this.renderer.domElement.remove();
   }
 
+  /** Continuous camera level using the same screen-error scale as the LOD selector. */
+  getCameraLevel(): number {
+    const altitude = this.cameraAltitude();
+    return Math.log2(
+      (2 * Math.PI * this.ellipsoid.equatorialRadius * this.focalPixels()) /
+      (this.lod.targetPixels * altitude)
+    );
+  }
+
   private resize(): void {
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
+    if (width === this.viewportWidth && height === this.viewportHeight) return;
+    this.viewportWidth = width;
+    this.viewportHeight = height;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
@@ -201,9 +218,15 @@ export class GlobeEngine {
     const radius = this.ellipsoid.equatorialRadius;
     const cameraDistance = this.camera.position.length();
     const surfaceRadius = this.surfaceRadiusInDirection(this.camera.position);
-    const altitude = Math.max(0, cameraDistance - surfaceRadius);
+    const altitude = Math.max(0.001, cameraDistance - surfaceRadius);
     const altitudeRatio = THREE.MathUtils.clamp(altitude / radius, 0, 1);
-    this.controls.minDistance = surfaceRadius + this.navigation.minAltitude;
+    const minimumAltitude = Math.max(
+      this.navigation.minAltitude,
+      this.altitudeForCameraLevel(this.lod.maxLevel)
+    );
+    const maximumAltitude = this.altitudeForCameraLevel(this.lod.minLevel);
+    this.controls.minDistance = surfaceRadius + minimumAltitude;
+    this.controls.maxDistance = surfaceRadius + maximumAltitude;
 
     // A near-linear curve is deliberately slower than sqrt(altitude) at local scale.
     this.controls.rotateSpeed = THREE.MathUtils.lerp(
@@ -222,6 +245,23 @@ export class GlobeEngine {
     );
   }
 
+  private cameraAltitude(): number {
+    return Math.max(
+      0.001,
+      this.camera.position.length() - this.surfaceRadiusInDirection(this.camera.position)
+    );
+  }
+
+  private focalPixels(): number {
+    return Math.max(1, this.renderer.domElement.clientHeight) /
+      (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5));
+  }
+
+  private altitudeForCameraLevel(level: number): number {
+    return (2 * Math.PI * this.ellipsoid.equatorialRadius * this.focalPixels()) /
+      (this.lod.targetPixels * 2 ** level);
+  }
+
   private surfaceRadiusInDirection(direction: THREE.Vector3): number {
     const length = direction.length();
     if (length <= 0) return this.ellipsoid.equatorialRadius;
@@ -233,15 +273,19 @@ export class GlobeEngine {
     return 1 / Math.sqrt((x * x + z * z) / (a * a) + (y * y) / (b * b));
   }
 
-  private emitStats(stats: GlobeLodStats, imagery: RasterTileLayerStats | null): void {
+  private emitStats(
+    stats: GlobeLodStats,
+    imagery: RasterTileLayerStats | null,
+    cameraLevel: number
+  ): void {
     if (!this.onStats) return;
     const imagerySignature = imagery
       ? `${imagery.ready},${imagery.loading},${imagery.queued},${imagery.errors},${imagery.fallbacks}`
       : 'none';
-    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}`;
+    const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
+    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;
     this.lastStatsSignature = signature;
-    this.onStats({ ...stats, imagery });
+    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery });
   }
 }
-

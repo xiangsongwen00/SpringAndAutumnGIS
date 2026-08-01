@@ -11,7 +11,9 @@ const culledValue = document.querySelector<HTMLElement>('#culled-value');
 const levelsValue = document.querySelector<HTMLElement>('#levels-value');
 const imageryValue = document.querySelector<HTMLElement>('#imagery-value');
 
-const MAX_LOD_LEVEL = 20;
+const MIN_LOD_LEVEL = 2;
+const MAX_LOD_LEVEL = 27;
+const MAX_GOOGLE_IMAGERY_LEVEL = 20;
 
 if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue) {
   throw new Error('演示页面结构不完整。');
@@ -25,7 +27,8 @@ const renderStats = (stats: GlobeEngineStats): void => {
   const minimumLevel = activeLevels.length > 0 ? Math.min(...activeLevels) : 0;
   const maximumLevel = activeLevels.length > 0 ? Math.max(...activeLevels) : 0;
   levelsValue.textContent =
-    `当前层级 ${minimumLevel}–${maximumLevel} / 最大层级 ${MAX_LOD_LEVEL}　` +
+    `相机层级 ${stats.cameraLevel.toFixed(1)} / 范围 ${MIN_LOD_LEVEL}–${MAX_LOD_LEVEL}　` +
+    `可见层级 ${minimumLevel}–${maximumLevel}　` +
     [...stats.levels]
       .map(([level, count]) => `${level}级：${count}`)
       .join('　');
@@ -38,14 +41,14 @@ const imagery = new UrlTemplateRasterProvider({
   id: 'google-satellite-demo',
   urlTemplate: 'https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
   subdomains: ['0', '1', '2', '3'],
-  maxLevel: MAX_LOD_LEVEL,
+  maxLevel: MAX_GOOGLE_IMAGERY_LEVEL,
   attribution: 'Google Maps'
 });
 
 const engine = new GlobeEngine({
   container,
   lod: {
-    minLevel: 1,
+    minLevel: MIN_LOD_LEVEL,
     maxLevel: MAX_LOD_LEVEL,
     targetPixels: 128,
     collapseFactor: 0.7,
@@ -53,14 +56,14 @@ const engine = new GlobeEngine({
   },
   grid: {
     subdivisions: 8,
-    heightOffset: 80
+    heightOffset: 0.3
   },
   imagery,
   raster: {
     segments: 16,
     maxConcurrentRequests: 10,
     maxCachedTiles: 2_048,
-    surfaceOffset: 30
+    surfaceOffset: 0.1
   },
   initialView: {
     longitude: 105,
@@ -69,12 +72,12 @@ const engine = new GlobeEngine({
   },
   navigation: {
     rotateSpeed: 0.38,
-    minRotateSpeed: 0.006,
+    minRotateSpeed: 0.000001,
     zoomSpeed: 0.42,
-    minZoomSpeed: 0.00035,
+    minZoomSpeed: 0.00000001,
     zoomAltitudeGain: 5,
     dampingFactor: 0.1,
-    minAltitude: 250
+    minAltitude: 0.25
   },
   onStats: renderStats
 });
