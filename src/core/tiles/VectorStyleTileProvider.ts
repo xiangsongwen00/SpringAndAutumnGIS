@@ -76,7 +76,7 @@ export class VectorStyleTileProvider implements RasterTileProvider {
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
     this.levelOffset = Math.min(0, Math.round(options.levelOffset ?? -2));
-    this.minimumLodLevelOffset = Math.min(0, Math.round(options.minimumLodLevelOffset ?? 0));
+    this.minimumLodLevelOffset = Math.min(0, Math.round(options.minimumLodLevelOffset ?? -1));
     this.attribution = options.attribution ?? 'Esri';
     this.styleUrl = options.styleUrl;
     this.sourceId = options.sourceId;
@@ -95,7 +95,7 @@ export class VectorStyleTileProvider implements RasterTileProvider {
 
   maximumSourceLevel(renderLevel: number): number {
     return Math.min(
-      renderLevel + this.levelOffset,
+      renderLevel,
       this.viewSourceLevel,
       this.maxLevel
     );

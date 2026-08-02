@@ -125,10 +125,16 @@ export class GlobeGridRenderer {
     const originHigh = new THREE.Vector3();
     const originLow = new THREE.Vector3();
     splitVector3(this.tileOrigin, originHigh, originLow);
-    this.appendEdge(west, north, east, north, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
-    this.appendEdge(east, north, east, south, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
-    this.appendEdge(east, south, west, south, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
-    this.appendEdge(west, south, west, north, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
+    // Match the raster's low-level angular precision. Powers of two keep
+    // neighbouring parent/child curves coincident at every shared sample.
+    const subdivisions = Math.max(
+      this.subdivisions,
+      Math.round(512 / 2 ** tile.id.level)
+    );
+    this.appendEdge(west, north, east, north, subdivisions, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
+    this.appendEdge(east, north, east, south, subdivisions, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
+    this.appendEdge(east, south, west, south, subdivisions, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
+    this.appendEdge(west, south, west, north, subdivisions, color, originHigh, originLow, positions, colors, originsHigh, originsLow);
   }
 
   private appendEdge(
@@ -136,6 +142,7 @@ export class GlobeGridRenderer {
     latitudeStart: number,
     longitudeEnd: number,
     latitudeEnd: number,
+    subdivisions: number,
     color: THREE.Color,
     originHigh: THREE.Vector3,
     originLow: THREE.Vector3,
@@ -144,10 +151,10 @@ export class GlobeGridRenderer {
     originsHigh: number[],
     originsLow: number[]
   ): void {
-    for (let segment = 0; segment < this.subdivisions; segment += 1) {
+    for (let segment = 0; segment < subdivisions; segment += 1) {
       this.appendVertex(
-        THREE.MathUtils.lerp(longitudeStart, longitudeEnd, segment / this.subdivisions),
-        THREE.MathUtils.lerp(latitudeStart, latitudeEnd, segment / this.subdivisions),
+        THREE.MathUtils.lerp(longitudeStart, longitudeEnd, segment / subdivisions),
+        THREE.MathUtils.lerp(latitudeStart, latitudeEnd, segment / subdivisions),
         color,
         originHigh,
         originLow,
@@ -157,8 +164,8 @@ export class GlobeGridRenderer {
         originsLow
       );
       this.appendVertex(
-        THREE.MathUtils.lerp(longitudeStart, longitudeEnd, (segment + 1) / this.subdivisions),
-        THREE.MathUtils.lerp(latitudeStart, latitudeEnd, (segment + 1) / this.subdivisions),
+        THREE.MathUtils.lerp(longitudeStart, longitudeEnd, (segment + 1) / subdivisions),
+        THREE.MathUtils.lerp(latitudeStart, latitudeEnd, (segment + 1) / subdivisions),
         color,
         originHigh,
         originLow,

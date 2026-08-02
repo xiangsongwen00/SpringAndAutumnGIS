@@ -57,7 +57,7 @@ const vectorMap = new VectorStyleTileProvider({
   sourceId: 'esri',
   maxLevel: 20,
   levelOffset: ESRI_LEVEL_OFFSET,
-  minimumLodLevelOffset: 0,
+  minimumLodLevelOffset: -1,
   showCountryLabels: true,
   tileSize: 512,
   attribution: 'Esri'

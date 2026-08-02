@@ -42,7 +42,8 @@ export class RasterTileLayer {
   provider: RasterTileProvider;
 
   private readonly ellipsoid: Ellipsoid;
-  private readonly geometry: THREE.BufferGeometry;
+  private readonly geometries = new Map<number, THREE.BufferGeometry>();
+  private readonly baseSegments: number;
   private readonly loader = new THREE.TextureLoader();
   private readonly renderTiles = new Map<string, RenderTile>();
   private readonly textures = new Map<string, TextureRecord>();
@@ -66,7 +67,7 @@ export class RasterTileLayer {
   ) {
     this.ellipsoid = ellipsoid;
     this.provider = provider;
-    this.geometry = createGridGeometry(options.segments ?? 16);
+    this.baseSegments = Math.max(2, Math.round(options.segments ?? 16));
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 8));
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 512));
     this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
@@ -106,7 +107,8 @@ export class RasterTileLayer {
     for (const record of this.textures.values()) record.texture?.dispose();
     this.renderTiles.clear();
     this.textures.clear();
-    this.geometry.dispose();
+    for (const geometry of this.geometries.values()) geometry.dispose();
+    this.geometries.clear();
     this.object3d.clear();
   }
 
@@ -138,7 +140,7 @@ export class RasterTileLayer {
       const key = tileKey(tile.id);
       if (this.renderTiles.has(key)) continue;
       const material = this.createMaterial(tile.id);
-      const mesh = new THREE.Mesh(this.geometry, material);
+      const mesh = new THREE.Mesh(this.geometryForLevel(tile.id.level), material);
       mesh.frustumCulled = false;
       mesh.renderOrder = 1;
       mesh.onBeforeRender = (_renderer, _scene, camera) => {
@@ -147,6 +149,21 @@ export class RasterTileLayer {
       this.renderTiles.set(key, { id: tile.id, mesh, textureKey: '' });
       this.object3d.add(mesh);
     }
+  }
+
+  /**
+   * Keep the angular size of a raster triangle approximately constant through
+   * the coarse globe levels. The powers of two also make every parent edge
+   * sample coincide with its two children, preventing T-junction cracks.
+   */
+  private geometryForLevel(level: number): THREE.BufferGeometry {
+    const segments = Math.max(this.baseSegments, Math.round(1024 / 2 ** level));
+    let geometry = this.geometries.get(segments);
+    if (!geometry) {
+      geometry = createGridGeometry(segments);
+      this.geometries.set(segments, geometry);
+    }
+    return geometry;
   }
 
   private createMaterial(tile: TileId): THREE.ShaderMaterial {

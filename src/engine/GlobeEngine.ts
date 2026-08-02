@@ -95,8 +95,14 @@ export class GlobeEngine {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
 
-    const globeGeometry = new THREE.SphereGeometry(this.ellipsoid.equatorialRadius, 96, 64);
-    globeGeometry.scale(1, this.ellipsoid.polarRadius / this.ellipsoid.equatorialRadius, 1);
+    // This is an occlusion/fallback body, not the rendered map surface. Keep it
+    // slightly below the ellipsoid so its coarse triangles can never protrude
+    // through raster tiles at grazing angles near the globe limb.
+    const occlusionInset = Math.min(1000, this.ellipsoid.polarRadius * 0.001);
+    const occlusionEquatorialRadius = this.ellipsoid.equatorialRadius - occlusionInset;
+    const occlusionPolarRadius = this.ellipsoid.polarRadius - occlusionInset;
+    const globeGeometry = new THREE.SphereGeometry(occlusionEquatorialRadius, 96, 64);
+    globeGeometry.scale(1, occlusionPolarRadius / occlusionEquatorialRadius, 1);
     const globeMaterial = new THREE.MeshBasicMaterial({ color: 0x17465c });
     const globe = new THREE.Mesh(globeGeometry, globeMaterial);
     globe.renderOrder = 0;
@@ -165,14 +171,30 @@ export class GlobeEngine {
       const cameraLevel = this.getCameraLevel();
       this.imagery?.provider.setViewLevel?.(cameraLevel);
       const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
-      const minimumLevelOverride = minimumLodLevelOffset === undefined
+      let minimumLevelOverride = minimumLodLevelOffset === undefined
         ? undefined
         : Math.floor(cameraLevel) + minimumLodLevelOffset;
-      const selection = this.lod.select(
+      let selection = this.lod.select(
         this.camera,
         this.renderer.domElement.clientHeight,
         minimumLevelOverride
       );
+      // A forced vector minimum can exceed the tile budget at polar/oblique
+      // global views. Never keep a half-refined mix spanning several levels:
+      // lower the whole minimum and select again until refinement completes.
+      while (
+        minimumLevelOverride !== undefined &&
+        minimumLevelOverride > this.lod.minLevel &&
+        selection.tiles.length >= this.lod.maxTiles &&
+        minimumSelectedLevel(selection.stats) < minimumLevelOverride
+      ) {
+        minimumLevelOverride -= 1;
+        selection = this.lod.select(
+          this.camera,
+          this.renderer.domElement.clientHeight,
+          minimumLevelOverride
+        );
+      }
       const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
       this.grid.update(selection.tiles, this.camera.position);
       this.emitStats(selection.stats, imageryStats, cameraLevel);
@@ -302,4 +324,9 @@ export class GlobeEngine {
     this.lastStatsSignature = signature;
     this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery });
   }
+}
+
+function minimumSelectedLevel(stats: GlobeLodStats): number {
+  const levels = [...stats.levels.keys()];
+  return levels.length > 0 ? Math.min(...levels) : Number.POSITIVE_INFINITY;
 }
