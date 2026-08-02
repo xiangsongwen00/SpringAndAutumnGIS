@@ -69,7 +69,7 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
     : '影像未启用';
   terrainValue.textContent = stats.terrain
-    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
+    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.stitchedEdges} 接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
 };
 

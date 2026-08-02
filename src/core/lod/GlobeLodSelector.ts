@@ -41,7 +41,14 @@ export type GlobeLodSelectorOptions = {
 export interface SurfaceDisplacementBoundsSource {
   readonly revision: number;
   maximumHeight(id: TileId): number | null;
+  /** Exact loaded height interval when available. */
+  heightRange?(id: TileId): SurfaceDisplacementRange | null;
 }
+
+export type SurfaceDisplacementRange = Readonly<{
+  minimumHeight: number;
+  maximumHeight: number;
+}>;
 
 type Candidate = SelectedTile & { canSplit: boolean };
 type ViewSurfaceSample = {
@@ -244,7 +251,7 @@ export class GlobeLodSelector {
     this.ellipsoid.cartographicToCartesian({ longitude, latitude }, this.surfacePoint);
 
     const surfaceDisplacement = this.surfaceDisplacementForTile(id);
-    if (id.level > 0 && !this.isAboveHorizon(rectangle, surfaceDisplacement)) {
+    if (id.level > 0 && !this.isAboveHorizon(rectangle, surfaceDisplacement.maximumHeight)) {
       this.horizonCulled += 1;
       return null;
     }
@@ -336,11 +343,28 @@ export class GlobeLodSelector {
     }
   }
 
-  private surfaceDisplacementForTile(id: TileId): number {
+  private surfaceDisplacementForTile(id: TileId): SurfaceDisplacementRange {
+    const loadedRange = this.surfaceDisplacementSource?.heightRange?.(id);
+    if (loadedRange) {
+      const minimumHeight = THREE.MathUtils.clamp(
+        loadedRange.minimumHeight,
+        -this.maximumSurfaceDisplacement,
+        this.maximumSurfaceDisplacement
+      );
+      const maximumHeight = THREE.MathUtils.clamp(
+        loadedRange.maximumHeight,
+        minimumHeight,
+        this.maximumSurfaceDisplacement
+      );
+      return { minimumHeight, maximumHeight };
+    }
     const height = this.surfaceDisplacementSource?.maximumHeight(id);
     return height === null || height === undefined
-      ? this.maximumSurfaceDisplacement
-      : THREE.MathUtils.clamp(height, 0, this.maximumSurfaceDisplacement);
+      ? { minimumHeight: 0, maximumHeight: this.maximumSurfaceDisplacement }
+      : {
+          minimumHeight: 0,
+          maximumHeight: THREE.MathUtils.clamp(height, 0, this.maximumSurfaceDisplacement)
+        };
   }
 
   private isAboveHorizon(rectangle: Rectangle, surfaceDisplacement: number): boolean {
@@ -404,7 +428,7 @@ export class GlobeLodSelector {
   private isInsideFrustum(
     id: TileId,
     rectangle: Rectangle,
-    surfaceDisplacement: number
+    surfaceDisplacement: SurfaceDisplacementRange
   ): boolean {
     const key = tileKey(id);
     const cached = this.boundsCache.get(key);
@@ -416,7 +440,9 @@ export class GlobeLodSelector {
       { longitude: longitudeCenter, latitude: latitudeCenter },
       this.tileBounds.center
     );
-    if (surfaceDisplacement > 0) {
+    const displacementMidpoint =
+      (surfaceDisplacement.minimumHeight + surfaceDisplacement.maximumHeight) * 0.5;
+    if (displacementMidpoint !== 0) {
       const a2 = this.ellipsoid.equatorialRadius ** 2;
       const b2 = this.ellipsoid.polarRadius ** 2;
       this.boundsNormal.set(
@@ -426,7 +452,7 @@ export class GlobeLodSelector {
       ).normalize();
       this.tileBounds.center.addScaledVector(
         this.boundsNormal,
-        surfaceDisplacement * 0.5
+        displacementMidpoint
       );
     }
 
@@ -444,9 +470,16 @@ export class GlobeLodSelector {
           this.sampleDirection
         );
         radius = Math.max(radius, this.tileBounds.center.distanceTo(this.sampleDirection));
-        if (surfaceDisplacement > 0) {
+        if (surfaceDisplacement.minimumHeight !== 0) {
           this.ellipsoid.cartographicToCartesian(
-            { longitude, latitude, height: surfaceDisplacement },
+            { longitude, latitude, height: surfaceDisplacement.minimumHeight },
+            this.displacedSample
+          );
+          radius = Math.max(radius, this.tileBounds.center.distanceTo(this.displacedSample));
+        }
+        if (surfaceDisplacement.maximumHeight !== surfaceDisplacement.minimumHeight) {
+          this.ellipsoid.cartographicToCartesian(
+            { longitude, latitude, height: surfaceDisplacement.maximumHeight },
             this.displacedSample
           );
           radius = Math.max(radius, this.tileBounds.center.distanceTo(this.displacedSample));

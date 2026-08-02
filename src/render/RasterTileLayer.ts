@@ -268,11 +268,10 @@ export class RasterTileLayer {
     const primeVerticalRadius = a / Math.sqrt(latitudeTerm) + this.surfaceOffset;
     const meridionalRadius =
       (a * (1 - eccentricitySquared)) / latitudeTerm ** 1.5 + this.surfaceOffset;
-    const terrainSkirtDepth = THREE.MathUtils.clamp(
-      (Math.PI * 2 * a) / size / 64,
-      10,
-      2_000
-    );
+    // Terrain edges are reconciled by height and slope. A vertical skirt turns
+    // any transient mismatch into a conspicuous wall at grazing angles, so the
+    // regular imagery surface keeps its perimeter on the reconciled edge.
+    const terrainSkirtDepth = 0;
     return new THREE.ShaderMaterial({
       uniforms: {
         sag_ellipsoidRadii: {
@@ -392,19 +391,19 @@ export class RasterTileLayer {
           vec2 xyzUv = uvOffset + uv * uvScale;
           v_uv = vec2(xyzUv.x, 1.0 - xyzUv.y);
           vec2 terrainUv = terrainUvOffset + uv * terrainUvScale;
-          v_terrainUv = terrainUv;
+          // Height arrays contain endpoint samples (257 samples / 256 cells).
+          // Convert logical [0,1] coordinates to texel centres before linear
+          // filtering; raw normalized UVs introduce a sub-texel parent/child
+          // offset and can reopen a geometrically stitched edge.
+          vec2 terrainSampleUv = 0.5 * terrainTexelSize +
+            terrainUv * (vec2(1.0) - terrainTexelSize);
+          v_terrainUv = terrainSampleUv;
           float fineHeight = hasTerrain
-            ? texture2D(terrainTexture, terrainUv).r * terrainExaggeration
+            ? texture2D(terrainTexture, terrainSampleUv).r * terrainExaggeration
             : 0.0;
+          // CPU terrain stitching gives adjacent tiles one shared geographic
+          // edge. Do not replace that edge with this tile's unrelated parent.
           float heightMeters = fineHeight;
-          if (hasTerrainParent) {
-            vec2 parentUv = terrainParentUvOffset + uv * terrainParentUvScale;
-            float parentHeight = texture2D(terrainParentTexture, parentUv).r * terrainExaggeration;
-            vec2 edgeDistance = min(terrainUv, vec2(1.0) - terrainUv);
-            float edge = min(edgeDistance.x, edgeDistance.y);
-            float blendWidth = max(terrainTexelSize.x, terrainTexelSize.y) * 2.0;
-            heightMeters = mix(parentHeight, fineHeight, smoothstep(0.0, blendWidth, edge));
-          }
           if (hasTerrain) heightMeters -= skirt * terrainSkirtDepth;
           v_globeNormal = normalize(vec3(
             cosLatitude * longitudeSinCos.x,

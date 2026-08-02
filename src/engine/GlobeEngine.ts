@@ -482,7 +482,7 @@ export class GlobeEngine {
       : 'none';
     const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
     const terrainSignature = terrain
-      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes}`
+      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges}`
       : 'none';
     const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;

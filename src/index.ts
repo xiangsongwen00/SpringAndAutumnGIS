@@ -38,6 +38,13 @@ export {
   decodeTerrainRgbHeight,
   sampleTerrainTile
 } from './core/terrain/TerrainProvider';
+export { stitchTerrainNeighborhood } from './core/terrain/TerrainEdgeStitcher';
+export type {
+  StitchableTerrainTile,
+  TerrainEdgeStitchOptions,
+  TerrainStitchBounds,
+  TerrainStitchResult
+} from './core/terrain/TerrainEdgeStitcher';
 export type {
   TerrainProvider,
   TerrainRgbEncoding,
@@ -50,7 +57,9 @@ export { GlobeLodSelector } from './core/lod/GlobeLodSelector';
 export type {
   GlobeLodSelectorOptions,
   GlobeLodStats,
-  SelectedTile
+  SelectedTile,
+  SurfaceDisplacementBoundsSource,
+  SurfaceDisplacementRange
 } from './core/lod/GlobeLodSelector';
 
 export { GlobeGridRenderer } from './render/GlobeGridRenderer';

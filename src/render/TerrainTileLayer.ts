@@ -3,6 +3,7 @@ import { WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransfo
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { SurfaceDisplacementBoundsSource } from '../core/lod/GlobeLodSelector';
+import type { SurfaceDisplacementRange } from '../core/lod/GlobeLodSelector';
 import {
   sampleTerrainTile,
   type TerrainProvider,
@@ -10,6 +11,10 @@ import {
 } from '../core/terrain/TerrainProvider';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
+import {
+  stitchTerrainNeighborhood,
+  type StitchableTerrainTile
+} from '../core/terrain/TerrainEdgeStitcher';
 
 export type TerrainTileLayerOptions = {
   segments?: number;
@@ -29,6 +34,7 @@ export type TerrainTileLayerStats = Readonly<{
   errors: number;
   fallbacks: number;
   resourceBytes: number;
+  stitchedEdges: number;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -95,6 +101,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private _revision = 0;
   private lastSelection: readonly SelectedTile[] | null = null;
   private materialsDirty = true;
+  private stitchedEdges = 0;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -125,7 +132,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (record.state === 'error') counts.errors += 1;
       else counts[record.state] += 1;
     }
-    return { ...counts, fallbacks: this.fallbackCount, resourceBytes: this.residentResourceBytes() };
+    return {
+      ...counts,
+      fallbacks: this.fallbackCount,
+      resourceBytes: this.residentResourceBytes(),
+      stitchedEdges: this.stitchedEdges
+    };
   }
 
   update(
@@ -208,10 +220,18 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   maximumHeight(id: TileId): number | null {
     if (!this.enabled) return 0;
+    const range = this.heightRange(id);
+    return range ? Math.max(0, range.maximumHeight) : null;
+  }
+
+  heightRange(id: TileId): SurfaceDisplacementRange | null {
+    if (!this.enabled) return { minimumHeight: 0, maximumHeight: 0 };
     const record = this.findReadyAncestor(id);
-    return record?.data
-      ? Math.max(0, record.data.maximumHeight * this.exaggeration) + 2
-      : null;
+    if (!record?.data) return null;
+    return {
+      minimumHeight: record.data.minimumHeight * this.exaggeration - 2,
+      maximumHeight: record.data.maximumHeight * this.exaggeration + 2
+    };
   }
 
   dispose(): void {
@@ -363,6 +383,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
           record.data = data;
           record.state = 'ready';
           record.lastUsedFrame = this.frame;
+          this.stitchLoadedTerrain(record);
           this._revision += 1;
           this.materialsDirty = true;
         }
@@ -393,6 +414,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
       (uniforms.terrainUvOffset!.value as THREE.Vector2).set(
         binding?.offsetX ?? 0,
         binding?.offsetY ?? 0
+      );
+      (uniforms.terrainTexelSize!.value as THREE.Vector2).set(
+        1 / (binding?.width ?? 1),
+        1 / (binding?.height ?? 1)
       );
     }
   }
@@ -450,6 +475,33 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (texture && !this.suspended) texture.dispose();
   }
 
+  private stitchLoadedTerrain(loaded: TerrainRecord): void {
+    if (!loaded.data) return;
+    const tileByData = new Map<StitchableTerrainTile, TerrainRecord>();
+    const readyTiles: StitchableTerrainTile[] = [];
+    let loadedTile: StitchableTerrainTile | undefined;
+    for (const record of this.records.values()) {
+      if (record.state !== 'ready' || !record.data) continue;
+      const tile = { id: record.id, data: record.data };
+      readyTiles.push(tile);
+      tileByData.set(tile, record);
+      if (record === loaded) loadedTile = tile;
+    }
+    if (!loadedTile) return;
+    const result = stitchTerrainNeighborhood(loadedTile, readyTiles);
+    this.stitchedEdges += result.stitchedEdges;
+    for (const tile of result.modified) {
+      const record = tileByData.get(tile);
+      const bounds = result.bounds.get(tile);
+      if (!record?.data || !bounds) continue;
+      record.data = {
+        ...record.data,
+        minimumHeight: bounds.minimumHeight,
+        maximumHeight: bounds.maximumHeight
+      };
+    }
+  }
+
   private createMaterial(tile: TileId): THREE.ShaderMaterial {
     const size = 2 ** tile.level;
     const longitudeCenter = -Math.PI + ((tile.x + 0.5) / size) * Math.PI * 2;
@@ -498,6 +550,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
         terrainTexture: { value: null },
         terrainUvScale: { value: new THREE.Vector2(1, 1) },
         terrainUvOffset: { value: new THREE.Vector2(0, 0) },
+        terrainTexelSize: { value: new THREE.Vector2(1, 1) },
         hasTerrain: { value: false },
         terrainExaggeration: { value: this.exaggeration }
       },
@@ -519,6 +572,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
         uniform sampler2D terrainTexture;
         uniform vec2 terrainUvScale;
         uniform vec2 terrainUvOffset;
+        uniform vec2 terrainTexelSize;
         uniform bool hasTerrain;
         uniform float terrainExaggeration;
         #include <common>
@@ -537,7 +591,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
           float cosLatitude = inversesqrt(1.0 + sinhMercator * sinhMercator);
           float sinLatitude = sinhMercator * cosLatitude;
           vec2 terrainUv = terrainUvOffset + uv * terrainUvScale;
-          float heightMeters = hasTerrain ? texture2D(terrainTexture, terrainUv).r * terrainExaggeration : 0.0;
+          vec2 terrainSampleUv = 0.5 * terrainTexelSize +
+            terrainUv * (vec2(1.0) - terrainTexelSize);
+          float heightMeters = hasTerrain
+            ? texture2D(terrainTexture, terrainSampleUv).r * terrainExaggeration
+            : 0.0;
           v_height = heightMeters;
           v_globeNormal = normalize(vec3(cosLatitude * longitudeSinCos.x, sinLatitude, cosLatitude * longitudeSinCos.y));
           if (sag_useLocalCoordinates) {

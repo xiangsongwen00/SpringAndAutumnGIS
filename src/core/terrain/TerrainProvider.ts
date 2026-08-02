@@ -210,7 +210,15 @@ async function decodeTerrainImage(
     minimumHeight = Math.min(minimumHeight, height);
     maximumHeight = Math.max(maximumHeight, height);
   }
-  return createTerrainTile(id, canvas.width, canvas.height, heights, minimumHeight, maximumHeight);
+  const normalized = normalizeDyadicHeightGrid(heights, canvas.width, canvas.height);
+  return createTerrainTile(
+    id,
+    normalized.width,
+    normalized.height,
+    normalized.heights,
+    minimumHeight,
+    maximumHeight
+  );
 }
 
 function createFlatTerrainTile(id: TileId, height: number): TerrainTileData {
@@ -229,9 +237,55 @@ function createTerrainTile(
   texture.colorSpace = THREE.NoColorSpace;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
-  texture.minFilter = THREE.NearestFilter;
-  texture.magFilter = THREE.NearestFilter;
+  // Linear sampling makes the stitched border profile continuous at geometry
+  // vertices. Nearest filtering can select opposite texels on the two sides.
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return { id, width, height, heights, minimumHeight, maximumHeight, texture };
+}
+
+/**
+ * A 256-sample edge has 255 intervals and cannot nest exactly under quadtree
+ * subdivision. 257 samples produce 256 dyadic cells, so parent/child edge
+ * vertices coincide at every level transition.
+ */
+function normalizeDyadicHeightGrid(
+  source: Float32Array,
+  sourceWidth: number,
+  sourceHeight: number
+): { width: number; height: number; heights: Float32Array } {
+  const width = sourceWidth > 1 && THREE.MathUtils.isPowerOfTwo(sourceWidth)
+    ? sourceWidth + 1
+    : sourceWidth;
+  const height = sourceHeight > 1 && THREE.MathUtils.isPowerOfTwo(sourceHeight)
+    ? sourceHeight + 1
+    : sourceHeight;
+  if (width === sourceWidth && height === sourceHeight) {
+    return { width, height, heights: source };
+  }
+  const heights = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = height <= 1 ? 0 : (y / (height - 1)) * (sourceHeight - 1);
+    const y0 = Math.floor(sourceY);
+    const y1 = Math.min(sourceHeight - 1, y0 + 1);
+    const ty = sourceY - y0;
+    for (let x = 0; x < width; x += 1) {
+      const sourceX = width <= 1 ? 0 : (x / (width - 1)) * (sourceWidth - 1);
+      const x0 = Math.floor(sourceX);
+      const x1 = Math.min(sourceWidth - 1, x0 + 1);
+      const tx = sourceX - x0;
+      const northWest = source[y0 * sourceWidth + x0] ?? 0;
+      const northEast = source[y0 * sourceWidth + x1] ?? northWest;
+      const southWest = source[y1 * sourceWidth + x0] ?? northWest;
+      const southEast = source[y1 * sourceWidth + x1] ?? southWest;
+      heights[y * width + x] = THREE.MathUtils.lerp(
+        THREE.MathUtils.lerp(northWest, northEast, tx),
+        THREE.MathUtils.lerp(southWest, southEast, tx),
+        ty
+      );
+    }
+  }
+  return { width, height, heights };
 }
