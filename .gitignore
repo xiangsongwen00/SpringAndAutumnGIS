@@ -24,3 +24,5 @@ dist/
 .cache/
 .DS_Store
 *.zip
+.env.local
+.env.*.local

@@ -4,6 +4,7 @@ import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
+import type { TerrainHeightSource } from './TerrainTileLayer';
 
 export type RasterTileLayerOptions = {
   segments?: number;
@@ -11,6 +12,7 @@ export type RasterTileLayerOptions = {
   maxCachedTiles?: number;
   surfaceOffset?: number;
   maxAnisotropy?: number;
+  terrain?: TerrainHeightSource;
 };
 
 export type RasterTileLayerStats = Readonly<{
@@ -34,6 +36,7 @@ type RenderTile = {
   id: TileId;
   mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
   textureKey: string;
+  terrainKey: string;
 };
 
 /** Visible-leaf raster consumer. Selection remains owned by GlobeLodSelector. */
@@ -52,6 +55,7 @@ export class RasterTileLayer {
   private readonly maxCachedTiles: number;
   private readonly surfaceOffset: number;
   private readonly maxAnisotropy: number;
+  private readonly terrain?: TerrainHeightSource;
   private readonly cameraHigh = new THREE.Vector3();
   private readonly cameraLow = new THREE.Vector3();
   private readonly tileOrigin = new THREE.Vector3();
@@ -72,6 +76,7 @@ export class RasterTileLayer {
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 512));
     this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
+    this.terrain = options.terrain;
     this.loader.setCrossOrigin('anonymous');
     this.object3d.renderOrder = 1;
   }
@@ -146,7 +151,7 @@ export class RasterTileLayer {
       mesh.onBeforeRender = (_renderer, _scene, camera) => {
         splitVector3(camera.position, this.cameraHigh, this.cameraLow);
       };
-      this.renderTiles.set(key, { id: tile.id, mesh, textureKey: '' });
+      this.renderTiles.set(key, { id: tile.id, mesh, textureKey: '', terrainKey: '' });
       this.object3d.add(mesh);
     }
   }
@@ -246,11 +251,19 @@ export class RasterTileLayer {
         uvScale: { value: new THREE.Vector2(1, 1) },
         uvOffset: { value: new THREE.Vector2(0, 0) },
         hasTexture: { value: false },
+        terrainTexture: { value: null },
+        terrainUvScale: { value: new THREE.Vector2(1, 1) },
+        terrainUvOffset: { value: new THREE.Vector2(0, 0) },
+        terrainTexelSize: { value: new THREE.Vector2(1, 1) },
+        terrainMetersPerTexel: { value: new THREE.Vector2(1, 1) },
+        hasTerrain: { value: false },
+        terrainExaggeration: { value: this.terrain?.exaggeration ?? 1 },
         placeholder: { value: placeholderColor(tile.level) }
       },
       vertexShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
+        varying vec2 v_terrainUv;
         uniform vec3 sag_originHigh;
         uniform vec3 sag_originLow;
         uniform vec3 sag_east;
@@ -265,6 +278,11 @@ export class RasterTileLayer {
         uniform float tileMercatorSpan;
         uniform vec2 uvScale;
         uniform vec2 uvOffset;
+        uniform sampler2D terrainTexture;
+        uniform vec2 terrainUvScale;
+        uniform vec2 terrainUvOffset;
+        uniform bool hasTerrain;
+        uniform float terrainExaggeration;
         #include <common>
         #include <logdepthbuf_pars_vertex>
         ${globeCoordinateShader}
@@ -292,6 +310,11 @@ export class RasterTileLayer {
           // sub-rectangle so exact tiles and fallback tiles share one convention.
           vec2 xyzUv = uvOffset + uv * uvScale;
           v_uv = vec2(xyzUv.x, 1.0 - xyzUv.y);
+          vec2 terrainUv = terrainUvOffset + uv * terrainUvScale;
+          v_terrainUv = terrainUv;
+          float heightMeters = hasTerrain
+            ? texture2D(terrainTexture, terrainUv).r * terrainExaggeration
+            : 0.0;
           v_globeNormal = normalize(vec3(
             cosLatitude * longitudeSinCos.x,
             sinLatitude,
@@ -316,7 +339,7 @@ export class RasterTileLayer {
             vec3 localWorld =
               sag_east * eastMeters +
               sag_north * northMeters +
-              sag_up * upMeters;
+              sag_up * (upMeters + heightMeters);
             gl_Position = sag_projectLocalToEye(
               localWorld,
               sag_originHigh,
@@ -326,7 +349,7 @@ export class RasterTileLayer {
             gl_Position = sag_projectGeodeticTrig(
               longitudeSinCos,
               latitudeSinCos,
-              0.0
+              heightMeters
             );
           }
           #include <logdepthbuf_vertex>
@@ -335,8 +358,14 @@ export class RasterTileLayer {
       fragmentShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
+        varying vec2 v_terrainUv;
         uniform sampler2D tileTexture;
+        uniform sampler2D terrainTexture;
         uniform bool hasTexture;
+        uniform bool hasTerrain;
+        uniform float terrainExaggeration;
+        uniform vec2 terrainTexelSize;
+        uniform vec2 terrainMetersPerTexel;
         uniform vec3 placeholder;
         #include <logdepthbuf_pars_fragment>
         void main() {
@@ -345,6 +374,22 @@ export class RasterTileLayer {
             dot(normalize(v_globeNormal), normalize(vec3(-0.35, 0.55, 1.0))),
             0.0
           );
+          if (hasTerrain) {
+            float westHeight = texture2D(terrainTexture, v_terrainUv - vec2(terrainTexelSize.x, 0.0)).r;
+            float eastHeight = texture2D(terrainTexture, v_terrainUv + vec2(terrainTexelSize.x, 0.0)).r;
+            float northHeight = texture2D(terrainTexture, v_terrainUv - vec2(0.0, terrainTexelSize.y)).r;
+            float southHeight = texture2D(terrainTexture, v_terrainUv + vec2(0.0, terrainTexelSize.y)).r;
+            float slopeEast = (eastHeight - westHeight) * terrainExaggeration /
+              max(1.0, 2.0 * terrainMetersPerTexel.x);
+            float slopeNorth = (northHeight - southHeight) * terrainExaggeration /
+              max(1.0, 2.0 * terrainMetersPerTexel.y);
+            vec3 terrainNormal = normalize(vec3(-slopeEast, -slopeNorth, 1.0));
+            float relief = 0.78 + 0.30 * max(
+              dot(terrainNormal, normalize(vec3(-0.45, 0.55, 0.78))),
+              0.0
+            );
+            daylight *= relief;
+          }
           color = min(color * 1.24 * daylight + vec3(0.025, 0.04, 0.055), vec3(1.0));
           gl_FragColor = vec4(color, 1.0);
           #include <logdepthbuf_fragment>
@@ -359,30 +404,31 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
-    for (let rank = 0; rank < selection.length; rank += 1) {
-      const tile = selection[rank];
+    const prioritized = [...selection].sort((a, b) => b.screenPixels - a.screenPixels);
+    for (let rank = 0; rank < prioritized.length; rank += 1) {
+      const tile = prioritized[rank];
       if (!tile) continue;
       const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
       const maximumSourceLevel = Math.min(
         this.provider.maximumSourceLevel?.(tile.id.level) ??
           tile.id.level + levelOffset,
-        this.provider.maxLevel
+        this.provider.maxLevel,
+        tile.id.level
       );
       if (maximumSourceLevel < this.provider.minLevel) continue;
-      for (
-        let level = this.provider.minLevel;
-        level <= maximumSourceLevel;
-        level += 1
-      ) {
-        const shift = tile.id.level - level;
-        const ancestor: TileId = {
-          level,
-          x: Math.floor(tile.id.x / 2 ** shift),
-          y: Math.floor(tile.id.y / 2 ** shift)
-        };
-        this.visibleTextureKeys.add(tileKey(ancestor));
-        this.queueTexture(ancestor, level * 10_000 + rank);
+
+      const desired = ancestorAtLevel(tile.id, maximumSourceLevel);
+      this.visibleTextureKeys.add(tileKey(desired));
+      const ready = this.findReadyAncestor(tile.id);
+      if (ready) {
+        this.visibleTextureKeys.add(ready.key);
+      } else {
+        const bridgeLevel = Math.max(this.provider.minLevel, maximumSourceLevel - 3);
+        const bridge = ancestorAtLevel(tile.id, bridgeLevel);
+        this.visibleTextureKeys.add(tileKey(bridge));
+        this.queueTexture(bridge, rank * 2);
       }
+      this.queueTexture(desired, rank * 2 + 1);
     }
     for (const [key, record] of this.textures) {
       if (this.visibleTextureKeys.has(key) || record.state === 'loading' || record.state === 'ready') continue;
@@ -486,18 +532,43 @@ export class RasterTileLayer {
       const source = this.findReadyAncestor(tile.id);
       const sourceKey = source?.key ?? '';
       if (source && source.id.level < tile.id.level) this.fallbackCount += 1;
-      if (sourceKey === renderTile.textureKey) continue;
-      renderTile.textureKey = sourceKey;
       const uniforms = renderTile.mesh.material.uniforms;
       if (!uniforms) continue;
-      uniforms.tileTexture!.value = source?.texture ?? null;
-      uniforms.hasTexture!.value = source !== undefined;
-      const levels = source ? tile.id.level - source.id.level : 0;
-      const scale = 1 / 2 ** levels;
-      const localX = source ? tile.id.x - source.id.x * 2 ** levels : 0;
-      const localY = source ? tile.id.y - source.id.y * 2 ** levels : 0;
-      (uniforms.uvScale!.value as THREE.Vector2).set(scale, scale);
-      (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
+      if (sourceKey !== renderTile.textureKey) {
+        renderTile.textureKey = sourceKey;
+        uniforms.tileTexture!.value = source?.texture ?? null;
+        uniforms.hasTexture!.value = source !== undefined;
+        const levels = source ? tile.id.level - source.id.level : 0;
+        const scale = 1 / 2 ** levels;
+        const localX = source ? tile.id.x - source.id.x * 2 ** levels : 0;
+        const localY = source ? tile.id.y - source.id.y * 2 ** levels : 0;
+        (uniforms.uvScale!.value as THREE.Vector2).set(scale, scale);
+        (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
+      }
+      const terrain = this.terrain?.resolveTexture(tile.id);
+      const terrainKey = terrain?.key ?? '';
+      if (terrainKey === renderTile.terrainKey) continue;
+      renderTile.terrainKey = terrainKey;
+      uniforms.terrainTexture!.value = terrain?.texture ?? null;
+      uniforms.hasTerrain!.value = terrain !== undefined;
+      (uniforms.terrainUvScale!.value as THREE.Vector2).setScalar(terrain?.scale ?? 1);
+      (uniforms.terrainUvOffset!.value as THREE.Vector2).set(
+        terrain?.offsetX ?? 0,
+        terrain?.offsetY ?? 0
+      );
+      (uniforms.terrainTexelSize!.value as THREE.Vector2).set(
+        1 / (terrain?.width ?? 1),
+        1 / (terrain?.height ?? 1)
+      );
+      const sourceLevel = terrain?.sourceLevel ?? tile.id.level;
+      const sourceSize = 2 ** sourceLevel;
+      const mercatorCenter = Math.PI - ((tile.id.y + 0.5) / 2 ** tile.id.level) * Math.PI * 2;
+      const cosLatitude = 1 / Math.cosh(mercatorCenter);
+      const circumference = Math.PI * 2 * this.ellipsoid.equatorialRadius;
+      (uniforms.terrainMetersPerTexel!.value as THREE.Vector2).set(
+        (circumference * cosLatitude) / (sourceSize * (terrain?.width ?? 1)),
+        (circumference * cosLatitude) / (sourceSize * (terrain?.height ?? 1))
+      );
     }
   }
 
@@ -505,7 +576,8 @@ export class RasterTileLayer {
     const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
     const maximumSourceLevel = Math.min(
       this.provider.maximumSourceLevel?.(id.level) ?? id.level + levelOffset,
-      this.provider.maxLevel
+      this.provider.maxLevel,
+      id.level
     );
     for (
       let level = maximumSourceLevel;
@@ -542,6 +614,15 @@ export class RasterTileLayer {
       this.textures.delete(record.key);
     }
   }
+}
+
+function ancestorAtLevel(id: TileId, level: number): TileId {
+  const shift = Math.max(0, id.level - level);
+  return {
+    level,
+    x: Math.floor(id.x / 2 ** shift),
+    y: Math.floor(id.y / 2 ** shift)
+  };
 }
 
 function createGridGeometry(segmentsInput: number): THREE.BufferGeometry {

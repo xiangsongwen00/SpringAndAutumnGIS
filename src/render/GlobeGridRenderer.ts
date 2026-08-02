@@ -3,10 +3,12 @@ import { Ellipsoid } from '../core/geo/Ellipsoid';
 import { tileKey } from '../core/tiling/GeographicTilingScheme';
 import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import { globeCoordinateShader } from './shaders/coordinates';
+import type { TerrainHeightSource } from './TerrainTileLayer';
 
 export type GlobeGridRendererOptions = {
   subdivisions?: number;
   heightOffset?: number;
+  terrain?: TerrainHeightSource;
 };
 
 /** Converts an LOD leaf set into one draw call of coloured latitude/longitude lines. */
@@ -16,6 +18,7 @@ export class GlobeGridRenderer {
   private readonly ellipsoid: Ellipsoid;
   private readonly subdivisions: number;
   private readonly heightOffset: number;
+  private readonly terrain?: TerrainHeightSource;
   private readonly geometry: THREE.BufferGeometry;
   private readonly material: THREE.ShaderMaterial;
   private readonly cameraHigh = new THREE.Vector3();
@@ -28,6 +31,7 @@ export class GlobeGridRenderer {
     this.ellipsoid = ellipsoid;
     this.subdivisions = Math.max(1, Math.round(options.subdivisions ?? 8));
     this.heightOffset = Math.max(0, options.heightOffset ?? 0.3);
+    this.terrain = options.terrain;
     this.geometry = new THREE.BufferGeometry();
     this.material = new THREE.ShaderMaterial({
       uniforms: {
@@ -77,7 +81,7 @@ export class GlobeGridRenderer {
 
   update(tiles: readonly SelectedTile[], cameraPosition?: THREE.Vector3): boolean {
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
-    const signature = tiles.map((tile) => tileKey(tile.id)).join('|');
+    const signature = `${this.terrain?.revision ?? 0}|${tiles.map((tile) => tileKey(tile.id)).join('|')}`;
     if (signature === this.signature) return false;
     this.signature = signature;
 
@@ -188,8 +192,9 @@ export class GlobeGridRenderer {
     originsHigh: number[],
     originsLow: number[]
   ): void {
+    const terrainHeight = this.terrain?.sampleHeight(longitude, latitude) ?? 0;
     this.ellipsoid.cartographicToCartesian(
-      { longitude, latitude, height: this.heightOffset },
+      { longitude, latitude, height: terrainHeight + this.heightOffset },
       this.vertexWorld
     );
     positions.push(

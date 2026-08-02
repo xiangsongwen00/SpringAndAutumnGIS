@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { CoordinateTransform } from '../core/coordinates/CoordinateTransform';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import {
   GlobeLodSelector,
@@ -14,10 +14,22 @@ import {
   type RasterTileLayerOptions,
   type RasterTileLayerStats
 } from '../render/RasterTileLayer';
+import type { TerrainProvider } from '../core/terrain/TerrainProvider';
+import {
+  TerrainTileLayer,
+  type TerrainTileLayerOptions,
+  type TerrainTileLayerStats
+} from '../render/TerrainTileLayer';
+import {
+  GlobeCameraController,
+  type GlobeCameraViewState,
+  type GlobeFlyToOptions
+} from './GlobeCameraController';
 
 export type GlobeEngineStats = GlobeLodStats & Readonly<{
   cameraLevel: number;
   imagery: RasterTileLayerStats | null;
+  terrain: TerrainTileLayerStats | null;
 }>;
 
 export type GlobeNavigationOptions = {
@@ -34,6 +46,10 @@ export type GlobeNavigationOptions = {
   minAltitude?: number;
   /** Multiplier applied to altitude-proportional wheel speed near the surface. */
   zoomAltitudeGain?: number;
+  /** Right-drag surface-focus orbit sensitivity. */
+  lookSpeed?: number;
+  /** Middle-drag surface-tilt sensitivity. */
+  tiltSpeed?: number;
 };
 
 export type GlobeEngineOptions = {
@@ -44,6 +60,8 @@ export type GlobeEngineOptions = {
   grid?: GlobeGridRendererOptions;
   imagery?: false | RasterTileProvider;
   raster?: RasterTileLayerOptions;
+  terrain?: false | TerrainProvider;
+  terrainLayer?: TerrainTileLayerOptions;
   initialView?: {
     longitude: number;
     latitude: number;
@@ -58,11 +76,13 @@ export class GlobeEngine {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(50, 1, 0.02, 100_000_000);
   readonly renderer: THREE.WebGLRenderer;
-  readonly controls: OrbitControls;
+  readonly controls: GlobeCameraController;
   readonly ellipsoid = Ellipsoid.WGS84;
+  readonly coordinates = new CoordinateTransform(this.ellipsoid);
   readonly lod: GlobeLodSelector;
   readonly grid: GlobeGridRenderer;
   readonly imagery: RasterTileLayer | null;
+  readonly terrain: TerrainTileLayer | null;
 
   private readonly container: HTMLElement;
   private readonly onStats?: (stats: GlobeEngineStats) => void;
@@ -83,11 +103,19 @@ export class GlobeEngine {
       minZoomSpeed: Math.max(0.000000001, options.navigation?.minZoomSpeed ?? 0.00000001),
       dampingFactor: THREE.MathUtils.clamp(options.navigation?.dampingFactor ?? 0.12, 0, 1),
       minAltitude: Math.max(0.05, options.navigation?.minAltitude ?? 0.25),
-      zoomAltitudeGain: Math.max(0.1, options.navigation?.zoomAltitudeGain ?? 5)
+      zoomAltitudeGain: Math.max(0.1, options.navigation?.zoomAltitudeGain ?? 5),
+      lookSpeed: Math.max(0.05, options.navigation?.lookSpeed ?? 1),
+      tiltSpeed: Math.max(0.05, options.navigation?.tiltSpeed ?? 1)
     };
     const tilingScheme = options.lod?.tilingScheme ?? new WebMercatorTilingScheme();
     this.lod = new GlobeLodSelector({ ...options.lod, tilingScheme });
-    this.grid = new GlobeGridRenderer(this.ellipsoid, options.grid);
+    this.terrain = options.terrain === false || options.terrain === undefined
+      ? null
+      : new TerrainTileLayer(this.ellipsoid, options.terrain, options.terrainLayer);
+    this.grid = new GlobeGridRenderer(this.ellipsoid, {
+      ...options.grid,
+      terrain: this.terrain ?? undefined
+    });
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
     this.renderer.setPixelRatio(Math.min(options.pixelRatio ?? window.devicePixelRatio, 2));
@@ -122,10 +150,12 @@ export class GlobeEngine {
       ? null
       : new RasterTileLayer(this.ellipsoid, options.imagery, {
           ...options.raster,
+          terrain: this.terrain ?? undefined,
           maxAnisotropy:
             options.raster?.maxAnisotropy ?? this.renderer.capabilities.getMaxAnisotropy()
         });
     this.scene.add(globe, atmosphere);
+    if (this.terrain) this.scene.add(this.terrain.object3d);
     if (this.imagery) this.scene.add(this.imagery.object3d);
     this.scene.add(this.grid.object3d);
 
@@ -144,16 +174,20 @@ export class GlobeEngine {
       this.camera.position
     );
     this.camera.lookAt(0, 0, 0);
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls = new GlobeCameraController(
+      this.camera,
+      this.renderer.domElement,
+      this.ellipsoid,
+      this.terrain ?? undefined
+    );
     this.controls.enableDamping = true;
     this.controls.dampingFactor = this.navigation.dampingFactor;
-    this.controls.enablePan = false;
-    this.controls.rotateSpeed = this.navigation.rotateSpeed;
+    this.controls.orbitSpeed = this.navigation.rotateSpeed;
+    this.controls.lookSpeed = this.navigation.lookSpeed;
+    this.controls.tiltSpeed = this.navigation.tiltSpeed;
     this.controls.zoomSpeed = this.navigation.zoomSpeed;
     this.controls.minDistance = radius + this.navigation.minAltitude;
     this.controls.maxDistance = radius * 16;
-    this.controls.minPolarAngle = 0.015;
-    this.controls.maxPolarAngle = Math.PI - 0.015;
     this.controls.target.set(0, 0, 0);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -171,9 +205,14 @@ export class GlobeEngine {
       const cameraLevel = this.getCameraLevel();
       this.imagery?.provider.setViewLevel?.(cameraLevel);
       const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
-      let minimumLevelOverride = minimumLodLevelOffset === undefined
+      const surfacePitch = this.controls.getViewState().pitch;
+      const useMinimumLevelOverride =
+        minimumLodLevelOffset !== undefined &&
+        surfacePitch !== null &&
+        surfacePitch <= -55;
+      let minimumLevelOverride = !useMinimumLevelOverride
         ? undefined
-        : Math.floor(cameraLevel) + minimumLodLevelOffset;
+        : Math.floor(cameraLevel) + minimumLodLevelOffset!;
       let selection = this.lod.select(
         this.camera,
         this.renderer.domElement.clientHeight,
@@ -195,9 +234,10 @@ export class GlobeEngine {
           minimumLevelOverride
         );
       }
+      const terrainStats = this.terrain?.update(selection.tiles, this.camera.position) ?? null;
       const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
       this.grid.update(selection.tiles, this.camera.position);
-      this.emitStats(selection.stats, imageryStats, cameraLevel);
+      this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
       this.renderer.render(this.scene, this.camera);
     };
     this.frameHandle = requestAnimationFrame(renderFrame);
@@ -214,6 +254,7 @@ export class GlobeEngine {
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.imagery?.dispose();
+    this.terrain?.dispose();
     this.grid.dispose();
     this.scene.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
@@ -228,6 +269,19 @@ export class GlobeEngine {
   setImageryProvider(provider: RasterTileProvider): void {
     this.imagery?.setProvider(provider);
     this.lastStatsSignature = '';
+  }
+
+  setTerrainEnabled(enabled: boolean): void {
+    this.terrain?.setEnabled(enabled);
+    this.lastStatsSignature = '';
+  }
+
+  flyTo(options: GlobeFlyToOptions): void {
+    this.controls.flyTo(options);
+  }
+
+  getCameraViewState(): GlobeCameraViewState {
+    return this.controls.getViewState();
   }
 
   /** Continuous camera level using the same screen-error scale as the LOD selector. */
@@ -254,37 +308,34 @@ export class GlobeEngine {
     const radius = this.ellipsoid.equatorialRadius;
     const cameraDistance = this.camera.position.length();
     const surfaceRadius = this.surfaceRadiusInDirection(this.camera.position);
-    const altitude = Math.max(0.001, cameraDistance - surfaceRadius);
+    const terrainHeight = this.terrainHeightUnderCamera();
+    const altitude = Math.max(0.001, cameraDistance - surfaceRadius - terrainHeight);
     const altitudeRatio = THREE.MathUtils.clamp(altitude / radius, 0, 1);
     const minimumAltitude = Math.max(
       this.navigation.minAltitude,
       this.altitudeForCameraLevel(this.lod.maxLevel)
     );
     const maximumAltitude = this.altitudeForCameraLevel(this.lod.minLevel);
-    this.controls.minDistance = surfaceRadius + minimumAltitude;
+    this.controls.minDistance = surfaceRadius + terrainHeight + minimumAltitude;
     this.controls.maxDistance = surfaceRadius + maximumAltitude;
 
     // A near-linear curve is deliberately slower than sqrt(altitude) at local scale.
-    this.controls.rotateSpeed = THREE.MathUtils.lerp(
+    this.controls.orbitSpeed = THREE.MathUtils.lerp(
       this.navigation.minRotateSpeed,
       this.navigation.rotateSpeed,
       altitudeRatio ** 0.82
     );
 
-    // OrbitControls zooms relative to distance from the origin. Scaling its
-    // speed linearly with altitude makes a wheel step approximately proportional
-    // to height above terrain instead of proportional to the Earth radius.
-    this.controls.zoomSpeed = THREE.MathUtils.clamp(
-      this.navigation.zoomSpeed * altitudeRatio * this.navigation.zoomAltitudeGain,
-      this.navigation.minZoomSpeed,
-      this.navigation.zoomSpeed
-    );
+    // The globe controller already converts wheel input into a fraction of the
+    // true height above terrain, so wheel feel stays stable without Earth-radius scaling.
+    this.controls.zoomSpeed = this.navigation.zoomSpeed;
   }
 
   private cameraAltitude(): number {
     return Math.max(
       0.001,
       this.camera.position.length() - this.surfaceRadiusInDirection(this.camera.position)
+        - this.terrainHeightUnderCamera()
     );
   }
 
@@ -309,9 +360,16 @@ export class GlobeEngine {
     return 1 / Math.sqrt((x * x + z * z) / (a * a) + (y * y) / (b * b));
   }
 
+  private terrainHeightUnderCamera(): number {
+    if (!this.terrain) return 0;
+    const position = this.coordinates.worldToGeodetic(this.camera.position);
+    return Math.max(0, this.terrain.sampleHeight(position.longitude, position.latitude) ?? 0);
+  }
+
   private emitStats(
     stats: GlobeLodStats,
     imagery: RasterTileLayerStats | null,
+    terrain: TerrainTileLayerStats | null,
     cameraLevel: number
   ): void {
     if (!this.onStats) return;
@@ -319,10 +377,13 @@ export class GlobeEngine {
       ? `${imagery.ready},${imagery.loading},${imagery.queued},${imagery.errors},${imagery.fallbacks}`
       : 'none';
     const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
-    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${roundedCameraLevel}`;
+    const terrainSignature = terrain
+      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks}`
+      : 'none';
+    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;
     this.lastStatsSignature = signature;
-    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery });
+    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain });
   }
 }
 

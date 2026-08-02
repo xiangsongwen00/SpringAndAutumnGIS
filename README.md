@@ -1,6 +1,6 @@
 # SpringAndAutumnGIS
 
-从底层重构中的轻量 3D GIS 内核。当前实现 **WGS84 三维经纬网 LOD** 和可替换的 Web Mercator XYZ 影像瓦片层。
+从底层重构中的轻量 3D GIS 内核。当前实现 **WGS84 三维经纬网 LOD**、可替换的 Web Mercator 影像/矢量瓦片以及 Terrain-RGB 只读地形。
 
 ## 当前架构
 
@@ -10,6 +10,9 @@
 - `GlobeLodSelector`：基于屏幕像素尺寸、精确地平线/视口裁剪和迟滞阈值选择叶节点。
 - `GlobeGridRenderer`：把叶节点批量生成为单次 draw call 的经纬网线。
 - `RasterTileLayer`：按可见叶节点调度纹理，支持祖先瓦片回退、并发限制和 LRU 内存缓存。
+- `TerrainRgbProvider`：支持 TileJSON、URL 模板、XYZ/TMS 和 Mapbox/Terrarium RGB 高程解码。
+- `TerrainTileLayer`：同时保留 CPU 高度场与 GPU 高度纹理，为地形表面、贴地图层、经纬网和高度查询提供统一高度。
+- `GlobeCameraController`：地球专用相机交互，支持左键环绕、右键绕地表焦点旋转、中键地表仰角、沿视线缩放和可编程 `flyTo`。
 - `GlobeEngine`：负责渲染循环、相机和生命周期。
 
 LOD 选择器不依赖瓦片纹理、网络请求或缓存；影像层消费同一份 `SelectedTile[]`。网格与影像顶点只保存参数坐标，经纬度到 WGS84 椭球顶点的转换在 GPU 顶点着色器中完成，并使用相对相机坐标降低大地坐标精度损失。
@@ -26,6 +29,18 @@ Esri 矢量底图当前使用 `levelOffset: -2`，但制图层级与球面叶节
 
 演示使用仓库原先配置的 Google 卫星 URL 模板。生产环境应改用 Google Map Tiles API 的正式 Key + Session 接口，动态展示数据署名，并遵守服务的缓存和使用政策。
 
+地形演示从本地环境变量读取公开客户端凭据。复制 `.env.example` 为 `.env.local`，至少配置一个有效来源：
+
+```bash
+VITE_ENABLE_TERRAIN=true
+VITE_MAPTILER_KEY=YOUR_PUBLIC_KEY
+# 或
+VITE_GEOVIS_TERRAIN_URL=https://example.com/terrain-rgb/{z}/{x}/{y}?token=YOUR_PUBLIC_TOKEN
+VITE_GEOVIS_TERRAIN_SCHEME=xyz
+```
+
+不要在 Vite 前端配置 Mapbox `sk.*` 私密令牌；浏览器只能使用允许公开、并最好限制域名与额度的客户端凭据。当前地形阶段已实现高度解码、祖先回退、GPU 位移、贴图与经纬网随地形起伏；skirt、geomorph、真实地形法线边界融合和地形编辑仍属于下一阶段。
+
 ## 运行
 
 ```bash
@@ -39,3 +54,11 @@ npm run dev
 npm run typecheck
 npm run build
 ```
+
+相机交互：
+
+- 左键拖动：绕地球环绕，并保持当前斜视方向；
+- 右键拖动：围绕当前地表焦点旋转视角，并限制在可恢复的倾角范围内；
+- 中键拖动：围绕当前视线与地表的交点调整仰角；
+- 滚轮：沿当前视线按真实离地高度缩放；
+- `engine.flyTo({ longitude, latitude, altitude, heading, pitch, duration })`：执行可中断的镜头动画，`pitch=-90` 表示垂直俯视。

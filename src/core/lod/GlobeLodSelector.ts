@@ -29,10 +29,20 @@ export type GlobeLodSelectorOptions = {
   collapseFactor?: number;
   maxTiles?: number;
   horizonPaddingDegrees?: number;
+  /** Lowest screen-error multiplier for tiles at a grazing/horizon angle. */
+  minimumHorizonDetailFactor?: number;
+  /** Shape of the transition from foreground detail to horizon detail. */
+  horizonDetailExponent?: number;
   tilingScheme?: TilingScheme;
 };
 
 type Candidate = SelectedTile & { canSplit: boolean };
+type ViewSurfaceSample = {
+  longitude: number;
+  latitude: number;
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
+};
 
 /** Camera-dependent selection only. It intentionally knows nothing about meshes or imagery. */
 export class GlobeLodSelector {
@@ -45,6 +55,8 @@ export class GlobeLodSelector {
   readonly maxTiles: number;
 
   private readonly horizonPaddingRadians: number;
+  private readonly minimumHorizonDetailFactor: number;
+  private readonly horizonDetailExponent: number;
   private readonly previousSplits = new Set<string>();
   private readonly boundsCache = new Map<string, THREE.Sphere>();
   private readonly cameraDirection = new THREE.Vector3();
@@ -52,9 +64,11 @@ export class GlobeLodSelector {
   private readonly tileDirection = new THREE.Vector3();
   private readonly sampleDirection = new THREE.Vector3();
   private readonly surfacePoint = new THREE.Vector3();
+  private readonly surfaceToCamera = new THREE.Vector3();
   private readonly projectionView = new THREE.Matrix4();
   private readonly frustum = new THREE.Frustum();
   private readonly tileBounds = new THREE.Sphere();
+  private readonly viewSurfaceSamples: ViewSurfaceSample[] = [];
   private cameraDistance = 0;
   private cameraLongitude = 0;
   private cameraLatitude = 0;
@@ -75,6 +89,16 @@ export class GlobeLodSelector {
     this.collapseFactor = THREE.MathUtils.clamp(options.collapseFactor ?? 0.72, 0.1, 0.99);
     this.maxTiles = Math.max(8, Math.round(options.maxTiles ?? 384));
     this.horizonPaddingRadians = THREE.MathUtils.degToRad(options.horizonPaddingDegrees ?? 0.75);
+    this.minimumHorizonDetailFactor = THREE.MathUtils.clamp(
+      options.minimumHorizonDetailFactor ?? 0.08,
+      0.01,
+      1
+    );
+    this.horizonDetailExponent = THREE.MathUtils.clamp(
+      options.horizonDetailExponent ?? 0.5,
+      0.1,
+      4
+    );
   }
 
   select(
@@ -106,6 +130,7 @@ export class GlobeLodSelector {
       : clampInteger(minimumLevelOverride, this.minLevel, this.maxLevel);
     this.projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projectionView);
+    this.updateViewSurfaceSamples(camera);
 
     const leaves = this.tilingScheme
       .rootTiles()
@@ -190,20 +215,87 @@ export class GlobeLodSelector {
       return null;
     }
 
-    const distance = Math.max(1, this.surfacePoint.distanceTo(this.cameraPosition));
     const angularSpan = Math.max(
       THREE.MathUtils.degToRad(rectangle.north - rectangle.south),
       THREE.MathUtils.degToRad(rectangle.east - rectangle.west) * Math.max(0.15, Math.cos(THREE.MathUtils.degToRad(latitude)))
     );
     const worldSpan = this.ellipsoid.equatorialRadius * angularSpan;
-    const facing = THREE.MathUtils.clamp(
-      this.cameraDirection.dot(this.tileDirection),
+    let screenPixels = this.projectedDetailPixels(
+      this.surfacePoint,
+      this.tileDirection,
+      worldSpan
+    );
+    // Tile centres are insufficient for a near-horizontal view: the centre of
+    // a coarse tile may be far outside the viewport while a small foreground
+    // portion crosses it. Surface samples from the actual viewport preserve
+    // refinement around the centre/bottom foreground without forcing the
+    // entire horizon to the same level.
+    for (const sample of this.viewSurfaceSamples) {
+      if (!rectangleContains(rectangle, sample.longitude, sample.latitude)) continue;
+      screenPixels = Math.max(
+        screenPixels,
+        this.projectedDetailPixels(sample.point, sample.normal, worldSpan)
+      );
+    }
+    return { id, rectangle, screenPixels, canSplit: true };
+  }
+
+  private projectedDetailPixels(
+    point: THREE.Vector3,
+    normal: THREE.Vector3,
+    worldSpan: number
+  ): number {
+    this.surfaceToCamera.copy(this.cameraPosition).sub(point);
+    const distance = Math.max(1, this.surfaceToCamera.length());
+    const baseScreenPixels = (worldSpan * this.focalPixels) / distance;
+    // Local elevation is 1 directly below the camera and approaches 0 at the
+    // geometric horizon. It is different from the old camera-centre radial dot
+    // product: this term models real grazing-angle compression, allowing the
+    // distant horizon to use complete lower-level parent tiles while keeping
+    // the foreground sharp and continuously covered.
+    const elevationSine = THREE.MathUtils.clamp(
+      this.surfaceToCamera.dot(normal) / distance,
       0,
       1
     );
-    const foreshortening = 0.2 + 0.8 * facing;
-    const screenPixels = (worldSpan * this.focalPixels * foreshortening) / distance;
-    return { id, rectangle, screenPixels, canSplit: true };
+    const horizonDetailFactor = THREE.MathUtils.lerp(
+      this.minimumHorizonDetailFactor,
+      1,
+      elevationSine ** this.horizonDetailExponent
+    );
+    return baseScreenPixels * horizonDetailFactor;
+  }
+
+  private updateViewSurfaceSamples(camera: THREE.PerspectiveCamera): void {
+    this.viewSurfaceSamples.length = 0;
+    const ndcSamples: ReadonlyArray<readonly [number, number]> = [
+      [0, 0],
+      [0, -0.82],
+      [-0.82, -0.82],
+      [0.82, -0.82],
+      [-0.82, 0],
+      [0.82, 0]
+    ];
+    for (const [x, y] of ndcSamples) {
+      const direction = new THREE.Vector3(x, y, 0.5)
+        .unproject(camera)
+        .sub(this.cameraPosition)
+        .normalize();
+      const point = intersectEllipsoid(this.cameraPosition, direction, this.ellipsoid);
+      if (!point) continue;
+      const horizontal = Math.hypot(point.x, point.z);
+      const longitude = THREE.MathUtils.radToDeg(Math.atan2(point.x, point.z));
+      const latitude = THREE.MathUtils.radToDeg(Math.atan2(
+        point.y * this.ellipsoid.equatorialRadius ** 2,
+        horizontal * this.ellipsoid.polarRadius ** 2
+      ));
+      this.viewSurfaceSamples.push({
+        longitude,
+        latitude,
+        point,
+        normal: ellipsoidSurfaceNormal(point, this.ellipsoid)
+      });
+    }
   }
 
   private isAboveHorizon(rectangle: Rectangle): boolean {
@@ -306,4 +398,47 @@ function closestLongitudeInRectangle(longitude: number, west: number, east: numb
     }
   }
   return closest;
+}
+
+function rectangleContains(
+  rectangle: Rectangle,
+  longitude: number,
+  latitude: number
+): boolean {
+  return longitude >= rectangle.west - 1e-9 &&
+    longitude <= rectangle.east + 1e-9 &&
+    latitude >= rectangle.south - 1e-9 &&
+    latitude <= rectangle.north + 1e-9;
+}
+
+function ellipsoidSurfaceNormal(point: THREE.Vector3, ellipsoid: Ellipsoid): THREE.Vector3 {
+  const a2 = ellipsoid.equatorialRadius ** 2;
+  const b2 = ellipsoid.polarRadius ** 2;
+  return new THREE.Vector3(point.x / a2, point.y / b2, point.z / a2).normalize();
+}
+
+function intersectEllipsoid(
+  origin: THREE.Vector3,
+  direction: THREE.Vector3,
+  ellipsoid: Ellipsoid
+): THREE.Vector3 | null {
+  const a2 = ellipsoid.equatorialRadius ** 2;
+  const b2 = ellipsoid.polarRadius ** 2;
+  const quadraticA =
+    (direction.x * direction.x + direction.z * direction.z) / a2 +
+    (direction.y * direction.y) / b2;
+  const quadraticB = 2 * (
+    (origin.x * direction.x + origin.z * direction.z) / a2 +
+    (origin.y * direction.y) / b2
+  );
+  const quadraticC =
+    (origin.x * origin.x + origin.z * origin.z) / a2 +
+    (origin.y * origin.y) / b2 - 1;
+  const discriminant = quadraticB * quadraticB - 4 * quadraticA * quadraticC;
+  if (discriminant < 0 || quadraticA <= 0) return null;
+  const root = Math.sqrt(discriminant);
+  const near = (-quadraticB - root) / (2 * quadraticA);
+  const far = (-quadraticB + root) / (2 * quadraticA);
+  const distance = near >= 0 ? near : far >= 0 ? far : -1;
+  return distance >= 0 ? origin.clone().addScaledVector(direction, distance) : null;
 }

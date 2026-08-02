@@ -51,6 +51,8 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
   top: 28px;
   right: 28px;
   z-index: 4;
+  display: flex;
+  gap: 8px;
 }
 
 .map-switcher button {
@@ -111,12 +113,15 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
   line-height: 1.6;
 }
 
-#imagery-value {
+#imagery-value,
+#terrain-value {
   margin-top: 8px;
   color: #64d8ff;
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
 }
+
+#terrain-value { color: #8fd6a6; }
 
 .attribution {
   position: fixed;

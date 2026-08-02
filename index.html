@@ -16,6 +16,7 @@
     </header>
     <nav class="map-switcher" aria-label="地图底图切换">
       <button id="map-toggle" type="button" aria-pressed="false">切换到矢量地图</button>
+      <button id="terrain-toggle" type="button" aria-pressed="true">关闭地形</button>
     </nav>
     <aside class="stats" aria-live="polite">
       <div class="stats__label">实时四叉树状态</div>
@@ -26,8 +27,9 @@
       </div>
       <div id="levels-value">—</div>
       <div id="imagery-value">纹理等待中</div>
+      <div id="terrain-value">地形等待中</div>
     </aside>
-    <div class="hint">拖动旋转 · 滚轮缩放</div>
+    <div class="hint">左键环绕 · 右键视线 · 中键仰角 · 滚轮缩放</div>
     <a id="map-attribution" class="attribution" href="https://maps.google.com/" target="_blank" rel="noreferrer">Google Maps · Satellite</a>
     <script type="module" src="/src/demo/main.ts"></script>
   </body>
