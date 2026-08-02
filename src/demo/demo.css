@@ -82,6 +82,33 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
   transform: none;
 }
 
+.level-debug {
+  position: fixed;
+  top: 80px;
+  right: 28px;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: auto 150px 42px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid rgb(100 216 255 / 24%);
+  border-radius: 10px;
+  color: #9ab3bd;
+  background: rgb(3 18 27 / 82%);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(12px);
+  font-size: 11px;
+}
+
+.level-debug[hidden] { display: none; }
+.level-debug input { accent-color: #64d8ff; cursor: pointer; }
+.level-debug output {
+  color: #64d8ff;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  text-align: right;
+}
+
 .stats {
   position: fixed;
   right: 28px;
@@ -154,6 +181,7 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
 @media (max-width: 640px) {
   .brand { top: 20px; left: 20px; }
   .map-switcher { top: 20px; right: 16px; }
+  .level-debug { top: 72px; right: 16px; grid-template-columns: auto 100px 38px; }
   .stats { right: 16px; bottom: 16px; }
   .attribution { right: 18px; bottom: 3px; }
   .hint { left: 20px; bottom: 176px; }

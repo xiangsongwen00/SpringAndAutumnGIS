@@ -15,6 +15,8 @@ export type TerrainTileLayerOptions = {
   segments?: number;
   maxConcurrentRequests?: number;
   maxCachedTiles?: number;
+  /** Combined CPU heightfield and GPU texture budget. Defaults to 96 MiB. */
+  maxResourceBytes?: number;
   exaggeration?: number;
   /** Draw a standalone coloured terrain mesh for diagnostics. */
   showDebugSurface?: boolean;
@@ -26,6 +28,7 @@ export type TerrainTileLayerStats = Readonly<{
   queued: number;
   errors: number;
   fallbacks: number;
+  resourceBytes: number;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -75,6 +78,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private readonly baseSegments: number;
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
+  private readonly maxResourceBytes: number;
   private readonly showDebugSurface: boolean;
   private readonly geometries = new Map<number, THREE.BufferGeometry>();
   private readonly records = new Map<string, TerrainRecord>();
@@ -86,8 +90,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private activeRequests = 0;
   private fallbackCount = 0;
   private disposed = false;
+  private suspended = false;
   private enabled = true;
   private _revision = 0;
+  private lastSelection: readonly SelectedTile[] | null = null;
+  private materialsDirty = true;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -99,6 +106,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
     this.baseSegments = Math.max(16, Math.round(options.segments ?? 64));
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 6));
     this.maxCachedTiles = Math.max(32, Math.round(options.maxCachedTiles ?? 384));
+    this.maxResourceBytes = Math.max(
+      16 * 1024 * 1024,
+      Math.round(options.maxResourceBytes ?? 96 * 1024 * 1024)
+    );
     this.exaggeration = Math.max(0, options.exaggeration ?? 1);
     this.showDebugSurface = options.showDebugSurface ?? false;
     this.object3d.renderOrder = 0;
@@ -114,7 +125,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (record.state === 'error') counts.errors += 1;
       else counts[record.state] += 1;
     }
-    return { ...counts, fallbacks: this.fallbackCount };
+    return { ...counts, fallbacks: this.fallbackCount, resourceBytes: this.residentResourceBytes() };
   }
 
   update(
@@ -123,13 +134,22 @@ export class TerrainTileLayer implements TerrainHeightSource {
   ): TerrainTileLayerStats {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
-    this.frame += 1;
     if (!this.enabled) return this.stats;
-    if (this.showDebugSurface) this.syncRenderTiles(selection);
-    this.queueVisibleTiles(selection);
+    const selectionChanged = selection !== this.lastSelection;
+    if (selectionChanged) {
+      this.frame += 1;
+      this.lastSelection = selection;
+      if (this.showDebugSurface) this.syncRenderTiles(selection);
+      this.queueVisibleTiles(selection);
+    }
     this.pumpQueue();
-    if (this.showDebugSurface) this.syncMaterials(selection);
-    this.evictTiles();
+    if (this.showDebugSurface && (selectionChanged || this.materialsDirty)) {
+      this.syncMaterials(selection);
+    }
+    if (selectionChanged || this.materialsDirty) {
+      this.evictTiles();
+      this.materialsDirty = false;
+    }
     return this.stats;
   }
 
@@ -198,7 +218,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (this.disposed) return;
     this.disposed = true;
     for (const renderTile of this.renderTiles.values()) renderTile.mesh.material.dispose();
-    for (const record of this.records.values()) record.data?.texture.dispose();
+    for (const record of this.records.values()) this.releaseTexture(record.data?.texture);
     for (const geometry of this.geometries.values()) geometry.dispose();
     this.renderTiles.clear();
     this.records.clear();
@@ -210,7 +230,25 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
     this.object3d.visible = enabled;
+    this.lastSelection = null;
+    this.materialsDirty = true;
     this._revision += 1;
+  }
+
+  handleContextLost(): void {
+    this.suspended = true;
+  }
+
+  handleContextRestored(): void {
+    this.suspended = false;
+    for (const record of this.records.values()) {
+      if (record.data) record.data.texture.needsUpdate = true;
+    }
+    for (const renderTile of this.renderTiles.values()) {
+      renderTile.mesh.material.needsUpdate = true;
+    }
+    this.materialsDirty = true;
+    this.pumpQueue();
   }
 
   private syncRenderTiles(selection: readonly SelectedTile[]): void {
@@ -300,8 +338,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   private pumpQueue(): void {
-    if (!this.enabled) return;
+    if (!this.enabled || this.suspended || this.disposed) return;
     while (this.activeRequests < this.maxConcurrentRequests) {
+      if (this.residentResourceBytes() >= this.maxResourceBytes) return;
       let next: TerrainRecord | undefined;
       for (const record of this.records.values()) {
         if (record.state !== 'queued') continue;
@@ -319,12 +358,13 @@ export class TerrainTileLayer implements TerrainHeightSource {
       (data) => {
         this.activeRequests = Math.max(0, this.activeRequests - 1);
         if (this.disposed || this.records.get(record.key) !== record) {
-          data.texture.dispose();
+          this.releaseTexture(data.texture);
         } else {
           record.data = data;
           record.state = 'ready';
           record.lastUsedFrame = this.frame;
           this._revision += 1;
+          this.materialsDirty = true;
         }
         this.pumpQueue();
       },
@@ -378,7 +418,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   private evictTiles(): void {
-    if (this.records.size <= this.maxCachedTiles) return;
+    if (this.suspended) return;
+    let remainingBytes = this.residentResourceBytes();
+    if (this.records.size <= this.maxCachedTiles && remainingBytes <= this.maxResourceBytes) return;
     const protectedKeys = new Set(this.visibleKeys);
     for (const renderTile of this.renderTiles.values()) {
       if (renderTile.terrainKey) protectedKeys.add(renderTile.terrainKey);
@@ -386,12 +428,26 @@ export class TerrainTileLayer implements TerrainHeightSource {
     const candidates = [...this.records.values()]
       .filter((record) => record.state !== 'loading' && !protectedKeys.has(record.key))
       .sort((a, b) => a.lastUsedFrame - b.lastUsedFrame);
-    while (this.records.size > this.maxCachedTiles) {
+    while (
+      this.records.size > this.maxCachedTiles ||
+      remainingBytes > this.maxResourceBytes
+    ) {
       const record = candidates.shift();
       if (!record) break;
-      record.data?.texture.dispose();
+      this.releaseTexture(record.data?.texture);
+      remainingBytes -= terrainResourceBytes(record.data);
       this.records.delete(record.key);
     }
+  }
+
+  private residentResourceBytes(): number {
+    let bytes = 0;
+    for (const record of this.records.values()) bytes += terrainResourceBytes(record.data);
+    return bytes;
+  }
+
+  private releaseTexture(texture?: THREE.Texture): void {
+    if (texture && !this.suspended) texture.dispose();
   }
 
   private createMaterial(tile: TileId): THREE.ShaderMaterial {
@@ -531,6 +587,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
       toneMapped: false
     });
   }
+}
+
+function terrainResourceBytes(data: TerrainTileData | null): number {
+  if (!data) return 0;
+  // One Float32Array remains CPU-queryable and one R32F texture is resident on GPU.
+  return data.heights.byteLength + data.width * data.height * 4;
 }
 
 function ancestorAtLevel(id: TileId, level: number): TileId {

@@ -1,8 +1,8 @@
 import {
+  ArcGisVectorRasterProvider,
   GlobeEngine,
   TerrainRgbProvider,
   UrlTemplateRasterProvider,
-  VectorStyleTileProvider,
   type GlobeEngineStats
 } from '../index';
 
@@ -17,11 +17,21 @@ const terrainToggle = document.querySelector<HTMLButtonElement>('#terrain-toggle
 const terrainTest = document.querySelector<HTMLButtonElement>('#terrain-test');
 const terrainValue = document.querySelector<HTMLElement>('#terrain-value');
 const attribution = document.querySelector<HTMLAnchorElement>('#map-attribution');
+const satelliteLevelDebug = document.querySelector<HTMLElement>('#satellite-level-debug');
+const satelliteLevelOffsetInput = document.querySelector<HTMLInputElement>('#satellite-level-offset');
+const satelliteLevelOffsetValue = document.querySelector<HTMLOutputElement>('#satellite-level-offset-value');
 
 const MIN_LOD_LEVEL = 2;
 const MAX_LOD_LEVEL = 27;
 const MAX_GOOGLE_IMAGERY_LEVEL = 20;
 const ESRI_LEVEL_OFFSET = -1.7;
+const DEFAULT_GOOGLE_LEVEL_OFFSET = -1.7;
+const initialGoogleLevelOffset = queryNumber(
+  'satelliteLevelOffset',
+  DEFAULT_GOOGLE_LEVEL_OFFSET,
+  -4,
+  1
+);
 let vectorMode = false;
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
 let terrainEnabled = terrainEnabledByConfig;
@@ -31,7 +41,7 @@ const terrainTestLocations = [
 ] as const;
 let terrainTestIndex = 0;
 
-if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !terrainTest || !attribution) {
+if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !terrainTest || !attribution || !satelliteLevelDebug || !satelliteLevelOffsetInput || !satelliteLevelOffsetValue) {
   throw new Error('演示页面结构不完整。');
 }
 
@@ -48,12 +58,18 @@ const renderStats = (stats: GlobeEngineStats): void => {
     [...stats.levels]
       .map(([level, count]) => `${level}级：${count}`)
       .join('　');
-  const sourceName = vectorMode ? '矢量（数据层级=floor(相机-2)）' : '卫星';
+  const sourceName = vectorMode
+    ? '矢量（数据层级=floor(相机-2)）'
+    : `卫星（实际${imagery.currentSourceLevel}级，偏移${formatOffset(initialGoogleLevelOffsetState)}）`;
   imageryValue.textContent = stats.imagery
-    ? `${sourceName}纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
+    ? `${sourceName} 目标${formatLevelRange(stats.imagery.desiredMinimumLevel, stats.imagery.desiredMaximumLevel)}级 / ` +
+      `显示${formatLevelRange(stats.imagery.displayedMinimumLevel, stats.imagery.displayedMaximumLevel)}级 · ` +
+      `纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.queued} 排队 · ` +
+      `${(stats.imagery.textureBytes / 1024 / 1024).toFixed(0)} MiB · ` +
+      `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
     : '影像未启用';
   terrainValue.textContent = stats.terrain
-    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
+    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
 };
 
@@ -78,10 +94,27 @@ const imagery = new UrlTemplateRasterProvider({
   urlTemplate: 'https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
   subdomains: ['0', '1', '2', '3'],
   maxLevel: MAX_GOOGLE_IMAGERY_LEVEL,
+  viewLevelOffset: initialGoogleLevelOffset,
   attribution: 'Google Maps'
 });
 
-const vectorMap = new VectorStyleTileProvider({
+let initialGoogleLevelOffsetState = initialGoogleLevelOffset;
+satelliteLevelOffsetInput.value = String(initialGoogleLevelOffsetState);
+satelliteLevelOffsetValue.value = formatOffset(initialGoogleLevelOffsetState);
+satelliteLevelOffsetValue.textContent = formatOffset(initialGoogleLevelOffsetState);
+satelliteLevelOffsetInput.addEventListener('input', () => {
+  const offset = Number(satelliteLevelOffsetInput.value);
+  if (!Number.isFinite(offset)) return;
+  initialGoogleLevelOffsetState = offset;
+  satelliteLevelOffsetValue.value = formatOffset(offset);
+  satelliteLevelOffsetValue.textContent = formatOffset(offset);
+  imagery.setViewLevelOffset(offset);
+  const url = new URL(window.location.href);
+  url.searchParams.set('satelliteLevelOffset', offset.toFixed(1));
+  window.history.replaceState(null, '', url);
+});
+
+const vectorMap = new ArcGisVectorRasterProvider({
   id: 'esri-vector-style-demo',
   styleUrl: '/En.json',
   sourceId: 'esri',
@@ -118,6 +151,7 @@ const engine = new GlobeEngine({
     segments: 64,
     maxConcurrentRequests: 4,
     maxCachedTiles: 256,
+    maxResourceBytes: 96 * 1024 * 1024,
     showDebugSurface: false,
     exaggeration: numericEnvironmentValue(import.meta.env.VITE_TERRAIN_EXAGGERATION, 1)
   },
@@ -125,6 +159,7 @@ const engine = new GlobeEngine({
     segments: 16,
     maxConcurrentRequests: 10,
     maxCachedTiles: 2_048,
+    maxTextureBytes: 192 * 1024 * 1024,
     surfaceOffset: 0.1
   },
   initialView: {
@@ -156,6 +191,7 @@ mapToggle.addEventListener('click', () => {
   mapToggle.setAttribute('aria-pressed', String(vectorMode));
   attribution.textContent = vectorMode ? 'Esri · Vector Basemap' : 'Google Maps · Satellite';
   attribution.href = vectorMode ? 'https://www.esri.com/' : 'https://maps.google.com/';
+  satelliteLevelDebug.hidden = vectorMode;
 });
 
 window.addEventListener('pagehide', () => engine.dispose(), { once: true });
@@ -206,4 +242,25 @@ function environmentValue(value: string | undefined): string | undefined {
 function numericEnvironmentValue(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function queryNumber(
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  const raw = new URLSearchParams(window.location.search).get(name);
+  if (raw === null || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, parsed)) : fallback;
+}
+
+function formatOffset(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`;
+}
+
+function formatLevelRange(minimum: number | null, maximum: number | null): string {
+  if (minimum === null || maximum === null) return '—';
+  return minimum === maximum ? String(minimum) : `${minimum}–${maximum}`;
 }

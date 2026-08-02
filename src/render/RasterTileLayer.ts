@@ -10,6 +10,8 @@ export type RasterTileLayerOptions = {
   segments?: number;
   maxConcurrentRequests?: number;
   maxCachedTiles?: number;
+  /** Hard resident texture budget. Defaults to 192 MiB. */
+  maxTextureBytes?: number;
   surfaceOffset?: number;
   maxAnisotropy?: number;
   terrain?: TerrainHeightSource;
@@ -21,6 +23,11 @@ export type RasterTileLayerStats = Readonly<{
   queued: number;
   errors: number;
   fallbacks: number;
+  textureBytes: number;
+  desiredMinimumLevel: number | null;
+  desiredMaximumLevel: number | null;
+  displayedMinimumLevel: number | null;
+  displayedMaximumLevel: number | null;
 }>;
 
 type TextureState = 'queued' | 'loading' | 'ready' | 'error';
@@ -31,6 +38,9 @@ type TextureRecord = {
   priority: number;
   lastUsedFrame: number;
   texture: THREE.Texture | null;
+  byteSize: number;
+  attempts: number;
+  retryAt: number;
 };
 type RenderTile = {
   id: TileId;
@@ -53,6 +63,7 @@ export class RasterTileLayer {
   private readonly visibleTextureKeys = new Set<string>();
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
+  private readonly maxTextureBytes: number;
   private readonly surfaceOffset: number;
   private readonly maxAnisotropy: number;
   private readonly terrain?: TerrainHeightSource;
@@ -63,6 +74,15 @@ export class RasterTileLayer {
   private activeRequests = 0;
   private disposed = false;
   private fallbackCount = 0;
+  private suspended = false;
+  private lastSelection: readonly SelectedTile[] | null = null;
+  private materialsDirty = true;
+  private observedTerrainRevision = -1;
+  private observedProviderRevision = -1;
+  private desiredMinimumLevel: number | null = null;
+  private desiredMaximumLevel: number | null = null;
+  private displayedMinimumLevel: number | null = null;
+  private displayedMaximumLevel: number | null = null;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -74,6 +94,10 @@ export class RasterTileLayer {
     this.baseSegments = Math.max(2, Math.round(options.segments ?? 16));
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 8));
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 512));
+    this.maxTextureBytes = Math.max(
+      16 * 1024 * 1024,
+      Math.round(options.maxTextureBytes ?? 192 * 1024 * 1024)
+    );
     this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
     this.terrain = options.terrain;
@@ -87,12 +111,25 @@ export class RasterTileLayer {
   ): RasterTileLayerStats {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
-    this.frame += 1;
-    this.syncRenderTiles(selection);
-    this.queueVisibleTextures(selection);
+    const selectionChanged = selection !== this.lastSelection;
+    const terrainRevision = this.terrain?.revision ?? -1;
+    const terrainChanged = terrainRevision !== this.observedTerrainRevision;
+    const providerRevision = this.provider.revision ?? 0;
+    const sourceLevelsChanged = providerRevision !== this.observedProviderRevision;
+    if (selectionChanged || sourceLevelsChanged) {
+      this.frame += 1;
+      this.lastSelection = selection;
+      this.observedProviderRevision = providerRevision;
+      if (selectionChanged) this.syncRenderTiles(selection);
+      this.queueVisibleTextures(selection);
+    }
+    if (selectionChanged || sourceLevelsChanged || terrainChanged || this.materialsDirty) {
+      this.observedTerrainRevision = terrainRevision;
+      this.syncMaterials(selection);
+      this.evictTextures();
+      this.materialsDirty = false;
+    }
     this.pumpQueue();
-    this.syncMaterials(selection);
-    this.evictTextures();
     return this.stats;
   }
 
@@ -102,14 +139,22 @@ export class RasterTileLayer {
       if (record.state === 'error') counts.errors += 1;
       else counts[record.state] += 1;
     }
-    return { ...counts, fallbacks: this.fallbackCount };
+    return {
+      ...counts,
+      fallbacks: this.fallbackCount,
+      textureBytes: this.residentTextureBytes(),
+      desiredMinimumLevel: this.desiredMinimumLevel,
+      desiredMaximumLevel: this.desiredMaximumLevel,
+      displayedMinimumLevel: this.displayedMinimumLevel,
+      displayedMaximumLevel: this.displayedMaximumLevel
+    };
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     for (const renderTile of this.renderTiles.values()) renderTile.mesh.material.dispose();
-    for (const record of this.textures.values()) record.texture?.dispose();
+    for (const record of this.textures.values()) this.releaseTexture(record.texture);
     this.renderTiles.clear();
     this.textures.clear();
     for (const geometry of this.geometries.values()) geometry.dispose();
@@ -120,10 +165,13 @@ export class RasterTileLayer {
   setProvider(provider: RasterTileProvider): void {
     if (provider.id === this.provider.id) return;
     this.provider = provider;
-    for (const record of this.textures.values()) record.texture?.dispose();
+    for (const record of this.textures.values()) this.releaseTexture(record.texture);
     this.textures.clear();
     this.visibleTextureKeys.clear();
     this.fallbackCount = 0;
+    this.lastSelection = null;
+    this.observedProviderRevision = -1;
+    this.materialsDirty = true;
     for (const renderTile of this.renderTiles.values()) {
       renderTile.textureKey = '';
       const uniforms = renderTile.mesh.material.uniforms;
@@ -131,6 +179,22 @@ export class RasterTileLayer {
       uniforms.tileTexture!.value = null;
       uniforms.hasTexture!.value = false;
     }
+  }
+
+  handleContextLost(): void {
+    this.suspended = true;
+  }
+
+  handleContextRestored(): void {
+    this.suspended = false;
+    for (const record of this.textures.values()) {
+      if (record.texture) record.texture.needsUpdate = true;
+    }
+    for (const renderTile of this.renderTiles.values()) {
+      renderTile.mesh.material.needsUpdate = true;
+    }
+    this.materialsDirty = true;
+    this.pumpQueue();
   }
 
   private syncRenderTiles(selection: readonly SelectedTile[]): void {
@@ -431,6 +495,8 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
+    this.desiredMinimumLevel = null;
+    this.desiredMaximumLevel = null;
     for (const record of this.textures.values()) {
       if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
     }
@@ -448,6 +514,12 @@ export class RasterTileLayer {
         tile.id.level
       );
       if (maximumSourceLevel < this.provider.minLevel) continue;
+      this.desiredMinimumLevel = this.desiredMinimumLevel === null
+        ? maximumSourceLevel
+        : Math.min(this.desiredMinimumLevel, maximumSourceLevel);
+      this.desiredMaximumLevel = this.desiredMaximumLevel === null
+        ? maximumSourceLevel
+        : Math.max(this.desiredMaximumLevel, maximumSourceLevel);
 
       const desired = ancestorAtLevel(tile.id, maximumSourceLevel);
       this.visibleTextureKeys.add(tileKey(desired));
@@ -459,7 +531,9 @@ export class RasterTileLayer {
         const bridgeLevel = Math.max(this.provider.minLevel, maximumSourceLevel - 3);
         const bridge = ancestorAtLevel(tile.id, bridgeLevel);
         this.visibleTextureKeys.add(tileKey(bridge));
-        this.queueTexture(bridge, prioritized.length + rank);
+        // Missing coverage is more urgent than sharpening an already covered
+        // tile. Deduplication makes these coarse bridge requests inexpensive.
+        this.queueTexture(bridge, rank - prioritized.length * 2);
       }
     }
     for (const [key, record] of this.textures) {
@@ -482,15 +556,35 @@ export class RasterTileLayer {
       state: 'queued',
       priority,
       lastUsedFrame: this.frame,
-      texture: null
+      texture: null,
+      byteSize: 0,
+      attempts: 0,
+      retryAt: 0
     });
   }
 
   private pumpQueue(): void {
+    if (this.suspended || this.disposed) return;
+    const estimatedBytes = this.provider.estimatedTextureBytes ?? estimateSquareTextureBytes(256);
+    // A target texture must coexist briefly with its currently displayed
+    // ancestor. Without this transition allowance a full cache protects the
+    // ancestor forever and the view can remain stuck several levels too low.
+    const transitionBytes = this.maxConcurrentRequests * estimatedBytes;
     while (this.activeRequests < this.maxConcurrentRequests) {
+      if (
+        this.residentTextureBytes() +
+        (this.activeRequests + 1) * estimatedBytes >
+          this.maxTextureBytes + transitionBytes
+      ) return;
       let next: TextureRecord | undefined;
+      const now = performance.now();
       for (const record of this.textures.values()) {
-        if (record.state !== 'queued') continue;
+        if (
+          record.state === 'error' &&
+          this.visibleTextureKeys.has(record.key) &&
+          record.retryAt <= now
+        ) record.state = 'queued';
+        if (record.state !== 'queued' || record.retryAt > now) continue;
         if (!next || record.priority < next.priority) next = record;
       }
       if (!next) return;
@@ -528,7 +622,7 @@ export class RasterTileLayer {
       this.provider !== provider ||
       this.textures.get(record.key) !== record
     ) {
-      texture.dispose();
+      this.releaseTexture(texture);
       this.pumpQueue();
       return;
     }
@@ -539,8 +633,12 @@ export class RasterTileLayer {
     texture.magFilter = THREE.LinearFilter;
     texture.anisotropy = this.maxAnisotropy;
     record.texture = texture;
+    record.byteSize = estimateTextureBytes(texture, this.provider.estimatedTextureBytes);
     record.state = 'ready';
+    record.attempts = 0;
+    record.retryAt = 0;
     record.lastUsedFrame = this.frame;
+    this.materialsDirty = true;
     this.pumpQueue();
   }
 
@@ -552,18 +650,30 @@ export class RasterTileLayer {
       this.textures.get(record.key) === record
     ) {
       record.state = 'error';
+      record.attempts += 1;
+      record.retryAt = performance.now() + Math.min(30_000, 1_000 * 2 ** (record.attempts - 1));
     }
     this.pumpQueue();
   }
 
   private syncMaterials(selection: readonly SelectedTile[]): void {
     this.fallbackCount = 0;
+    this.displayedMinimumLevel = null;
+    this.displayedMaximumLevel = null;
     for (const tile of selection) {
       const renderTile = this.renderTiles.get(tileKey(tile.id));
       if (!renderTile) continue;
       const source = this.findReadyAncestor(tile.id);
       const sourceKey = source?.key ?? '';
       if (source && source.id.level < tile.id.level) this.fallbackCount += 1;
+      if (source) {
+        this.displayedMinimumLevel = this.displayedMinimumLevel === null
+          ? source.id.level
+          : Math.min(this.displayedMinimumLevel, source.id.level);
+        this.displayedMaximumLevel = this.displayedMaximumLevel === null
+          ? source.id.level
+          : Math.max(this.displayedMaximumLevel, source.id.level);
+      }
       const uniforms = renderTile.mesh.material.uniforms;
       if (!uniforms) continue;
       if (sourceKey !== renderTile.textureKey) {
@@ -641,20 +751,38 @@ export class RasterTileLayer {
   }
 
   private evictTextures(): void {
-    if (this.textures.size <= this.maxCachedTiles) return;
+    if (this.suspended) return;
+    const residentBytes = this.residentTextureBytes();
+    if (this.textures.size <= this.maxCachedTiles && residentBytes <= this.maxTextureBytes) return;
     const protectedKeys = new Set(
       [...this.renderTiles.values()].map((tile) => tile.textureKey).filter(Boolean)
     );
-    for (const key of this.visibleTextureKeys) protectedKeys.add(key);
     const candidates = [...this.textures.values()]
       .filter((record) => record.state !== 'loading' && !protectedKeys.has(record.key))
       .sort((a, b) => a.lastUsedFrame - b.lastUsedFrame);
-    while (this.textures.size > this.maxCachedTiles) {
+    let remainingBytes = residentBytes;
+    while (
+      this.textures.size > this.maxCachedTiles ||
+      remainingBytes > this.maxTextureBytes
+    ) {
       const record = candidates.shift();
       if (!record) break;
-      record.texture?.dispose();
+      this.releaseTexture(record.texture);
+      remainingBytes -= record.byteSize;
       this.textures.delete(record.key);
     }
+  }
+
+  private residentTextureBytes(): number {
+    let bytes = 0;
+    for (const record of this.textures.values()) {
+      if (record.state === 'ready') bytes += record.byteSize;
+    }
+    return bytes;
+  }
+
+  private releaseTexture(texture: THREE.Texture | null): void {
+    if (texture && !this.suspended) texture.dispose();
   }
 }
 
@@ -723,6 +851,23 @@ function createGridGeometry(segmentsInput: number): THREE.BufferGeometry {
 
 function placeholderColor(level: number): THREE.Color {
   return new THREE.Color().setHSL(0.53, 0.56, Math.min(0.3, 0.19 + level * 0.009));
+}
+
+function estimateSquareTextureBytes(size: number): number {
+  return Math.ceil(size * size * 4 * 4 / 3);
+}
+
+function estimateTextureBytes(texture: THREE.Texture, fallback?: number): number {
+  const image = texture.image as {
+    width?: number;
+    height?: number;
+    naturalWidth?: number;
+    naturalHeight?: number;
+  } | undefined;
+  const width = image?.naturalWidth ?? image?.width ?? 0;
+  const height = image?.naturalHeight ?? image?.height ?? 0;
+  if (width > 0 && height > 0) return Math.ceil(width * height * 4 * 4 / 3);
+  return fallback ?? estimateSquareTextureBytes(256);
 }
 
 function splitVector3(value: THREE.Vector3, high: THREE.Vector3, low: THREE.Vector3): void {

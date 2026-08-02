@@ -13,8 +13,26 @@ export type {
   RasterTileProvider,
   UrlTemplateRasterProviderOptions
 } from './core/tiles/RasterTileProvider';
+export { ArcGisVectorRasterProvider } from './core/tiles/ArcGisVectorRasterProvider';
+export type { ArcGisVectorRasterProviderOptions } from './core/tiles/ArcGisVectorRasterProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';
 export type { VectorStyleTileProviderOptions } from './core/tiles/VectorStyleTileProvider';
+export { MvtTileSource } from './vector/source/MvtTileSource';
+export type { MvtTileSourceOptions } from './vector/source/MvtTileSource';
+export { MvtDecoder } from './vector/decoder/MvtDecoder';
+export { ArcGisStyleAdapter } from './vector/style/ArcGisStyleAdapter';
+export type { ArcGisStyleAdapterOptions } from './vector/style/ArcGisStyleAdapter';
+export { CanvasVectorRasterizer } from './vector/raster/CanvasVectorRasterizer';
+export type { CanvasVectorRasterizerOptions } from './vector/raster/CanvasVectorRasterizer';
+export type {
+  DecodedFeature,
+  DecodedVectorTile,
+  MapStyle,
+  SelectedVectorSource,
+  StyleLayer,
+  StyleValue,
+  VectorSource
+} from './vector/style/VectorStyleTypes';
 export {
   TerrainRgbProvider,
   decodeTerrainRgbHeight,

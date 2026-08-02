@@ -55,6 +55,8 @@ export type GlobeNavigationOptions = {
 export type GlobeEngineOptions = {
   container: HTMLElement;
   pixelRatio?: number;
+  /** Caps the drawing-buffer area after DPR scaling. Defaults to 8 megapixels. */
+  maxDrawingBufferPixels?: number;
   clearColor?: number;
   lod?: GlobeLodSelectorOptions;
   grid?: GlobeGridRendererOptions;
@@ -90,6 +92,9 @@ export class GlobeEngine {
   private lastStatsSignature = '';
   private viewportWidth = 0;
   private viewportHeight = 0;
+  private rendererPixelRatio = 1;
+  private readonly requestedPixelRatio: number;
+  private readonly maxDrawingBufferPixels: number;
   private readonly resizeObserver: ResizeObserver;
   private readonly navigation: Required<GlobeNavigationOptions>;
   private readonly terrainMaximumSurfaceDisplacement: number;
@@ -102,9 +107,31 @@ export class GlobeEngine {
   private terrainRevisionRefreshAt = 0;
   private readonly lodCameraPosition = new THREE.Vector3();
   private readonly lodCameraQuaternion = new THREE.Quaternion();
+  private contextLost = false;
+
+  private readonly onContextLost = (event: Event): void => {
+    event.preventDefault();
+    this.contextLost = true;
+    this.imagery?.handleContextLost();
+    this.terrain?.handleContextLost();
+  };
+
+  private readonly onContextRestored = (): void => {
+    this.contextLost = false;
+    this.imagery?.handleContextRestored();
+    this.terrain?.handleContextRestored();
+    this.grid.handleContextRestored();
+    this.lodSelection = null;
+    this.lastStatsSignature = '';
+  };
 
   constructor(options: GlobeEngineOptions) {
     this.container = options.container;
+    this.requestedPixelRatio = Math.max(0.5, options.pixelRatio ?? window.devicePixelRatio);
+    this.maxDrawingBufferPixels = Math.max(
+      1_000_000,
+      Math.round(options.maxDrawingBufferPixels ?? 8_000_000)
+    );
     this.onStats = options.onStats;
     this.navigation = {
       rotateSpeed: Math.max(0.01, options.navigation?.rotateSpeed ?? 0.4),
@@ -139,9 +166,11 @@ export class GlobeEngine {
     });
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
-    this.renderer.setPixelRatio(Math.min(options.pixelRatio ?? window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(1);
     this.renderer.setClearColor(options.clearColor ?? 0x07131d, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost, false);
+    this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored, false);
     this.container.appendChild(this.renderer.domElement);
 
     // This is an occlusion/fallback body, not the rendered map surface. Keep it
@@ -220,13 +249,18 @@ export class GlobeEngine {
     if (this.frameHandle !== null) return;
     const renderFrame = () => {
       this.frameHandle = requestAnimationFrame(renderFrame);
+      if (this.contextLost) return;
       this.resize();
       this.updateNavigationSensitivity();
       const cameraChanged = this.controls.update();
       const cameraLevel = this.getCameraLevel();
       this.imagery?.provider.setViewLevel?.(cameraLevel);
       const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
-      const surfacePitch = this.controls.getViewState().pitch;
+      // Satellite imagery does not use a forced minimum. Avoid a complete
+      // geodetic view-state calculation on every animation frame in that mode.
+      const surfacePitch = minimumLodLevelOffset === undefined
+        ? null
+        : this.controls.getViewState().pitch;
       const useMinimumLevelOverride =
         minimumLodLevelOffset !== undefined &&
         surfacePitch !== null &&
@@ -318,7 +352,9 @@ export class GlobeEngine {
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) material.dispose();
     });
-    this.renderer.dispose();
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost, false);
+    this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored, false);
+    if (!this.contextLost) this.renderer.dispose();
     this.renderer.domElement.remove();
   }
 
@@ -356,11 +392,22 @@ export class GlobeEngine {
   private resize(): void {
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
-    if (width === this.viewportWidth && height === this.viewportHeight) return;
+    const pixelRatio = Math.min(
+      this.requestedPixelRatio,
+      2,
+      Math.sqrt(this.maxDrawingBufferPixels / (width * height))
+    );
+    if (
+      width === this.viewportWidth &&
+      height === this.viewportHeight &&
+      Math.abs(pixelRatio - this.rendererPixelRatio) < 0.01
+    ) return;
     this.viewportWidth = width;
     this.viewportHeight = height;
+    this.rendererPixelRatio = pixelRatio;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(width, height, false);
   }
 
@@ -370,7 +417,6 @@ export class GlobeEngine {
     const surfaceRadius = this.surfaceRadiusInDirection(this.camera.position);
     const terrainHeight = this.terrainHeightUnderCamera();
     const altitude = Math.max(0.001, cameraDistance - surfaceRadius - terrainHeight);
-    const altitudeRatio = THREE.MathUtils.clamp(altitude / radius, 0, 1);
     const minimumAltitude = Math.max(
       this.navigation.minAltitude,
       this.altitudeForCameraLevel(this.lod.maxLevel)
@@ -379,12 +425,10 @@ export class GlobeEngine {
     this.controls.minDistance = surfaceRadius + terrainHeight + minimumAltitude;
     this.controls.maxDistance = surfaceRadius + maximumAltitude;
 
-    // A near-linear curve is deliberately slower than sqrt(altitude) at local scale.
-    this.controls.orbitSpeed = THREE.MathUtils.lerp(
-      this.navigation.minRotateSpeed,
-      this.navigation.rotateSpeed,
-      altitudeRatio ** 0.82
-    );
+    // Globe dragging derives metres-per-pixel from altitude and FOV inside the
+    // controller. Keep this as a stable user sensitivity multiplier; driving
+    // it towards zero made level 18+ input fall below the numeric dead zone.
+    this.controls.orbitSpeed = this.navigation.rotateSpeed;
 
     // The globe controller already converts wheel input into a fraction of the
     // true height above terrain, so wheel feel stays stable without Earth-radius scaling.
@@ -434,11 +478,11 @@ export class GlobeEngine {
   ): void {
     if (!this.onStats) return;
     const imagerySignature = imagery
-      ? `${imagery.ready},${imagery.loading},${imagery.queued},${imagery.errors},${imagery.fallbacks}`
+      ? `${imagery.ready},${imagery.loading},${imagery.queued},${imagery.errors},${imagery.fallbacks},${imagery.textureBytes},${imagery.desiredMinimumLevel},${imagery.desiredMaximumLevel},${imagery.displayedMinimumLevel},${imagery.displayedMaximumLevel}`
       : 'none';
     const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
     const terrainSignature = terrain
-      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks}`
+      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes}`
       : 'none';
     const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;

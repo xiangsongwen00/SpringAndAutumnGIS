@@ -26,6 +26,12 @@ export class GlobeGridRenderer {
   private readonly tileOrigin = new THREE.Vector3();
   private readonly vertexWorld = new THREE.Vector3();
   private signature = '';
+  private tileSignature = '';
+  private observedTerrainRevision = -1;
+  private renderedTerrainRevision = -1;
+  private terrainRefreshAt = 0;
+  private vertexCapacity = 0;
+  private tilesReference: readonly SelectedTile[] | null = null;
 
   constructor(ellipsoid: Ellipsoid, options: GlobeGridRendererOptions = {}) {
     this.ellipsoid = ellipsoid;
@@ -81,9 +87,31 @@ export class GlobeGridRenderer {
 
   update(tiles: readonly SelectedTile[], cameraPosition?: THREE.Vector3): boolean {
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
-    const signature = `${this.terrain?.revision ?? 0}|${tiles.map((tile) => tileKey(tile.id)).join('|')}`;
+    const terrainRevision = this.terrain?.revision ?? 0;
+    if (tiles === this.tilesReference && terrainRevision === this.renderedTerrainRevision) {
+      return false;
+    }
+    const now = performance.now();
+    if (terrainRevision !== this.observedTerrainRevision) {
+      this.observedTerrainRevision = terrainRevision;
+      this.terrainRefreshAt = now + 100;
+    }
+    const referenceChanged = tiles !== this.tilesReference;
+    const nextTileSignature = referenceChanged
+      ? tiles.map((tile) => tileKey(tile.id)).join('|')
+      : this.tileSignature;
+    const tilesChanged = nextTileSignature !== this.tileSignature;
+    if (
+      !tilesChanged &&
+      terrainRevision !== this.renderedTerrainRevision &&
+      now < this.terrainRefreshAt
+    ) return false;
+    const signature = `${terrainRevision}|${nextTileSignature}`;
     if (signature === this.signature) return false;
     this.signature = signature;
+    this.tilesReference = tiles;
+    this.tileSignature = nextTileSignature;
+    this.renderedTerrainRevision = terrainRevision;
 
     const positions: number[] = [];
     const colors: number[] = [];
@@ -92,11 +120,14 @@ export class GlobeGridRenderer {
     for (const tile of tiles) {
       this.appendTile(tile, positions, colors, originsHigh, originsLow);
     }
-    this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    this.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    this.geometry.setAttribute('sag_originHigh', new THREE.Float32BufferAttribute(originsHigh, 3));
-    this.geometry.setAttribute('sag_originLow', new THREE.Float32BufferAttribute(originsLow, 3));
+    this.updateAttributes(positions, colors, originsHigh, originsLow);
     return true;
+  }
+
+  handleContextRestored(): void {
+    for (const attribute of Object.values(this.geometry.attributes)) attribute.needsUpdate = true;
+    this.material.needsUpdate = true;
+    this.signature = '';
   }
 
   dispose(): void {
@@ -107,6 +138,43 @@ export class GlobeGridRenderer {
     } else {
       material.dispose();
     }
+  }
+
+  private updateAttributes(
+    positions: readonly number[],
+    colors: readonly number[],
+    originsHigh: readonly number[],
+    originsLow: readonly number[]
+  ): void {
+    const vertexCount = Math.floor(positions.length / 3);
+    if (vertexCount > this.vertexCapacity) {
+      this.vertexCapacity = nextPowerOfTwo(Math.max(1, vertexCount));
+      // Replacing attributes without disposing the geometry leaves their old
+      // WebGLBuffer allocations registered in the renderer. Dispose before a
+      // capacity growth, then keep the new attributes stable across updates.
+      this.geometry.dispose();
+      this.geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(this.vertexCapacity * 3), 3)
+      );
+      this.geometry.setAttribute(
+        'color',
+        new THREE.BufferAttribute(new Float32Array(this.vertexCapacity * 3), 3)
+      );
+      this.geometry.setAttribute(
+        'sag_originHigh',
+        new THREE.BufferAttribute(new Float32Array(this.vertexCapacity * 3), 3)
+      );
+      this.geometry.setAttribute(
+        'sag_originLow',
+        new THREE.BufferAttribute(new Float32Array(this.vertexCapacity * 3), 3)
+      );
+    }
+    copyAttribute(this.geometry.getAttribute('position'), positions);
+    copyAttribute(this.geometry.getAttribute('color'), colors);
+    copyAttribute(this.geometry.getAttribute('sag_originHigh'), originsHigh);
+    copyAttribute(this.geometry.getAttribute('sag_originLow'), originsLow);
+    this.geometry.setDrawRange(0, vertexCount);
   }
 
   private appendTile(
@@ -206,6 +274,23 @@ export class GlobeGridRenderer {
     originsHigh.push(originHigh.x, originHigh.y, originHigh.z);
     originsLow.push(originLow.x, originLow.y, originLow.z);
   }
+}
+
+function nextPowerOfTwo(value: number): number {
+  return 2 ** Math.ceil(Math.log2(value));
+}
+
+function copyAttribute(
+  attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+  values: readonly number[]
+): void {
+  if (!(attribute instanceof THREE.BufferAttribute)) {
+    throw new Error('经纬网只支持非交错 BufferAttribute。');
+  }
+  (attribute.array as Float32Array).set(values);
+  attribute.clearUpdateRanges();
+  attribute.addUpdateRange(0, values.length);
+  attribute.needsUpdate = true;
 }
 
 function splitVector3(value: THREE.Vector3, high: THREE.Vector3, low: THREE.Vector3): void {

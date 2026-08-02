@@ -88,8 +88,9 @@ export class GlobeCameraController {
     const deltaY = event.clientY - this.pointer.y;
     this.pointer.set(event.clientX, event.clientY);
     if (this.dragMode === 'globe') {
-      this.orbitVelocity.x += -deltaX * 0.003 * this.orbitSpeed * this.inputGain();
-      this.orbitVelocity.y += -deltaY * 0.003 * this.orbitSpeed * this.inputGain();
+      const radiansPerPixel = this.globeOrbitRadiansPerPixel();
+      this.orbitVelocity.x += -deltaX * radiansPerPixel * this.inputGain();
+      this.orbitVelocity.y += -deltaY * radiansPerPixel * this.inputGain();
     } else if (this.dragMode === 'look') {
       this.lookVelocity.x += -deltaX * 0.003 * this.lookSpeed * this.inputGain();
       this.lookVelocity.y += -deltaY * 0.003 * this.lookSpeed * this.inputGain();
@@ -142,7 +143,7 @@ export class GlobeCameraController {
     let changed = this.updateAnimation(now);
     if (!this.enabled || this.animation) return changed;
 
-    if (this.orbitVelocity.lengthSq() > 1e-12) {
+    if (this.orbitVelocity.lengthSq() > 1e-22) {
       changed = this.orbitAroundGlobe(
         this.orbitVelocity.x,
         this.orbitVelocity.y
@@ -566,7 +567,7 @@ export class GlobeCameraController {
     this.lookVelocity.multiplyScalar(retention);
     this.tiltVelocity *= retention;
     this.zoomVelocity *= retention;
-    if (this.orbitVelocity.lengthSq() < 1e-12) this.orbitVelocity.set(0, 0);
+    if (this.orbitVelocity.lengthSq() < 1e-22) this.orbitVelocity.set(0, 0);
     if (this.lookVelocity.lengthSq() < 1e-12) this.lookVelocity.set(0, 0);
     if (Math.abs(this.tiltVelocity) < 1e-7) this.tiltVelocity = 0;
     if (Math.abs(this.zoomVelocity) < 1e-7) this.zoomVelocity = 0;
@@ -576,6 +577,23 @@ export class GlobeCameraController {
     return this.enableDamping
       ? THREE.MathUtils.clamp(this.dampingFactor, 0.01, 1)
       : 1;
+  }
+
+  private globeOrbitRadiansPerPixel(): number {
+    const altitude = Math.max(0.05, this.altitudeAboveSurface());
+    const viewportHeight = Math.max(1, this.element.clientHeight);
+    const metresPerPixel =
+      (2 * altitude * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5)) /
+      viewportHeight;
+    const surfaceRadius = Math.max(this.ellipsoid.polarRadius, this.target.length());
+    const sensitivity = Math.max(0.01, this.orbitSpeed) / 0.38;
+    // The upper bound preserves controllability at global scale; the lower
+    // bound remains below a level-27 pixel so local drags are never swallowed.
+    return THREE.MathUtils.clamp(
+      (metresPerPixel / surfaceRadius) * sensitivity,
+      1e-11,
+      0.003 * Math.max(0.01, this.orbitSpeed)
+    );
   }
 
   private resetVelocities(): void {
