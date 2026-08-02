@@ -143,16 +143,19 @@ export class GlobeCameraController {
     if (!this.enabled || this.animation) return changed;
 
     if (this.orbitVelocity.lengthSq() > 1e-12) {
-      this.orbitAroundGlobe(this.orbitVelocity.x, this.orbitVelocity.y);
-      changed = true;
+      changed = this.orbitAroundGlobe(
+        this.orbitVelocity.x,
+        this.orbitVelocity.y
+      ) || changed;
     }
     if (this.lookVelocity.lengthSq() > 1e-12) {
-      this.orbitAroundSurface(this.lookVelocity.x, this.lookVelocity.y);
-      changed = true;
+      changed = this.orbitAroundSurface(
+        this.lookVelocity.x,
+        this.lookVelocity.y
+      ) || changed;
     }
     if (Math.abs(this.tiltVelocity) > 1e-7) {
-      this.tiltAroundSurface(this.tiltVelocity);
-      changed = true;
+      changed = this.tiltAroundSurface(this.tiltVelocity) || changed;
     }
     if (Math.abs(this.zoomVelocity) > 1e-7) {
       this.zoomAlongView(this.zoomVelocity);
@@ -240,98 +243,97 @@ export class GlobeCameraController {
     this.element.removeEventListener('contextmenu', this.onContextMenu);
   }
 
-  private orbitAroundGlobe(yaw: number, pitch: number): void {
+  private orbitAroundGlobe(yaw: number, pitch: number): boolean {
     const yawRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).normalize();
     const pitchRotation = new THREE.Quaternion().setFromAxisAngle(right, pitch);
     const rotation = pitchRotation.multiply(yawRotation);
     const nextPosition = this.camera.position.clone().applyQuaternion(rotation);
     const polar = Math.acos(THREE.MathUtils.clamp(nextPosition.y / nextPosition.length(), -1, 1));
-    if (polar < 0.015 || polar > Math.PI - 0.015) return;
+    if (polar < 0.015 || polar > Math.PI - 0.015) {
+      this.orbitVelocity.set(0, 0);
+      return false;
+    }
     this.camera.position.copy(nextPosition);
     this.camera.quaternion.premultiply(rotation).normalize();
     this.camera.up.applyQuaternion(rotation).normalize();
     this.target.applyQuaternion(rotation);
+    this.stabilizeHorizon(this.target, this.camera.up);
+    return true;
   }
 
-  private tiltAroundSurface(angle: number): void {
-    this.orbitAroundSurface(0, angle);
+  private tiltAroundSurface(angle: number): boolean {
+    return this.orbitAroundSurface(0, angle);
   }
 
-  private orbitAroundSurface(yaw: number, pitch: number): void {
+  private orbitAroundSurface(yaw: number, pitch: number): boolean {
     const pivot = this.surfacePivot();
-    if (!pivot) return;
+    if (!pivot) return false;
     const pivotNormal = this.surfaceNormal(pivot);
     const offset = this.camera.position.clone().sub(pivot);
     const yawRotation = new THREE.Quaternion().setFromAxisAngle(pivotNormal, yaw);
-    let pitchAmount = pitch;
     const offsetAfterYaw = offset.applyQuaternion(yawRotation);
     // The camera's local right vector can accumulate roll after globe orbiting
     // and is not guaranteed to remain tangent to the ellipsoid. Derive the
     // pitch axis from the surface normal and camera offset so middle-drag
     // always changes elevation, regardless of heading or accumulated roll.
-    const pitchAxis = pivotNormal.clone().cross(offsetAfterYaw).normalize();
-    if (pitchAxis.lengthSq() <= 1e-10) {
+    const pitchAxis = pivotNormal.clone().cross(offsetAfterYaw.clone().normalize());
+    if (pitchAxis.lengthSq() <= 1e-12) {
       pitchAxis.set(1, 0, 0)
         .applyQuaternion(this.camera.quaternion)
         .applyQuaternion(yawRotation)
         .normalize();
+      // At exact nadir both signs describe a valid tangent axis. Pick the one
+      // whose infinitesimal positive tilt makes the physical horizon-up agree
+      // with the transported screen-up, preventing a delayed 180deg flip when
+      // the surface-normal projection becomes large enough to use again.
+      const probeOffset = offsetAfterYaw.clone().applyAxisAngle(pitchAxis, 1e-4);
+      const probeForward = probeOffset.clone().negate().normalize();
+      const probeUp = pivotNormal.clone().addScaledVector(
+        probeForward,
+        -pivotNormal.dot(probeForward)
+      ).normalize();
+      const transportedUp = this.camera.up.clone().applyQuaternion(yawRotation);
+      transportedUp.addScaledVector(probeForward, -transportedUp.dot(probeForward)).normalize();
+      if (probeUp.dot(transportedUp) < 0) pitchAxis.negate();
+    } else pitchAxis.normalize();
+    const currentTilt = Math.acos(THREE.MathUtils.clamp(
+      offsetAfterYaw.clone().normalize().dot(pivotNormal),
+      -1,
+      1
+    ));
+    const minimumTilt = THREE.MathUtils.degToRad(this.minimumTiltDegrees);
+    const maximumTilt = THREE.MathUtils.degToRad(this.maximumTiltDegrees);
+    let pitchAmount = pitch;
+    if (currentTilt < minimumTilt) {
+      pitchAmount = pitch > 0 ? Math.min(pitch, minimumTilt - currentTilt) : 0;
+    } else if (currentTilt > maximumTilt) {
+      pitchAmount = pitch < 0 ? Math.max(pitch, maximumTilt - currentTilt) : 0;
+    } else {
+      // The unsigned angle of the final offset cannot tell whether a pitch
+      // crossed through nadir. Clamp the signed delta before rotating so the
+      // camera can never pass through that singularity and flip by 180deg.
+      pitchAmount = THREE.MathUtils.clamp(
+        pitch,
+        minimumTilt - currentTilt,
+        maximumTilt - currentTilt
+      );
     }
-    let pitchRotation = new THREE.Quaternion().setFromAxisAngle(pitchAxis, pitchAmount);
-    let nextOffset = offsetAfterYaw.clone().applyQuaternion(pitchRotation);
-    if (!this.isAllowedTilt(nextOffset, pivotNormal)) {
-      const startDistance = this.distanceToTiltRange(offsetAfterYaw, pivotNormal);
-      const endDistance = this.distanceToTiltRange(nextOffset, pivotNormal);
-      if (startDistance > 0) {
-        // Terrain arriving or radial distance correction can leave the current
-        // attitude microscopically outside the legal interval. Always accept
-        // input that moves it back toward the interval; otherwise both middle
-        // drag directions could be clamped to zero forever.
-        if (endDistance >= startDistance - 1e-8) pitchAmount = 0;
-      } else {
-        let minimum = 0;
-        let maximum = 1;
-        for (let iteration = 0; iteration < 14; iteration += 1) {
-          const amount = (minimum + maximum) * 0.5;
-          const candidate = offsetAfterYaw.clone().applyAxisAngle(pitchAxis, pitch * amount);
-          if (this.isAllowedTilt(candidate, pivotNormal)) minimum = amount;
-          else maximum = amount;
-        }
-        pitchAmount = pitch * minimum;
-      }
-      pitchRotation = new THREE.Quaternion().setFromAxisAngle(pitchAxis, pitchAmount);
-      nextOffset = offsetAfterYaw.clone().applyQuaternion(pitchRotation);
-      if (pitchAmount === 0 || Math.abs(pitchAmount) < Math.abs(pitch) * 0.999) {
-        this.lookVelocity.y = 0;
-        this.tiltVelocity = 0;
-      }
+    if (Math.abs(pitchAmount) < 1e-7) pitchAmount = 0;
+    if (pitchAmount === 0 || Math.abs(pitchAmount) < Math.abs(pitch) * 0.999) {
+      this.lookVelocity.y = 0;
+      this.tiltVelocity = 0;
     }
+    const pitchRotation = new THREE.Quaternion().setFromAxisAngle(pitchAxis, pitchAmount);
+    const nextOffset = offsetAfterYaw.clone().applyQuaternion(pitchRotation);
+    if (Math.abs(yaw) < 1e-10 && Math.abs(pitchAmount) < 1e-10) return false;
     this.camera.position.copy(pivot).add(nextOffset);
-    const forward = pivot.clone().sub(this.camera.position).normalize();
     const rotatedUp = this.camera.up.clone()
       .applyQuaternion(yawRotation)
       .applyQuaternion(pitchRotation);
-    rotatedUp.addScaledVector(forward, -rotatedUp.dot(forward));
-    if (rotatedUp.lengthSq() <= 1e-10) {
-      const focusPosition = this.coordinates.worldToGeodetic(pivot);
-      rotatedUp.copy(this.localFrame(focusPosition.longitude, focusPosition.latitude).north);
-    }
-    this.camera.up.copy(rotatedUp.normalize());
-    this.camera.lookAt(pivot);
+    this.stabilizeHorizon(pivot, rotatedUp);
     this.target.copy(pivot);
-  }
-
-  private isAllowedTilt(offset: THREE.Vector3, normal: THREE.Vector3): boolean {
-    const tilt = this.tiltDegrees(offset, normal);
-    return tilt >= this.minimumTiltDegrees - 1e-4 &&
-      tilt <= this.maximumTiltDegrees + 1e-4;
-  }
-
-  private distanceToTiltRange(offset: THREE.Vector3, normal: THREE.Vector3): number {
-    const tilt = this.tiltDegrees(offset, normal);
-    if (tilt < this.minimumTiltDegrees) return this.minimumTiltDegrees - tilt;
-    if (tilt > this.maximumTiltDegrees) return tilt - this.maximumTiltDegrees;
-    return 0;
+    return true;
   }
 
   private tiltDegrees(offset: THREE.Vector3, normal: THREE.Vector3): number {
@@ -383,7 +385,16 @@ export class GlobeCameraController {
     });
     const frame = this.localFrame(options.longitude, options.latitude);
     const heading = THREE.MathUtils.degToRad(options.heading ?? 0);
-    const pitch = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(options.pitch ?? -90, -89.9, -3));
+    // Camera offset tilt is `90deg + pitch` for Cesium-style negative
+    // pitches. Use the same interval as interactive surface orbiting so a
+    // fly-to cannot start outside the legal observation plane.
+    const minimumPitch = Math.max(-89.9, this.minimumTiltDegrees - 90);
+    const maximumPitch = Math.min(-0.1, this.maximumTiltDegrees - 90);
+    const pitch = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(
+      options.pitch ?? -90,
+      minimumPitch,
+      Math.max(minimumPitch, maximumPitch)
+    ));
     const horizontal = frame.north.clone().multiplyScalar(Math.cos(heading))
       .addScaledVector(frame.east, Math.sin(heading));
     const forward = horizontal.multiplyScalar(Math.cos(pitch))
@@ -413,9 +424,12 @@ export class GlobeCameraController {
     }
     const range = upperRange;
     const position = target.clone().addScaledVector(forward, -range);
-    const matrix = new THREE.Matrix4().lookAt(position, target, frame.north);
+    const viewUp = frame.up.clone().addScaledVector(forward, -frame.up.dot(forward));
+    if (viewUp.lengthSq() <= 1e-10) viewUp.copy(frame.north);
+    viewUp.normalize();
+    const matrix = new THREE.Matrix4().lookAt(position, target, viewUp);
     const quaternion = new THREE.Quaternion().setFromRotationMatrix(matrix);
-    return { position, quaternion, up: frame.north, target };
+    return { position, quaternion, up: viewUp, target };
   }
 
   private updateTargetFromView(): void {
@@ -477,7 +491,31 @@ export class GlobeCameraController {
     // Radial distance clamping moves an oblique camera off its original view
     // ray. Re-aim at the retained surface target so zoom limits cannot leave
     // the camera looking into space.
-    if (clamped && this.target.lengthSq() > 0) this.camera.lookAt(this.target);
+    if (clamped && this.target.lengthSq() > 0) {
+      this.stabilizeHorizon(this.target, this.camera.up);
+    }
+  }
+
+  private stabilizeHorizon(pivot: THREE.Vector3, fallbackUp: THREE.Vector3): void {
+    const forward = pivot.clone().sub(this.camera.position).normalize();
+    const surfaceUp = this.surfaceNormal(pivot);
+    const screenUp = surfaceUp.addScaledVector(forward, -surfaceUp.dot(forward));
+    // At nadir the projected surface normal has no defined direction. Use the
+    // transported camera-up vector throughout a small polar cap, otherwise
+    // floating-point noise can normalize into either of two opposite vectors.
+    const nadirProjectionThreshold = Math.sin(THREE.MathUtils.degToRad(1)) ** 2;
+    if (screenUp.lengthSq() < nadirProjectionThreshold) {
+      screenUp.copy(fallbackUp).addScaledVector(forward, -fallbackUp.dot(forward));
+    }
+    if (screenUp.lengthSq() <= 1e-10) {
+      const focusPosition = this.coordinates.worldToGeodetic(pivot);
+      screenUp.copy(this.localFrame(
+        focusPosition.longitude,
+        focusPosition.latitude
+      ).north);
+    }
+    this.camera.up.copy(screenUp.normalize());
+    this.camera.lookAt(pivot);
   }
 
   private altitudeAboveSurface(): number {

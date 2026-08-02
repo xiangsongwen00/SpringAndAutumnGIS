@@ -93,6 +93,15 @@ export class GlobeEngine {
   private readonly resizeObserver: ResizeObserver;
   private readonly navigation: Required<GlobeNavigationOptions>;
   private readonly terrainMaximumSurfaceDisplacement: number;
+  private lodSelection: ReturnType<GlobeLodSelector['select']> | null = null;
+  private lodSelectionTerrainRevision = -1;
+  private lodSelectionViewportWidth = 0;
+  private lodSelectionViewportHeight = 0;
+  private lodSelectionMinimumLevel: number | undefined;
+  private observedTerrainRevision = -1;
+  private terrainRevisionRefreshAt = 0;
+  private readonly lodCameraPosition = new THREE.Vector3();
+  private readonly lodCameraQuaternion = new THREE.Quaternion();
 
   constructor(options: GlobeEngineOptions) {
     this.container = options.container;
@@ -123,6 +132,7 @@ export class GlobeEngine {
     this.terrain = options.terrain === false || options.terrain === undefined
       ? null
       : new TerrainTileLayer(this.ellipsoid, options.terrain, options.terrainLayer);
+    this.lod.setSurfaceDisplacementSource(this.terrain ?? undefined);
     this.grid = new GlobeGridRenderer(this.ellipsoid, {
       ...options.grid,
       terrain: this.terrain ?? undefined
@@ -212,7 +222,7 @@ export class GlobeEngine {
       this.frameHandle = requestAnimationFrame(renderFrame);
       this.resize();
       this.updateNavigationSensitivity();
-      this.controls.update();
+      const cameraChanged = this.controls.update();
       const cameraLevel = this.getCameraLevel();
       this.imagery?.provider.setViewLevel?.(cameraLevel);
       const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
@@ -224,27 +234,62 @@ export class GlobeEngine {
       let minimumLevelOverride = !useMinimumLevelOverride
         ? undefined
         : Math.floor(cameraLevel) + minimumLodLevelOffset!;
-      let selection = this.lod.select(
-        this.camera,
-        this.renderer.domElement.clientHeight,
-        minimumLevelOverride
-      );
-      // A forced vector minimum can exceed the tile budget at polar/oblique
-      // global views. Never keep a half-refined mix spanning several levels:
-      // lower the whole minimum and select again until refinement completes.
-      while (
-        minimumLevelOverride !== undefined &&
-        minimumLevelOverride > this.lod.minLevel &&
-        selection.tiles.length >= this.lod.maxTiles &&
-        minimumSelectedLevel(selection.stats) < minimumLevelOverride
-      ) {
-        minimumLevelOverride -= 1;
-        selection = this.lod.select(
+      const requestedMinimumLevelOverride = minimumLevelOverride;
+      const terrainRevision = this.terrain?.revision ?? -1;
+      const now = performance.now();
+      if (terrainRevision !== this.observedTerrainRevision) {
+        this.observedTerrainRevision = terrainRevision;
+        // Terrain tiles often arrive in bursts. Rebuilding all LOD bounds for
+        // every individual response makes marginal horizon/frustum nodes
+        // alternate visibly. Batch those revisions while the camera is still.
+        this.terrainRevisionRefreshAt = now + 100;
+      }
+      const viewportHeight = this.renderer.domElement.clientHeight;
+      const viewportWidth = this.renderer.domElement.clientWidth;
+      const cameraPoseChanged = cameraChanged ||
+        !this.camera.position.equals(this.lodCameraPosition) ||
+        !this.camera.quaternion.equals(this.lodCameraQuaternion);
+      const terrainRefreshDue =
+        terrainRevision !== this.lodSelectionTerrainRevision &&
+        now >= this.terrainRevisionRefreshAt;
+      const selectionChanged =
+        this.lodSelection === null ||
+        cameraPoseChanged ||
+        viewportWidth !== this.lodSelectionViewportWidth ||
+        viewportHeight !== this.lodSelectionViewportHeight ||
+        requestedMinimumLevelOverride !== this.lodSelectionMinimumLevel ||
+        terrainRefreshDue;
+      if (selectionChanged) {
+        let selection = this.lod.select(
           this.camera,
-          this.renderer.domElement.clientHeight,
+          viewportHeight,
           minimumLevelOverride
         );
+        // A forced vector minimum can exceed the tile budget at polar/oblique
+        // global views. Never keep a half-refined mix spanning several levels:
+        // lower the whole minimum and select again until refinement completes.
+        while (
+          minimumLevelOverride !== undefined &&
+          minimumLevelOverride > this.lod.minLevel &&
+          selection.tiles.length >= this.lod.maxTiles &&
+          minimumSelectedLevel(selection.stats) < minimumLevelOverride
+        ) {
+          minimumLevelOverride -= 1;
+          selection = this.lod.select(
+            this.camera,
+            viewportHeight,
+            minimumLevelOverride
+          );
+        }
+        this.lodSelection = selection;
+        this.lodSelectionTerrainRevision = terrainRevision;
+        this.lodSelectionViewportWidth = viewportWidth;
+        this.lodSelectionViewportHeight = viewportHeight;
+        this.lodSelectionMinimumLevel = requestedMinimumLevelOverride;
+        this.lodCameraPosition.copy(this.camera.position);
+        this.lodCameraQuaternion.copy(this.camera.quaternion);
       }
+      const selection = this.lodSelection!;
       const terrainStats = this.terrain?.update(selection.tiles, this.camera.position) ?? null;
       const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
       this.grid.update(selection.tiles, this.camera.position);
@@ -287,6 +332,7 @@ export class GlobeEngine {
     this.lod.setMaximumSurfaceDisplacement(
       enabled ? this.terrainMaximumSurfaceDisplacement : 0
     );
+    this.lodSelection = null;
     this.lastStatsSignature = '';
   }
 

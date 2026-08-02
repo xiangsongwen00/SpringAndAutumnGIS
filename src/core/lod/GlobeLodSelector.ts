@@ -38,6 +38,11 @@ export type GlobeLodSelectorOptions = {
   tilingScheme?: TilingScheme;
 };
 
+export interface SurfaceDisplacementBoundsSource {
+  readonly revision: number;
+  maximumHeight(id: TileId): number | null;
+}
+
 type Candidate = SelectedTile & { canSplit: boolean };
 type ViewSurfaceSample = {
   longitude: number;
@@ -74,6 +79,8 @@ export class GlobeLodSelector {
   private readonly frustum = new THREE.Frustum();
   private readonly tileBounds = new THREE.Sphere();
   private readonly viewSurfaceSamples: ViewSurfaceSample[] = [];
+  private surfaceDisplacementSource?: SurfaceDisplacementBoundsSource;
+  private surfaceDisplacementRevision = -1;
   private cameraDistance = 0;
   private cameraLongitude = 0;
   private cameraLatitude = 0;
@@ -118,6 +125,14 @@ export class GlobeLodSelector {
     this.previousSplits.clear();
   }
 
+  setSurfaceDisplacementSource(source?: SurfaceDisplacementBoundsSource): void {
+    if (source === this.surfaceDisplacementSource) return;
+    this.surfaceDisplacementSource = source;
+    this.surfaceDisplacementRevision = source?.revision ?? -1;
+    this.boundsCache.clear();
+    this.previousSplits.clear();
+  }
+
   select(
     camera: THREE.PerspectiveCamera,
     viewportHeight: number,
@@ -126,6 +141,11 @@ export class GlobeLodSelector {
     tiles: SelectedTile[];
     stats: GlobeLodStats;
   } {
+    const displacementRevision = this.surfaceDisplacementSource?.revision ?? -1;
+    if (displacementRevision !== this.surfaceDisplacementRevision) {
+      this.surfaceDisplacementRevision = displacementRevision;
+      this.boundsCache.clear();
+    }
     camera.updateMatrixWorld();
     camera.getWorldPosition(this.cameraPosition);
     this.cameraDistance = this.cameraPosition.length();
@@ -223,11 +243,12 @@ export class GlobeLodSelector {
     ).normalize();
     this.ellipsoid.cartographicToCartesian({ longitude, latitude }, this.surfacePoint);
 
-    if (id.level > 0 && !this.isAboveHorizon(rectangle)) {
+    const surfaceDisplacement = this.surfaceDisplacementForTile(id);
+    if (id.level > 0 && !this.isAboveHorizon(rectangle, surfaceDisplacement)) {
       this.horizonCulled += 1;
       return null;
     }
-    if (id.level > 0 && !this.isInsideFrustum(id, rectangle)) {
+    if (id.level > 0 && !this.isInsideFrustum(id, rectangle, surfaceDisplacement)) {
       this.frustumCulled += 1;
       return null;
     }
@@ -315,7 +336,14 @@ export class GlobeLodSelector {
     }
   }
 
-  private isAboveHorizon(rectangle: Rectangle): boolean {
+  private surfaceDisplacementForTile(id: TileId): number {
+    const height = this.surfaceDisplacementSource?.maximumHeight(id);
+    return height === null || height === undefined
+      ? this.maximumSurfaceDisplacement
+      : THREE.MathUtils.clamp(height, 0, this.maximumSurfaceDisplacement);
+  }
+
+  private isAboveHorizon(rectangle: Rectangle, surfaceDisplacement: number): boolean {
     const radius = this.surfaceRadiusInDirection(this.cameraDirection);
     if (this.cameraDistance <= radius) return true;
     const horizonAngle = Math.acos(THREE.MathUtils.clamp(radius / this.cameraDistance, -1, 1));
@@ -323,8 +351,8 @@ export class GlobeLodSelector {
     // tangent point. The extra angle is the horizon extension seen from the
     // highest permitted surface displacement. Without it, CPU LOD culling
     // removes tiles that the GPU later would have lifted into the viewport.
-    const displacedRadius = radius + this.maximumSurfaceDisplacement;
-    const displacementAngle = this.maximumSurfaceDisplacement > 0
+    const displacedRadius = radius + surfaceDisplacement;
+    const displacementAngle = surfaceDisplacement > 0
       ? Math.acos(THREE.MathUtils.clamp(radius / displacedRadius, -1, 1))
       : 0;
     const minimumFacing = Math.cos(
@@ -373,7 +401,11 @@ export class GlobeLodSelector {
     return maximum;
   }
 
-  private isInsideFrustum(id: TileId, rectangle: Rectangle): boolean {
+  private isInsideFrustum(
+    id: TileId,
+    rectangle: Rectangle,
+    surfaceDisplacement: number
+  ): boolean {
     const key = tileKey(id);
     const cached = this.boundsCache.get(key);
     if (cached) return this.frustum.intersectsSphere(cached);
@@ -384,7 +416,7 @@ export class GlobeLodSelector {
       { longitude: longitudeCenter, latitude: latitudeCenter },
       this.tileBounds.center
     );
-    if (this.maximumSurfaceDisplacement > 0) {
+    if (surfaceDisplacement > 0) {
       const a2 = this.ellipsoid.equatorialRadius ** 2;
       const b2 = this.ellipsoid.polarRadius ** 2;
       this.boundsNormal.set(
@@ -394,7 +426,7 @@ export class GlobeLodSelector {
       ).normalize();
       this.tileBounds.center.addScaledVector(
         this.boundsNormal,
-        this.maximumSurfaceDisplacement * 0.5
+        surfaceDisplacement * 0.5
       );
     }
 
@@ -412,9 +444,9 @@ export class GlobeLodSelector {
           this.sampleDirection
         );
         radius = Math.max(radius, this.tileBounds.center.distanceTo(this.sampleDirection));
-        if (this.maximumSurfaceDisplacement > 0) {
+        if (surfaceDisplacement > 0) {
           this.ellipsoid.cartographicToCartesian(
-            { longitude, latitude, height: this.maximumSurfaceDisplacement },
+            { longitude, latitude, height: surfaceDisplacement },
             this.displacedSample
           );
           radius = Math.max(radius, this.tileBounds.center.distanceTo(this.displacedSample));

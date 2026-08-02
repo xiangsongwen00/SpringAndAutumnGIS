@@ -204,6 +204,11 @@ export class RasterTileLayer {
     const primeVerticalRadius = a / Math.sqrt(latitudeTerm) + this.surfaceOffset;
     const meridionalRadius =
       (a * (1 - eccentricitySquared)) / latitudeTerm ** 1.5 + this.surfaceOffset;
+    const terrainSkirtDepth = THREE.MathUtils.clamp(
+      (Math.PI * 2 * a) / size / 64,
+      10,
+      2_000
+    );
     return new THREE.ShaderMaterial({
       uniforms: {
         sag_ellipsoidRadii: {
@@ -252,18 +257,24 @@ export class RasterTileLayer {
         uvOffset: { value: new THREE.Vector2(0, 0) },
         hasTexture: { value: false },
         terrainTexture: { value: null },
+        terrainParentTexture: { value: null },
         terrainUvScale: { value: new THREE.Vector2(1, 1) },
         terrainUvOffset: { value: new THREE.Vector2(0, 0) },
+        terrainParentUvScale: { value: new THREE.Vector2(1, 1) },
+        terrainParentUvOffset: { value: new THREE.Vector2(0, 0) },
         terrainTexelSize: { value: new THREE.Vector2(1, 1) },
         terrainMetersPerTexel: { value: new THREE.Vector2(1, 1) },
         hasTerrain: { value: false },
+        hasTerrainParent: { value: false },
         terrainExaggeration: { value: this.terrain?.exaggeration ?? 1 },
+        terrainSkirtDepth: { value: terrainSkirtDepth },
         placeholder: { value: placeholderColor(tile.level) }
       },
       vertexShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
         varying vec2 v_terrainUv;
+        attribute float skirt;
         uniform vec3 sag_originHigh;
         uniform vec3 sag_originLow;
         uniform vec3 sag_east;
@@ -279,10 +290,16 @@ export class RasterTileLayer {
         uniform vec2 uvScale;
         uniform vec2 uvOffset;
         uniform sampler2D terrainTexture;
+        uniform sampler2D terrainParentTexture;
         uniform vec2 terrainUvScale;
         uniform vec2 terrainUvOffset;
+        uniform vec2 terrainParentUvScale;
+        uniform vec2 terrainParentUvOffset;
+        uniform vec2 terrainTexelSize;
         uniform bool hasTerrain;
+        uniform bool hasTerrainParent;
         uniform float terrainExaggeration;
+        uniform float terrainSkirtDepth;
         #include <common>
         #include <logdepthbuf_pars_vertex>
         ${globeCoordinateShader}
@@ -312,9 +329,19 @@ export class RasterTileLayer {
           v_uv = vec2(xyzUv.x, 1.0 - xyzUv.y);
           vec2 terrainUv = terrainUvOffset + uv * terrainUvScale;
           v_terrainUv = terrainUv;
-          float heightMeters = hasTerrain
+          float fineHeight = hasTerrain
             ? texture2D(terrainTexture, terrainUv).r * terrainExaggeration
             : 0.0;
+          float heightMeters = fineHeight;
+          if (hasTerrainParent) {
+            vec2 parentUv = terrainParentUvOffset + uv * terrainParentUvScale;
+            float parentHeight = texture2D(terrainParentTexture, parentUv).r * terrainExaggeration;
+            vec2 edgeDistance = min(terrainUv, vec2(1.0) - terrainUv);
+            float edge = min(edgeDistance.x, edgeDistance.y);
+            float blendWidth = max(terrainTexelSize.x, terrainTexelSize.y) * 2.0;
+            heightMeters = mix(parentHeight, fineHeight, smoothstep(0.0, blendWidth, edge));
+          }
+          if (hasTerrain) heightMeters -= skirt * terrainSkirtDepth;
           v_globeNormal = normalize(vec3(
             cosLatitude * longitudeSinCos.x,
             sinLatitude,
@@ -404,7 +431,12 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
-    const prioritized = [...selection].sort((a, b) => b.screenPixels - a.screenPixels);
+    for (const record of this.textures.values()) {
+      if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
+    }
+    const prioritized = [...selection].sort(
+      (a, b) => b.id.level - a.id.level || b.screenPixels - a.screenPixels
+    );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const tile = prioritized[rank];
       if (!tile) continue;
@@ -419,6 +451,7 @@ export class RasterTileLayer {
 
       const desired = ancestorAtLevel(tile.id, maximumSourceLevel);
       this.visibleTextureKeys.add(tileKey(desired));
+      this.queueTexture(desired, rank);
       const ready = this.findReadyAncestor(tile.id);
       if (ready) {
         this.visibleTextureKeys.add(ready.key);
@@ -426,9 +459,8 @@ export class RasterTileLayer {
         const bridgeLevel = Math.max(this.provider.minLevel, maximumSourceLevel - 3);
         const bridge = ancestorAtLevel(tile.id, bridgeLevel);
         this.visibleTextureKeys.add(tileKey(bridge));
-        this.queueTexture(bridge, rank * 2);
+        this.queueTexture(bridge, prioritized.length + rank);
       }
-      this.queueTexture(desired, rank * 2 + 1);
     }
     for (const [key, record] of this.textures) {
       if (this.visibleTextureKeys.has(key) || record.state === 'loading' || record.state === 'ready') continue;
@@ -546,15 +578,25 @@ export class RasterTileLayer {
         (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
       }
       const terrain = this.terrain?.resolveTexture(tile.id);
-      const terrainKey = terrain?.key ?? '';
+      const terrainKey = terrain ? `${terrain.key}|${terrain.parentKey}` : '';
       if (terrainKey === renderTile.terrainKey) continue;
       renderTile.terrainKey = terrainKey;
       uniforms.terrainTexture!.value = terrain?.texture ?? null;
+      uniforms.terrainParentTexture!.value = terrain?.parentTexture ?? null;
       uniforms.hasTerrain!.value = terrain !== undefined;
+      uniforms.hasTerrainParent!.value = terrain?.parentTexture !== null &&
+        terrain?.parentTexture !== undefined;
       (uniforms.terrainUvScale!.value as THREE.Vector2).setScalar(terrain?.scale ?? 1);
       (uniforms.terrainUvOffset!.value as THREE.Vector2).set(
         terrain?.offsetX ?? 0,
         terrain?.offsetY ?? 0
+      );
+      (uniforms.terrainParentUvScale!.value as THREE.Vector2).setScalar(
+        terrain?.parentScale ?? 1
+      );
+      (uniforms.terrainParentUvOffset!.value as THREE.Vector2).set(
+        terrain?.parentOffsetX ?? 0,
+        terrain?.parentOffsetY ?? 0
       );
       (uniforms.terrainTexelSize!.value as THREE.Vector2).set(
         1 / (terrain?.width ?? 1),
@@ -630,10 +672,12 @@ function createGridGeometry(segmentsInput: number): THREE.BufferGeometry {
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
+  const skirts: number[] = [];
   for (let y = 0; y <= segments; y += 1) {
     for (let x = 0; x <= segments; x += 1) {
       positions.push(x / segments, y / segments, 0);
       uvs.push(x / segments, y / segments);
+      skirts.push(0);
     }
   }
   const columns = segments + 1;
@@ -646,9 +690,33 @@ function createGridGeometry(segmentsInput: number): THREE.BufferGeometry {
       indices.push(a, c, b, b, c, d);
     }
   }
+  const perimeter: number[] = [];
+  for (let x = 0; x <= segments; x += 1) perimeter.push(x);
+  for (let y = 1; y <= segments; y += 1) perimeter.push(y * columns + segments);
+  for (let x = segments - 1; x >= 0; x -= 1) perimeter.push(segments * columns + x);
+  for (let y = segments - 1; y >= 1; y -= 1) perimeter.push(y * columns);
+  const skirtStart = positions.length / 3;
+  for (const surfaceIndex of perimeter) {
+    positions.push(
+      positions[surfaceIndex * 3] ?? 0,
+      positions[surfaceIndex * 3 + 1] ?? 0,
+      0
+    );
+    uvs.push(uvs[surfaceIndex * 2] ?? 0, uvs[surfaceIndex * 2 + 1] ?? 0);
+    skirts.push(1);
+  }
+  for (let index = 0; index < perimeter.length; index += 1) {
+    const next = (index + 1) % perimeter.length;
+    const surface = perimeter[index]!;
+    const nextSurface = perimeter[next]!;
+    const lower = skirtStart + index;
+    const nextLower = skirtStart + next;
+    indices.push(surface, lower, nextSurface, nextSurface, lower, nextLower);
+  }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setAttribute('skirt', new THREE.Float32BufferAttribute(skirts, 1));
   geometry.setIndex(indices);
   return geometry;
 }

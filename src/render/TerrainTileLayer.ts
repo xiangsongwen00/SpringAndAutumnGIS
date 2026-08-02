@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransform';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import type { SelectedTile } from '../core/lod/GlobeLodSelector';
+import type { SurfaceDisplacementBoundsSource } from '../core/lod/GlobeLodSelector';
 import {
   sampleTerrainTile,
   type TerrainProvider,
@@ -36,9 +37,14 @@ export type TerrainTextureBinding = Readonly<{
   sourceLevel: number;
   width: number;
   height: number;
+  parentKey: string;
+  parentTexture: THREE.Texture | null;
+  parentScale: number;
+  parentOffsetX: number;
+  parentOffsetY: number;
 }>;
 
-export interface TerrainHeightSource {
+export interface TerrainHeightSource extends SurfaceDisplacementBoundsSource {
   readonly revision: number;
   readonly exaggeration: number;
   resolveTexture(id: TileId): TerrainTextureBinding | undefined;
@@ -133,6 +139,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (!record?.data) return undefined;
     const levels = id.level - record.id.level;
     const scale = 1 / 2 ** levels;
+    const parent = this.findReadyAncestor(id, record.id.level - 1);
+    const parentLevels = parent ? id.level - parent.id.level : 0;
+    const parentScale = parent ? 1 / 2 ** parentLevels : 1;
     return {
       key: record.key,
       texture: record.data.texture,
@@ -141,7 +150,16 @@ export class TerrainTileLayer implements TerrainHeightSource {
       offsetY: (id.y - record.id.y * 2 ** levels) * scale,
       sourceLevel: record.id.level,
       width: record.data.width,
-      height: record.data.height
+      height: record.data.height,
+      parentKey: parent?.key ?? '',
+      parentTexture: parent?.data?.texture ?? null,
+      parentScale,
+      parentOffsetX: parent
+        ? (id.x - parent.id.x * 2 ** parentLevels) * parentScale
+        : 0,
+      parentOffsetY: parent
+        ? (id.y - parent.id.y * 2 ** parentLevels) * parentScale
+        : 0
     };
   }
 
@@ -166,6 +184,14 @@ export class TerrainTileLayer implements TerrainHeightSource {
       return sampleTerrainTile(record.data, tileX - x, tileY - y) * this.exaggeration;
     }
     return null;
+  }
+
+  maximumHeight(id: TileId): number | null {
+    if (!this.enabled) return 0;
+    const record = this.findReadyAncestor(id);
+    return record?.data
+      ? Math.max(0, record.data.maximumHeight * this.exaggeration) + 2
+      : null;
   }
 
   dispose(): void {
@@ -224,7 +250,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   private queueVisibleTiles(selection: readonly SelectedTile[]): void {
     this.visibleKeys.clear();
-    const prioritized = [...selection].sort((a, b) => b.screenPixels - a.screenPixels);
+    for (const record of this.records.values()) {
+      if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
+    }
+    const prioritized = [...selection].sort(
+      (a, b) => b.id.level - a.id.level || b.screenPixels - a.screenPixels
+    );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const selected = prioritized[rank];
       if (!selected) continue;
@@ -232,18 +263,17 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (maximumLevel < this.provider.minLevel) continue;
       const desired = ancestorAtLevel(selected.id, maximumLevel);
       this.visibleKeys.add(tileKey(desired));
+      this.queueTile(desired, rank);
+      const parent = ancestorAtLevel(
+        selected.id,
+        Math.max(this.provider.minLevel, maximumLevel - 1)
+      );
+      this.visibleKeys.add(tileKey(parent));
+      this.queueTile(parent, prioritized.length + rank);
       const ready = this.findReadyAncestor(selected.id);
       if (ready) {
         this.visibleKeys.add(ready.key);
-      } else {
-        const bridge = ancestorAtLevel(
-          selected.id,
-          Math.max(this.provider.minLevel, maximumLevel - 3)
-        );
-        this.visibleKeys.add(tileKey(bridge));
-        this.queueTile(bridge, rank * 2);
       }
-      this.queueTile(desired, rank * 2 + 1);
     }
     for (const [key, record] of this.records) {
       if (this.visibleKeys.has(key) || record.state === 'ready' || record.state === 'loading') continue;
@@ -327,8 +357,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
     }
   }
 
-  private findReadyAncestor(id: TileId): TerrainRecord | undefined {
-    const maximumLevel = Math.min(id.level, this.provider.maxLevel);
+  private findReadyAncestor(
+    id: TileId,
+    maximumLevelInput = Math.min(id.level, this.provider.maxLevel)
+  ): TerrainRecord | undefined {
+    const maximumLevel = Math.min(id.level, this.provider.maxLevel, maximumLevelInput);
     for (let level = maximumLevel; level >= this.provider.minLevel; level -= 1) {
       const shift = id.level - level;
       const record = this.records.get(tileKey({
