@@ -15,7 +15,11 @@ export type {
 } from './core/tiles/RasterTileProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';
 export type { VectorStyleTileProviderOptions } from './core/tiles/VectorStyleTileProvider';
-export { TerrainRgbProvider, sampleTerrainTile } from './core/terrain/TerrainProvider';
+export {
+  TerrainRgbProvider,
+  decodeTerrainRgbHeight,
+  sampleTerrainTile
+} from './core/terrain/TerrainProvider';
 export type {
   TerrainProvider,
   TerrainRgbEncoding,

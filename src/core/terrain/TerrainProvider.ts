@@ -161,6 +161,18 @@ export function sampleTerrainTile(data: TerrainTileData, u: number, v: number): 
   );
 }
 
+/** Decode one RGB triplet without requiring DOM image APIs; useful for tests and workers. */
+export function decodeTerrainRgbHeight(
+  red: number,
+  green: number,
+  blue: number,
+  encoding: TerrainRgbEncoding = 'mapbox'
+): number {
+  return encoding === 'terrarium'
+    ? red * 256 + green + blue / 256 - 32768
+    : -10_000 + (red * 256 * 256 + green * 256 + blue) * 0.1;
+}
+
 function resolveTerrainUrl(template: string, tile: TileId, scheme: TerrainTileScheme): string {
   const y = scheme === 'tms' ? 2 ** tile.level - 1 - tile.y : tile.y;
   return template
@@ -193,9 +205,7 @@ async function decodeTerrainImage(
     const red = pixels[pixel] ?? 0;
     const green = pixels[pixel + 1] ?? 0;
     const blue = pixels[pixel + 2] ?? 0;
-    const height = encoding === 'terrarium'
-      ? red * 256 + green + blue / 256 - 32768
-      : -10_000 + (red * 256 * 256 + green * 256 + blue) * 0.1;
+    const height = decodeTerrainRgbHeight(red, green, blue, encoding);
     heights[index] = height;
     minimumHeight = Math.min(minimumHeight, height);
     maximumHeight = Math.max(maximumHeight, height);

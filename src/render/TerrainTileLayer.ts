@@ -15,6 +15,8 @@ export type TerrainTileLayerOptions = {
   maxConcurrentRequests?: number;
   maxCachedTiles?: number;
   exaggeration?: number;
+  /** Draw a standalone coloured terrain mesh for diagnostics. */
+  showDebugSurface?: boolean;
 };
 
 export type TerrainTileLayerStats = Readonly<{
@@ -67,6 +69,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private readonly baseSegments: number;
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
+  private readonly showDebugSurface: boolean;
   private readonly geometries = new Map<number, THREE.BufferGeometry>();
   private readonly records = new Map<string, TerrainRecord>();
   private readonly renderTiles = new Map<string, RenderTile>();
@@ -91,6 +94,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 6));
     this.maxCachedTiles = Math.max(32, Math.round(options.maxCachedTiles ?? 384));
     this.exaggeration = Math.max(0, options.exaggeration ?? 1);
+    this.showDebugSurface = options.showDebugSurface ?? false;
     this.object3d.renderOrder = 0;
   }
 
@@ -114,10 +118,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
     this.frame += 1;
-    this.syncRenderTiles(selection);
+    if (!this.enabled) return this.stats;
+    if (this.showDebugSurface) this.syncRenderTiles(selection);
     this.queueVisibleTiles(selection);
     this.pumpQueue();
-    this.syncMaterials(selection);
+    if (this.showDebugSurface) this.syncMaterials(selection);
     this.evictTiles();
     return this.stats;
   }
@@ -219,34 +224,26 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   private queueVisibleTiles(selection: readonly SelectedTile[]): void {
     this.visibleKeys.clear();
-    for (let rank = 0; rank < selection.length; rank += 1) {
-      const selected = selection[rank];
+    const prioritized = [...selection].sort((a, b) => b.screenPixels - a.screenPixels);
+    for (let rank = 0; rank < prioritized.length; rank += 1) {
+      const selected = prioritized[rank];
       if (!selected) continue;
       const maximumLevel = Math.min(selected.id.level, this.provider.maxLevel);
-      for (let level = this.provider.minLevel; level <= maximumLevel; level += 1) {
-        const shift = selected.id.level - level;
-        const id: TileId = {
-          level,
-          x: Math.floor(selected.id.x / 2 ** shift),
-          y: Math.floor(selected.id.y / 2 ** shift)
-        };
-        const key = tileKey(id);
-        this.visibleKeys.add(key);
-        const existing = this.records.get(key);
-        if (existing) {
-          existing.lastUsedFrame = this.frame;
-          if (existing.state === 'queued') existing.priority = Math.min(existing.priority, level * 10_000 + rank);
-          continue;
-        }
-        this.records.set(key, {
-          id,
-          key,
-          state: 'queued',
-          priority: level * 10_000 + rank,
-          lastUsedFrame: this.frame,
-          data: null
-        });
+      if (maximumLevel < this.provider.minLevel) continue;
+      const desired = ancestorAtLevel(selected.id, maximumLevel);
+      this.visibleKeys.add(tileKey(desired));
+      const ready = this.findReadyAncestor(selected.id);
+      if (ready) {
+        this.visibleKeys.add(ready.key);
+      } else {
+        const bridge = ancestorAtLevel(
+          selected.id,
+          Math.max(this.provider.minLevel, maximumLevel - 3)
+        );
+        this.visibleKeys.add(tileKey(bridge));
+        this.queueTile(bridge, rank * 2);
       }
+      this.queueTile(desired, rank * 2 + 1);
     }
     for (const [key, record] of this.records) {
       if (this.visibleKeys.has(key) || record.state === 'ready' || record.state === 'loading') continue;
@@ -254,7 +251,26 @@ export class TerrainTileLayer implements TerrainHeightSource {
     }
   }
 
+  private queueTile(id: TileId, priority: number): void {
+    const key = tileKey(id);
+    const existing = this.records.get(key);
+    if (existing) {
+      existing.lastUsedFrame = this.frame;
+      if (existing.state === 'queued') existing.priority = Math.min(existing.priority, priority);
+      return;
+    }
+    this.records.set(key, {
+      id,
+      key,
+      state: 'queued',
+      priority,
+      lastUsedFrame: this.frame,
+      data: null
+    });
+  }
+
   private pumpQueue(): void {
+    if (!this.enabled) return;
     while (this.activeRequests < this.maxConcurrentRequests) {
       let next: TerrainRecord | undefined;
       for (const record of this.records.values()) {
@@ -482,6 +498,15 @@ export class TerrainTileLayer implements TerrainHeightSource {
       toneMapped: false
     });
   }
+}
+
+function ancestorAtLevel(id: TileId, level: number): TileId {
+  const shift = Math.max(0, id.level - level);
+  return {
+    level,
+    x: Math.floor(id.x / 2 ** shift),
+    y: Math.floor(id.y / 2 ** shift)
+  };
 }
 
 function createGridGeometry(segmentsInput: number): THREE.BufferGeometry {

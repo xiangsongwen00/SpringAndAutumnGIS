@@ -92,6 +92,7 @@ export class GlobeEngine {
   private viewportHeight = 0;
   private readonly resizeObserver: ResizeObserver;
   private readonly navigation: Required<GlobeNavigationOptions>;
+  private readonly terrainMaximumSurfaceDisplacement: number;
 
   constructor(options: GlobeEngineOptions) {
     this.container = options.container;
@@ -108,7 +109,17 @@ export class GlobeEngine {
       tiltSpeed: Math.max(0.05, options.navigation?.tiltSpeed ?? 1)
     };
     const tilingScheme = options.lod?.tilingScheme ?? new WebMercatorTilingScheme();
-    this.lod = new GlobeLodSelector({ ...options.lod, tilingScheme });
+    const terrainExaggeration = Math.max(0, options.terrainLayer?.exaggeration ?? 1);
+    this.terrainMaximumSurfaceDisplacement =
+      options.lod?.maximumSurfaceDisplacement ??
+      (options.terrain === false || options.terrain === undefined
+        ? 0
+        : 12_000 * terrainExaggeration);
+    this.lod = new GlobeLodSelector({
+      ...options.lod,
+      tilingScheme,
+      maximumSurfaceDisplacement: this.terrainMaximumSurfaceDisplacement
+    });
     this.terrain = options.terrain === false || options.terrain === undefined
       ? null
       : new TerrainTileLayer(this.ellipsoid, options.terrain, options.terrainLayer);
@@ -273,6 +284,9 @@ export class GlobeEngine {
 
   setTerrainEnabled(enabled: boolean): void {
     this.terrain?.setEnabled(enabled);
+    this.lod.setMaximumSurfaceDisplacement(
+      enabled ? this.terrainMaximumSurfaceDisplacement : 0
+    );
     this.lastStatsSignature = '';
   }
 

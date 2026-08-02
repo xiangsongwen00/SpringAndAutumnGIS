@@ -14,6 +14,7 @@ const levelsValue = document.querySelector<HTMLElement>('#levels-value');
 const imageryValue = document.querySelector<HTMLElement>('#imagery-value');
 const mapToggle = document.querySelector<HTMLButtonElement>('#map-toggle');
 const terrainToggle = document.querySelector<HTMLButtonElement>('#terrain-toggle');
+const terrainTest = document.querySelector<HTMLButtonElement>('#terrain-test');
 const terrainValue = document.querySelector<HTMLElement>('#terrain-value');
 const attribution = document.querySelector<HTMLAnchorElement>('#map-attribution');
 
@@ -24,8 +25,13 @@ const ESRI_LEVEL_OFFSET = -1.7;
 let vectorMode = false;
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
 let terrainEnabled = terrainEnabledByConfig;
+const terrainTestLocations = [
+  { name: '珠峰', longitude: 86.925, latitude: 27.988, altitude: 24_000 },
+  { name: '重庆', longitude: 106.5516, latitude: 29.563, altitude: 12_000 }
+] as const;
+let terrainTestIndex = 0;
 
-if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !attribution) {
+if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !terrainTest || !attribution) {
   throw new Error('演示页面结构不完整。');
 }
 
@@ -96,7 +102,11 @@ const engine = new GlobeEngine({
     collapseFactor: 0.7,
     maxTiles: 480,
     minimumHorizonDetailFactor: 0.08,
-    horizonDetailExponent: 0.5
+    horizonDetailExponent: 0.5,
+    maximumSurfaceDisplacement: terrain ? 12_000 * numericEnvironmentValue(
+      import.meta.env.VITE_TERRAIN_EXAGGERATION,
+      1
+    ) : 0
   },
   grid: {
     subdivisions: 8,
@@ -106,8 +116,9 @@ const engine = new GlobeEngine({
   terrain,
   terrainLayer: {
     segments: 64,
-    maxConcurrentRequests: 6,
-    maxCachedTiles: 384,
+    maxConcurrentRequests: 4,
+    maxCachedTiles: 256,
+    showDebugSurface: false,
     exaggeration: numericEnvironmentValue(import.meta.env.VITE_TERRAIN_EXAGGERATION, 1)
   },
   raster: {
@@ -154,12 +165,36 @@ if (!terrain) {
   terrainToggle.disabled = true;
   terrainToggle.textContent = '未配置地形';
   terrainToggle.setAttribute('aria-pressed', 'false');
+  terrainTest.disabled = true;
+  terrainTest.textContent = '未配置地形测试';
 } else {
+  terrainToggle.textContent = terrainEnabled ? '关闭地形' : '开启地形';
+  terrainToggle.setAttribute('aria-pressed', String(terrainEnabled));
   terrainToggle.addEventListener('click', () => {
     terrainEnabled = !terrainEnabled;
     engine.setTerrainEnabled(terrainEnabled);
     terrainToggle.textContent = terrainEnabled ? '关闭地形' : '开启地形';
     terrainToggle.setAttribute('aria-pressed', String(terrainEnabled));
+  });
+  terrainTest.addEventListener('click', () => {
+    if (!terrainEnabled) {
+      terrainEnabled = true;
+      engine.setTerrainEnabled(true);
+      terrainToggle.textContent = '关闭地形';
+      terrainToggle.setAttribute('aria-pressed', 'true');
+    }
+    const location = terrainTestLocations[terrainTestIndex];
+    if (!location) return;
+    engine.flyTo({
+      longitude: location.longitude,
+      latitude: location.latitude,
+      altitude: location.altitude,
+      heading: 25,
+      pitch: -55,
+      duration: 1_800
+    });
+    terrainTestIndex = (terrainTestIndex + 1) % terrainTestLocations.length;
+    terrainTest.textContent = `定位${terrainTestLocations[terrainTestIndex]!.name}地形`;
   });
 }
 

@@ -33,6 +33,8 @@ export type GlobeLodSelectorOptions = {
   minimumHorizonDetailFactor?: number;
   /** Shape of the transition from foreground detail to horizon detail. */
   horizonDetailExponent?: number;
+  /** Conservative positive GPU surface displacement used by culling, in metres. */
+  maximumSurfaceDisplacement?: number;
   tilingScheme?: TilingScheme;
 };
 
@@ -53,6 +55,7 @@ export class GlobeLodSelector {
   readonly targetPixels: number;
   readonly collapseFactor: number;
   readonly maxTiles: number;
+  maximumSurfaceDisplacement: number;
 
   private readonly horizonPaddingRadians: number;
   private readonly minimumHorizonDetailFactor: number;
@@ -63,6 +66,8 @@ export class GlobeLodSelector {
   private readonly cameraPosition = new THREE.Vector3();
   private readonly tileDirection = new THREE.Vector3();
   private readonly sampleDirection = new THREE.Vector3();
+  private readonly displacedSample = new THREE.Vector3();
+  private readonly boundsNormal = new THREE.Vector3();
   private readonly surfacePoint = new THREE.Vector3();
   private readonly surfaceToCamera = new THREE.Vector3();
   private readonly projectionView = new THREE.Matrix4();
@@ -88,6 +93,10 @@ export class GlobeLodSelector {
     this.targetPixels = Math.max(24, options.targetPixels ?? 150);
     this.collapseFactor = THREE.MathUtils.clamp(options.collapseFactor ?? 0.72, 0.1, 0.99);
     this.maxTiles = Math.max(8, Math.round(options.maxTiles ?? 384));
+    this.maximumSurfaceDisplacement = Math.max(
+      0,
+      options.maximumSurfaceDisplacement ?? 0
+    );
     this.horizonPaddingRadians = THREE.MathUtils.degToRad(options.horizonPaddingDegrees ?? 0.75);
     this.minimumHorizonDetailFactor = THREE.MathUtils.clamp(
       options.minimumHorizonDetailFactor ?? 0.08,
@@ -99,6 +108,14 @@ export class GlobeLodSelector {
       0.1,
       4
     );
+  }
+
+  setMaximumSurfaceDisplacement(displacement: number): void {
+    const next = Math.max(0, displacement);
+    if (next === this.maximumSurfaceDisplacement) return;
+    this.maximumSurfaceDisplacement = next;
+    this.boundsCache.clear();
+    this.previousSplits.clear();
   }
 
   select(
@@ -302,8 +319,19 @@ export class GlobeLodSelector {
     const radius = this.surfaceRadiusInDirection(this.cameraDirection);
     if (this.cameraDistance <= radius) return true;
     const horizonAngle = Math.acos(THREE.MathUtils.clamp(radius / this.cameraDistance, -1, 1));
+    // A displaced mountain can be visible beyond the reference ellipsoid's
+    // tangent point. The extra angle is the horizon extension seen from the
+    // highest permitted surface displacement. Without it, CPU LOD culling
+    // removes tiles that the GPU later would have lifted into the viewport.
+    const displacedRadius = radius + this.maximumSurfaceDisplacement;
+    const displacementAngle = this.maximumSurfaceDisplacement > 0
+      ? Math.acos(THREE.MathUtils.clamp(radius / displacedRadius, -1, 1))
+      : 0;
     const minimumFacing = Math.cos(
-      Math.min(Math.PI, horizonAngle + this.horizonPaddingRadians)
+      Math.min(
+        Math.PI,
+        horizonAngle + displacementAngle + this.horizonPaddingRadians
+      )
     );
     return this.maximumFacingInRectangle(rectangle) >= minimumFacing;
   }
@@ -356,6 +384,19 @@ export class GlobeLodSelector {
       { longitude: longitudeCenter, latitude: latitudeCenter },
       this.tileBounds.center
     );
+    if (this.maximumSurfaceDisplacement > 0) {
+      const a2 = this.ellipsoid.equatorialRadius ** 2;
+      const b2 = this.ellipsoid.polarRadius ** 2;
+      this.boundsNormal.set(
+        this.tileBounds.center.x / a2,
+        this.tileBounds.center.y / b2,
+        this.tileBounds.center.z / a2
+      ).normalize();
+      this.tileBounds.center.addScaledVector(
+        this.boundsNormal,
+        this.maximumSurfaceDisplacement * 0.5
+      );
+    }
 
     // A conservative world-space sphere catches curved tiles that merely cross
     // a viewport edge. The old projected-point test could reject such a tile
@@ -371,8 +412,18 @@ export class GlobeLodSelector {
           this.sampleDirection
         );
         radius = Math.max(radius, this.tileBounds.center.distanceTo(this.sampleDirection));
+        if (this.maximumSurfaceDisplacement > 0) {
+          this.ellipsoid.cartographicToCartesian(
+            { longitude, latitude, height: this.maximumSurfaceDisplacement },
+            this.displacedSample
+          );
+          radius = Math.max(radius, this.tileBounds.center.distanceTo(this.displacedSample));
+        }
       }
     }
+    // The centre is halfway between the reference and maximum displaced
+    // surfaces; sampling both surfaces is much tighter than adding the full
+    // height in every direction while remaining conservative for GPU lift.
     this.tileBounds.radius = radius * 1.01 + 1;
     if (this.boundsCache.size >= this.maxTiles * 64) this.boundsCache.clear();
     this.boundsCache.set(key, this.tileBounds.clone());

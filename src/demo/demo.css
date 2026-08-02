@@ -76,6 +76,12 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
 
 .map-switcher button.is-vector { background: rgb(26 80 73 / 88%); }
 
+.map-switcher button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  transform: none;
+}
+
 .stats {
   position: fixed;
   right: 28px;
