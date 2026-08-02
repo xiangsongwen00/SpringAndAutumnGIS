@@ -7,6 +7,12 @@ export interface RasterTileProvider {
   readonly maxLevel: number;
   /** Data zoom = globe LOD zoom + levelOffset. Only zero or negative offsets are supported. */
   readonly levelOffset?: number;
+  /** Optional minimum selected globe LOD relative to the current camera level. */
+  readonly minimumLodLevelOffset?: number;
+  /** Receives the continuous camera level before each selection/update. */
+  setViewLevel?(cameraLevel: number): void;
+  /** Resolves the highest data level allowed for a globe render tile. */
+  maximumSourceLevel?(renderLevel: number): number;
   readonly attribution?: string;
   url(tile: TileId): string;
   loadTexture?(tile: TileId): Promise<THREE.Texture>;

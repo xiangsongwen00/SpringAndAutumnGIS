@@ -163,7 +163,16 @@ export class GlobeEngine {
       this.updateNavigationSensitivity();
       this.controls.update();
       const cameraLevel = this.getCameraLevel();
-      const selection = this.lod.select(this.camera, this.renderer.domElement.clientHeight);
+      this.imagery?.provider.setViewLevel?.(cameraLevel);
+      const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
+      const minimumLevelOverride = minimumLodLevelOffset === undefined
+        ? undefined
+        : Math.floor(cameraLevel) + minimumLodLevelOffset;
+      const selection = this.lod.select(
+        this.camera,
+        this.renderer.domElement.clientHeight,
+        minimumLevelOverride
+      );
       const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
       this.grid.update(selection.tiles, this.camera.position);
       this.emitStats(selection.stats, imageryStats, cameraLevel);

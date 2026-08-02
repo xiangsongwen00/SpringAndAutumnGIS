@@ -37,7 +37,7 @@ const renderStats = (stats: GlobeEngineStats): void => {
     [...stats.levels]
       .map(([level, count]) => `${level}级：${count}`)
       .join('　');
-  const sourceName = vectorMode ? '矢量（数据层级=LOD-2）' : '卫星';
+  const sourceName = vectorMode ? '矢量（数据层级=floor(相机-2)）' : '卫星';
   imageryValue.textContent = stats.imagery
     ? `${sourceName}纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
     : '影像未启用';
@@ -57,6 +57,8 @@ const vectorMap = new VectorStyleTileProvider({
   sourceId: 'esri',
   maxLevel: 20,
   levelOffset: ESRI_LEVEL_OFFSET,
+  minimumLodLevelOffset: 0,
+  showCountryLabels: true,
   tileSize: 512,
   attribution: 'Esri'
 });

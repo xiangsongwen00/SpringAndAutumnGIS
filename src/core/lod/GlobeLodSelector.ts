@@ -77,7 +77,11 @@ export class GlobeLodSelector {
     this.horizonPaddingRadians = THREE.MathUtils.degToRad(options.horizonPaddingDegrees ?? 0.75);
   }
 
-  select(camera: THREE.PerspectiveCamera, viewportHeight: number): {
+  select(
+    camera: THREE.PerspectiveCamera,
+    viewportHeight: number,
+    minimumLevelOverride?: number
+  ): {
     tiles: SelectedTile[];
     stats: GlobeLodStats;
   } {
@@ -97,6 +101,9 @@ export class GlobeLodSelector {
     this.visited = 0;
     this.horizonCulled = 0;
     this.frustumCulled = 0;
+    const effectiveMinimumLevel = minimumLevelOverride === undefined
+      ? this.minLevel
+      : clampInteger(minimumLevelOverride, this.minLevel, this.maxLevel);
     this.projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projectionView);
 
@@ -115,7 +122,7 @@ export class GlobeLodSelector {
         const threshold = this.previousSplits.has(tileKey(candidate.id))
           ? this.targetPixels * this.collapseFactor
           : this.targetPixels;
-        const score = candidate.id.level < this.minLevel
+        const score = candidate.id.level < effectiveMinimumLevel
           ? Number.POSITIVE_INFINITY
           : candidate.screenPixels / threshold;
         if (score > bestScore) {
@@ -131,7 +138,14 @@ export class GlobeLodSelector {
         .children(parent.id)
         .map((id) => this.evaluate(id))
         .filter((candidate): candidate is Candidate => candidate !== null);
-      if (children.length === 0 || leaves.length - 1 + children.length > this.maxTiles) {
+      if (children.length === 0) {
+        // The parent sphere was a conservative false positive. If none of its
+        // four children survives exact horizon/frustum checks, the parent does
+        // not cover visible surface and must not be rendered as a giant patch.
+        leaves.splice(bestIndex, 1);
+        continue;
+      }
+      if (leaves.length - 1 + children.length > this.maxTiles) {
         parent.canSplit = false;
         continue;
       }

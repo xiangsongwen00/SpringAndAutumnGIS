@@ -342,12 +342,13 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
-    const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
     for (let rank = 0; rank < selection.length; rank += 1) {
       const tile = selection[rank];
       if (!tile) continue;
+      const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
       const maximumSourceLevel = Math.min(
-        tile.id.level + levelOffset,
+        this.provider.maximumSourceLevel?.(tile.id.level) ??
+          tile.id.level + levelOffset,
         this.provider.maxLevel
       );
       if (maximumSourceLevel < this.provider.minLevel) continue;
@@ -485,8 +486,12 @@ export class RasterTileLayer {
 
   private findReadyAncestor(id: TileId): TextureRecord | undefined {
     const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
+    const maximumSourceLevel = Math.min(
+      this.provider.maximumSourceLevel?.(id.level) ?? id.level + levelOffset,
+      this.provider.maxLevel
+    );
     for (
-      let level = Math.min(id.level + levelOffset, this.provider.maxLevel);
+      let level = maximumSourceLevel;
       level >= this.provider.minLevel;
       level -= 1
     ) {

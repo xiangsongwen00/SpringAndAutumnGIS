@@ -33,6 +33,11 @@ type DecodedFeature = {
   geometry: ReturnType<VectorTileFeature['loadGeometry']>;
   extent: number;
 };
+type SymbolCandidate = {
+  feature: DecodedFeature;
+  layer: StyleLayer;
+  order: number;
+};
 
 export type VectorStyleTileProviderOptions = {
   styleUrl: string;
@@ -42,6 +47,10 @@ export type VectorStyleTileProviderOptions = {
   maxLevel?: number;
   /** Esri basemap convention currently uses -2 to align its data zoom with globe LOD. */
   levelOffset?: number;
+  /** Prevents coarse horizon tiles from using incompatible small-scale map styles. */
+  minimumLodLevelOffset?: number;
+  /** Re-enables Admin0 country labels when a style explicitly hides them. */
+  showCountryLabels?: boolean;
   tileSize?: number;
   attribution?: string;
 };
@@ -52,22 +61,44 @@ export class VectorStyleTileProvider implements RasterTileProvider {
   readonly minLevel: number;
   readonly maxLevel: number;
   readonly levelOffset: number;
+  readonly minimumLodLevelOffset: number;
   readonly attribution?: string;
 
   private readonly styleUrl: string;
   private readonly sourceId?: string;
   private readonly tileSize: number;
+  private readonly showCountryLabels: boolean;
   private stylePromise: Promise<MapStyle> | null = null;
+  private viewSourceLevel: number;
 
   constructor(options: VectorStyleTileProviderOptions) {
     this.id = options.id ?? 'vector-style';
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
-    this.levelOffset = Math.min(0, Math.round(options.levelOffset ?? -1.7));
+    this.levelOffset = Math.min(0, Math.round(options.levelOffset ?? -2));
+    this.minimumLodLevelOffset = Math.min(0, Math.round(options.minimumLodLevelOffset ?? 0));
     this.attribution = options.attribution ?? 'Esri';
     this.styleUrl = options.styleUrl;
     this.sourceId = options.sourceId;
     this.tileSize = Math.max(256, Math.round(options.tileSize ?? 512));
+    this.showCountryLabels = options.showCountryLabels ?? false;
+    this.viewSourceLevel = this.minLevel;
+  }
+
+  setViewLevel(cameraLevel: number): void {
+    this.viewSourceLevel = THREE.MathUtils.clamp(
+      Math.floor(cameraLevel + this.levelOffset),
+      this.minLevel,
+      this.maxLevel
+    );
+  }
+
+  maximumSourceLevel(renderLevel: number): number {
+    return Math.min(
+      renderLevel + this.levelOffset,
+      this.viewSourceLevel,
+      this.maxLevel
+    );
   }
 
   url(tile: TileId): string {
@@ -125,13 +156,14 @@ export class VectorStyleTileProvider implements RasterTileProvider {
   ): void {
     const decodedLayers = new Map<string, DecodedFeature[]>();
     const occupiedLabels: Array<readonly [number, number, number, number]> = [];
+    const symbolCandidates: SymbolCandidate[] = [];
     const renderScale = this.tileSize / 256;
     context.clearRect(0, 0, this.tileSize, this.tileSize);
     context.lineJoin = 'round';
     context.lineCap = 'round';
 
     for (const layer of style.layers) {
-      if (!isLayerVisible(layer, zoom)) continue;
+      if (!isLayerVisible(layer, zoom, this.showCountryLabels)) continue;
       if (layer.type === 'background') {
         context.globalAlpha = numberValue(resolveStyleValue(layer.paint?.['background-opacity'], zoom), 1);
         context.fillStyle = colorValue(resolveStyleValue(layer.paint?.['background-color'], zoom), '#dcebf3');
@@ -164,21 +196,48 @@ export class VectorStyleTileProvider implements RasterTileProvider {
         } else if (layer.type === 'line') {
           drawLine(context, feature, layer, zoom, this.tileSize, renderScale);
         } else if (layer.type === 'symbol') {
-          drawSymbol(
-            context,
+          symbolCandidates.push({
             feature,
             layer,
-            zoom,
-            this.tileSize,
-            renderScale,
-            occupiedLabels
-          );
+            order: symbolCandidates.length
+          });
         }
       }
+    }
+    symbolCandidates.sort((a, b) =>
+      symbolPriority(b.layer, b.feature, zoom) - symbolPriority(a.layer, a.feature, zoom) ||
+      b.order - a.order
+    );
+    for (const candidate of symbolCandidates) {
+      drawSymbol(
+        context,
+        candidate.feature,
+        candidate.layer,
+        zoom,
+        this.tileSize,
+        renderScale,
+        occupiedLabels
+      );
     }
     context.globalAlpha = 1;
     context.setLineDash([]);
   }
+}
+
+function symbolPriority(layer: StyleLayer, feature: DecodedFeature, zoom: number): number {
+  const sourceLayer = layer['source-layer'] ?? '';
+  let hierarchy = 0;
+  if (sourceLayer === 'Admin0 point') hierarchy = 10_000;
+  else if (sourceLayer === 'Disputed label point') hierarchy = 9_000;
+  else if (sourceLayer.startsWith('Admin1')) hierarchy = 8_000;
+  else if (sourceLayer === 'City small scale') hierarchy = 7_000;
+  else if (sourceLayer.includes('Ocean')) hierarchy = 6_000;
+  else if (sourceLayer.includes('Water')) hierarchy = 5_000;
+  const fontSize = numberValue(
+    resolveStyleValue(layer.layout?.['text-size'], zoom, feature.properties),
+    10
+  );
+  return hierarchy + fontSize * 10;
 }
 
 function drawFill(
@@ -249,17 +308,34 @@ function drawSymbol(
     8,
     numberValue(resolveStyleValue(layer.layout?.['text-size'], zoom, feature.properties), 10) * renderScale
   );
+  const textOffset = resolveStyleValue(layer.layout?.['text-offset'], zoom, feature.properties);
+  if (Array.isArray(textOffset)) {
+    point.x += numberValue(textOffset[0], 0) * fontSize;
+    point.y += numberValue(textOffset[1], 0) * fontSize;
+  }
   context.font = `${fontSize}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  const width = context.measureText(text).width + 5 * renderScale;
-  const height = fontSize * 1.25;
+  const collisionPadding = Math.max(
+    2 * renderScale,
+    numberValue(resolveStyleValue(layer.layout?.['text-padding'], zoom, feature.properties), 2) * renderScale
+  );
+  const width = context.measureText(text).width + collisionPadding * 2;
+  const height = fontSize * 1.25 + collisionPadding * 2;
   const box: readonly [number, number, number, number] = [
     point.x - width * 0.5,
     point.y - height * 0.5,
     point.x + width * 0.5,
     point.y + height * 0.5
   ];
+  // Labels are rasterized per tile, so any box crossing a tile boundary cannot
+  // participate in collision checks on its neighbour. Suppress those labels;
+  // the neighbouring MVT copy owns the placement instead.
+  const edgeGuard = 4 * renderScale;
+  if (
+    box[0] < edgeGuard || box[1] < edgeGuard ||
+    box[2] > tileSize - edgeGuard || box[3] > tileSize - edgeGuard
+  ) return;
   if (occupied.some((other) => rectanglesOverlap(box, other))) return;
   occupied.push(box);
   context.globalAlpha = numberValue(resolveStyleValue(layer.paint?.['text-opacity'], zoom, feature.properties), 1);
@@ -307,8 +383,15 @@ function representativePoint(feature: DecodedFeature, tileSize: number): { x: nu
   return { x: point.x * scale, y: point.y * scale };
 }
 
-function isLayerVisible(layer: StyleLayer, zoom: number): boolean {
-  return layer.layout?.visibility !== 'none' &&
+function isLayerVisible(
+  layer: StyleLayer,
+  zoom: number,
+  showCountryLabels: boolean
+): boolean {
+  const countryLabelOverride = showCountryLabels &&
+    layer.type === 'symbol' &&
+    layer['source-layer'] === 'Admin0 point';
+  return (layer.layout?.visibility !== 'none' || countryLabelOverride) &&
     (layer.minzoom === undefined || zoom >= layer.minzoom) &&
     (layer.maxzoom === undefined || zoom < layer.maxzoom);
 }
