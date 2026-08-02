@@ -18,6 +18,8 @@ LOD 选择器不依赖瓦片纹理、网络请求或缓存；影像层消费同�
 
 `public/En.json` 是 Mapbox Style v8 样式，当前包含一个 Esri MVT 数据源和 913 个样式图层，后续矢量瓦片渲染器可直接以它作为样式解析测试入口。
 
+Esri 矢量底图当前使用 `levelOffset: -2` 与球面 LOD 对齐：球面 LOD 16 请求 Esri 14 级瓦片，并通过子瓦片 UV 自动选取父纹理的对应十六分之一区域。Google 卫星影像保持 `levelOffset: 0`，与球面 LOD 一一对应。
+
 演示使用仓库原先配置的 Google 卫星 URL 模板。生产环境应改用 Google Map Tiles API 的正式 Key + Session 接口，动态展示数据署名，并遵守服务的缓存和使用政策。
 
 ## 运行

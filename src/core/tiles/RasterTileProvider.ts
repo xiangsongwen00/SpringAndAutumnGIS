@@ -1,11 +1,15 @@
 import type { TileId } from '../tiling/GeographicTilingScheme';
+import type * as THREE from 'three';
 
 export interface RasterTileProvider {
   readonly id: string;
   readonly minLevel: number;
   readonly maxLevel: number;
+  /** Data zoom = globe LOD zoom + levelOffset. Only zero or negative offsets are supported. */
+  readonly levelOffset?: number;
   readonly attribution?: string;
   url(tile: TileId): string;
+  loadTexture?(tile: TileId): Promise<THREE.Texture>;
 }
 
 export type UrlTemplateRasterProviderOptions = {
@@ -13,6 +17,7 @@ export type UrlTemplateRasterProviderOptions = {
   urlTemplate: string;
   minLevel?: number;
   maxLevel?: number;
+  levelOffset?: number;
   attribution?: string;
   subdomains?: readonly string[];
 };
@@ -22,6 +27,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
   readonly id: string;
   readonly minLevel: number;
   readonly maxLevel: number;
+  readonly levelOffset: number;
   readonly attribution?: string;
   private readonly urlTemplate: string;
   private readonly subdomains: readonly string[];
@@ -35,6 +41,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
     this.id = options.id ?? 'raster';
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 19));
+    this.levelOffset = Math.min(0, Math.round(options.levelOffset ?? 0));
     this.attribution = options.attribution;
     this.urlTemplate = options.urlTemplate;
     this.subdomains = options.subdomains ?? [];
@@ -51,4 +58,3 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
       .split('{s}').join(subdomain);
   }
 }
-

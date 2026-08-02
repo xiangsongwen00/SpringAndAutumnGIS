@@ -1,6 +1,7 @@
 import {
   GlobeEngine,
   UrlTemplateRasterProvider,
+  VectorStyleTileProvider,
   type GlobeEngineStats
 } from '../index';
 
@@ -10,12 +11,16 @@ const visitedValue = document.querySelector<HTMLElement>('#visited-value');
 const culledValue = document.querySelector<HTMLElement>('#culled-value');
 const levelsValue = document.querySelector<HTMLElement>('#levels-value');
 const imageryValue = document.querySelector<HTMLElement>('#imagery-value');
+const mapToggle = document.querySelector<HTMLButtonElement>('#map-toggle');
+const attribution = document.querySelector<HTMLAnchorElement>('#map-attribution');
 
 const MIN_LOD_LEVEL = 2;
 const MAX_LOD_LEVEL = 27;
 const MAX_GOOGLE_IMAGERY_LEVEL = 20;
+const ESRI_LEVEL_OFFSET = -1.7;
+let vectorMode = false;
 
-if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue) {
+if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !mapToggle || !attribution) {
   throw new Error('演示页面结构不完整。');
 }
 
@@ -32,8 +37,9 @@ const renderStats = (stats: GlobeEngineStats): void => {
     [...stats.levels]
       .map(([level, count]) => `${level}级：${count}`)
       .join('　');
+  const sourceName = vectorMode ? '矢量（数据层级=LOD-2）' : '卫星';
   imageryValue.textContent = stats.imagery
-    ? `纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.fallbacks} 回退`
+    ? `${sourceName}纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
     : '影像未启用';
 };
 
@@ -43,6 +49,16 @@ const imagery = new UrlTemplateRasterProvider({
   subdomains: ['0', '1', '2', '3'],
   maxLevel: MAX_GOOGLE_IMAGERY_LEVEL,
   attribution: 'Google Maps'
+});
+
+const vectorMap = new VectorStyleTileProvider({
+  id: 'esri-vector-style-demo',
+  styleUrl: '/En.json',
+  sourceId: 'esri',
+  maxLevel: 20,
+  levelOffset: ESRI_LEVEL_OFFSET,
+  tileSize: 512,
+  attribution: 'Esri'
 });
 
 const engine = new GlobeEngine({
@@ -83,5 +99,15 @@ const engine = new GlobeEngine({
 });
 
 engine.start();
+
+mapToggle.addEventListener('click', () => {
+  vectorMode = !vectorMode;
+  engine.setImageryProvider(vectorMode ? vectorMap : imagery);
+  mapToggle.textContent = vectorMode ? '切换到卫星影像' : '切换到矢量地图';
+  mapToggle.classList.toggle('is-vector', vectorMode);
+  mapToggle.setAttribute('aria-pressed', String(vectorMode));
+  attribution.textContent = vectorMode ? 'Esri · Vector Basemap' : 'Google Maps · Satellite';
+  attribution.href = vectorMode ? 'https://www.esri.com/' : 'https://maps.google.com/';
+});
 
 window.addEventListener('pagehide', () => engine.dispose(), { once: true });

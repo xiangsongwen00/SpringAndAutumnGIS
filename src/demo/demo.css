@@ -46,6 +46,34 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
 
 .brand p { margin: 8px 0 0; color: #7997a4; font-size: 13px; }
 
+.map-switcher {
+  position: fixed;
+  top: 28px;
+  right: 28px;
+  z-index: 4;
+}
+
+.map-switcher button {
+  padding: 10px 16px;
+  border: 1px solid rgb(100 216 255 / 42%);
+  border-radius: 999px;
+  color: #dff7ff;
+  background: rgb(3 18 27 / 82%);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.map-switcher button:hover {
+  border-color: #64d8ff;
+  transform: translateY(-1px);
+}
+
+.map-switcher button.is-vector { background: rgb(26 80 73 / 88%); }
+
 .stats {
   position: fixed;
   right: 28px;
@@ -114,8 +142,8 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
 
 @media (max-width: 640px) {
   .brand { top: 20px; left: 20px; }
+  .map-switcher { top: 20px; right: 16px; }
   .stats { right: 16px; bottom: 16px; }
   .attribution { right: 18px; bottom: 3px; }
   .hint { left: 20px; bottom: 176px; }
 }
-

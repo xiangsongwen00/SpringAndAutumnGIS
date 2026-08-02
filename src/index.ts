@@ -13,6 +13,8 @@ export type {
   RasterTileProvider,
   UrlTemplateRasterProviderOptions
 } from './core/tiles/RasterTileProvider';
+export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';
+export type { VectorStyleTileProviderOptions } from './core/tiles/VectorStyleTileProvider';
 
 export { GlobeLodSelector } from './core/lod/GlobeLodSelector';
 export type {
@@ -32,4 +34,3 @@ export type {
   GlobeEngineStats,
   GlobeNavigationOptions
 } from './engine/GlobeEngine';
-

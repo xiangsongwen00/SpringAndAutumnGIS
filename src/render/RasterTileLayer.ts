@@ -39,7 +39,7 @@ type RenderTile = {
 /** Visible-leaf raster consumer. Selection remains owned by GlobeLodSelector. */
 export class RasterTileLayer {
   readonly object3d = new THREE.Group();
-  readonly provider: RasterTileProvider;
+  provider: RasterTileProvider;
 
   private readonly ellipsoid: Ellipsoid;
   private readonly geometry: THREE.BufferGeometry;
@@ -108,6 +108,22 @@ export class RasterTileLayer {
     this.textures.clear();
     this.geometry.dispose();
     this.object3d.clear();
+  }
+
+  setProvider(provider: RasterTileProvider): void {
+    if (provider.id === this.provider.id) return;
+    this.provider = provider;
+    for (const record of this.textures.values()) record.texture?.dispose();
+    this.textures.clear();
+    this.visibleTextureKeys.clear();
+    this.fallbackCount = 0;
+    for (const renderTile of this.renderTiles.values()) {
+      renderTile.textureKey = '';
+      const uniforms = renderTile.mesh.material.uniforms;
+      if (!uniforms) continue;
+      uniforms.tileTexture!.value = null;
+      uniforms.hasTexture!.value = false;
+    }
   }
 
   private syncRenderTiles(selection: readonly SelectedTile[]): void {
@@ -326,13 +342,18 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
+    const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
     for (let rank = 0; rank < selection.length; rank += 1) {
       const tile = selection[rank];
       if (!tile) continue;
-      if (tile.id.level < this.provider.minLevel) continue;
+      const maximumSourceLevel = Math.min(
+        tile.id.level + levelOffset,
+        this.provider.maxLevel
+      );
+      if (maximumSourceLevel < this.provider.minLevel) continue;
       for (
         let level = this.provider.minLevel;
-        level <= Math.min(tile.id.level, this.provider.maxLevel);
+        level <= maximumSourceLevel;
         level += 1
       ) {
         const shift = tile.id.level - level;
@@ -384,32 +405,59 @@ export class RasterTileLayer {
   private load(record: TextureRecord): void {
     record.state = 'loading';
     this.activeRequests += 1;
+    const provider = this.provider;
+    if (provider.loadTexture) {
+      void provider.loadTexture(record.id).then(
+        (texture) => this.completeTextureLoad(record, provider, texture),
+        () => this.failTextureLoad(record, provider)
+      );
+      return;
+    }
     this.loader.load(
-      this.provider.url(record.id),
-      (texture) => {
-        this.activeRequests = Math.max(0, this.activeRequests - 1);
-        if (this.disposed || !this.textures.has(record.key)) {
-          texture.dispose();
-          return;
-        }
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.anisotropy = this.maxAnisotropy;
-        record.texture = texture;
-        record.state = 'ready';
-        record.lastUsedFrame = this.frame;
-        this.pumpQueue();
-      },
+      provider.url(record.id),
+      (texture) => this.completeTextureLoad(record, provider, texture),
       undefined,
-      () => {
-        this.activeRequests = Math.max(0, this.activeRequests - 1);
-        if (!this.disposed && this.textures.has(record.key)) record.state = 'error';
-        this.pumpQueue();
-      }
+      () => this.failTextureLoad(record, provider)
     );
+  }
+
+  private completeTextureLoad(
+    record: TextureRecord,
+    provider: RasterTileProvider,
+    texture: THREE.Texture
+  ): void {
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    if (
+      this.disposed ||
+      this.provider !== provider ||
+      this.textures.get(record.key) !== record
+    ) {
+      texture.dispose();
+      this.pumpQueue();
+      return;
+    }
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.anisotropy = this.maxAnisotropy;
+    record.texture = texture;
+    record.state = 'ready';
+    record.lastUsedFrame = this.frame;
+    this.pumpQueue();
+  }
+
+  private failTextureLoad(record: TextureRecord, provider: RasterTileProvider): void {
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    if (
+      !this.disposed &&
+      this.provider === provider &&
+      this.textures.get(record.key) === record
+    ) {
+      record.state = 'error';
+    }
+    this.pumpQueue();
   }
 
   private syncMaterials(selection: readonly SelectedTile[]): void {
@@ -436,7 +484,12 @@ export class RasterTileLayer {
   }
 
   private findReadyAncestor(id: TileId): TextureRecord | undefined {
-    for (let level = Math.min(id.level, this.provider.maxLevel); level >= this.provider.minLevel; level -= 1) {
+    const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
+    for (
+      let level = Math.min(id.level + levelOffset, this.provider.maxLevel);
+      level >= this.provider.minLevel;
+      level -= 1
+    ) {
       const shift = id.level - level;
       const record = this.textures.get(tileKey({
         level,

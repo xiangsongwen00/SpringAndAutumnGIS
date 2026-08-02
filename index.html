@@ -8,12 +8,15 @@
     <link rel="stylesheet" href="/src/demo/demo.css" />
   </head>
   <body>
-    <main id="globe" aria-label="3D 经纬网地球"></main>
+    <main id="globe" aria-label="三维地球"></main>
     <header class="brand">
       <div class="brand__eyebrow">SPRING &amp; AUTUMN GIS / CORE 01</div>
       <h1>3D 经纬网 LOD</h1>
       <p>WGS84 椭球 · Web Mercator 四叉树 · 屏幕空间误差</p>
     </header>
+    <nav class="map-switcher" aria-label="地图底图切换">
+      <button id="map-toggle" type="button" aria-pressed="false">切换到矢量地图</button>
+    </nav>
     <aside class="stats" aria-live="polite">
       <div class="stats__label">实时四叉树状态</div>
       <div class="stats__grid">
@@ -25,7 +28,7 @@
       <div id="imagery-value">纹理等待中</div>
     </aside>
     <div class="hint">拖动旋转 · 滚轮缩放</div>
-    <a class="attribution" href="https://maps.google.com/" target="_blank" rel="noreferrer">Google Maps · Satellite</a>
+    <a id="map-attribution" class="attribution" href="https://maps.google.com/" target="_blank" rel="noreferrer">Google Maps · Satellite</a>
     <script type="module" src="/src/demo/main.ts"></script>
   </body>
 </html>

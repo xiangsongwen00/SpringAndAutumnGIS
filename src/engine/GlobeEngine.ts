@@ -194,6 +194,11 @@ export class GlobeEngine {
     this.renderer.domElement.remove();
   }
 
+  setImageryProvider(provider: RasterTileProvider): void {
+    this.imagery?.setProvider(provider);
+    this.lastStatsSignature = '';
+  }
+
   /** Continuous camera level using the same screen-error scale as the LOD selector. */
   getCameraLevel(): number {
     const altitude = this.cameraAltitude();
