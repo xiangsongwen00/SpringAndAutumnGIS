@@ -256,12 +256,13 @@ function normalizeDyadicHeightGrid(
   sourceWidth: number,
   sourceHeight: number
 ): { width: number; height: number; heights: Float32Array } {
-  const width = sourceWidth > 1 && THREE.MathUtils.isPowerOfTwo(sourceWidth)
-    ? sourceWidth + 1
-    : sourceWidth;
-  const height = sourceHeight > 1 && THREE.MathUtils.isPowerOfTwo(sourceHeight)
-    ? sourceHeight + 1
-    : sourceHeight;
+  // The rendered regular grid needs 256 dyadic cells, not one vertex per
+  // source image pixel. Keeping a 512px Terrain-RGB source as 513x513 makes a
+  // tile four times heavier while providing detail the current mesh cannot
+  // consume. A fixed 257x257 endpoint grid also guarantees parent/child
+  // coincidence and makes resource budgeting independent of provider size.
+  const width = sourceWidth > 1 ? 257 : 1;
+  const height = sourceHeight > 1 ? 257 : 1;
   if (width === sourceWidth && height === sourceHeight) {
     return { width, height, heights: source };
   }

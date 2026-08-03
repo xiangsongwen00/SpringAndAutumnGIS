@@ -35,6 +35,7 @@ export type TerrainTileLayerStats = Readonly<{
   fallbacks: number;
   resourceBytes: number;
   stitchedEdges: number;
+  coverageReady: boolean;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -102,6 +103,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private lastSelection: readonly SelectedTile[] | null = null;
   private materialsDirty = true;
   private stitchedEdges = 0;
+  private coverageReady = false;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -136,7 +138,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       ...counts,
       fallbacks: this.fallbackCount,
       resourceBytes: this.residentResourceBytes(),
-      stitchedEdges: this.stitchedEdges
+      stitchedEdges: this.stitchedEdges,
+      coverageReady: this.coverageReady
     };
   }
 
@@ -154,6 +157,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (this.showDebugSurface) this.syncRenderTiles(selection);
       this.queueVisibleTiles(selection);
     }
+    if (selectionChanged || this.materialsDirty) this.refreshCoverage(selection);
     this.pumpQueue();
     if (this.showDebugSurface && (selectionChanged || this.materialsDirty)) {
       this.syncMaterials(selection);
@@ -166,7 +170,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   resolveTexture(id: TileId): TerrainTextureBinding | undefined {
-    if (!this.enabled) return undefined;
+    if (!this.enabled || !this.coverageReady) return undefined;
     const record = this.findReadyAncestor(id);
     if (!record?.data) return undefined;
     const levels = id.level - record.id.level;
@@ -252,6 +256,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     this.object3d.visible = enabled;
     this.lastSelection = null;
     this.materialsDirty = true;
+    this.coverageReady = !enabled;
     this._revision += 1;
   }
 
@@ -319,15 +324,18 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (!selected) continue;
       const maximumLevel = Math.min(selected.id.level, this.provider.maxLevel);
       if (maximumLevel < this.provider.minLevel) continue;
-      const desired = ancestorAtLevel(selected.id, maximumLevel);
-      this.visibleKeys.add(tileKey(desired));
-      this.queueTile(desired, rank);
-      const parent = ancestorAtLevel(
-        selected.id,
-        Math.max(this.provider.minLevel, maximumLevel - 1)
-      );
-      this.visibleKeys.add(tileKey(parent));
-      this.queueTile(parent, prioritized.length + rank);
+      const coarseLevel = Math.max(this.provider.minLevel, maximumLevel - 2);
+      // Establish a complete low-detail surface before requesting the target
+      // DEM. Absolute level is the primary priority so a wide viewport cannot
+      // start isolated high mountains while neighbouring parents are missing.
+      for (let level = coarseLevel; level <= maximumLevel; level += 1) {
+        const requested = ancestorAtLevel(selected.id, level);
+        this.visibleKeys.add(tileKey(requested));
+        this.queueTile(
+          requested,
+          (level - this.provider.minLevel) * prioritized.length + rank
+        );
+      }
       const ready = this.findReadyAncestor(selected.id);
       if (ready) {
         this.visibleKeys.add(ready.key);
@@ -337,6 +345,14 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (this.visibleKeys.has(key) || record.state === 'ready' || record.state === 'loading') continue;
       this.records.delete(key);
     }
+  }
+
+  private refreshCoverage(selection: readonly SelectedTile[]): void {
+    this.coverageReady = selection.length === 0 || selection.every((selected) => {
+      const maximumLevel = Math.min(selected.id.level, this.provider.maxLevel);
+      if (maximumLevel < this.provider.minLevel) return true;
+      return this.findReadyAncestor(selected.id) !== undefined;
+    });
   }
 
   private queueTile(id: TileId, priority: number): void {
