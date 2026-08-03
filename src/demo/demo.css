@@ -46,6 +46,35 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
 
 .brand p { margin: 8px 0 0; color: #7997a4; font-size: 13px; }
 
+.fps-meter {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px solid rgb(100 216 255 / 22%);
+  border-radius: 8px;
+  color: #87a5b1;
+  background: rgb(3 18 27 / 68%);
+  backdrop-filter: blur(8px);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fps-meter strong {
+  min-width: 48px;
+  color: #64d8ff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.fps-meter small {
+  min-width: 48px;
+  color: #7997a4;
+  font-size: 10px;
+}
+
 .map-switcher {
   position: fixed;
   top: 28px;

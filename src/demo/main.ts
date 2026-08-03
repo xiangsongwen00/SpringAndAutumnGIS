@@ -20,6 +20,8 @@ const attribution = document.querySelector<HTMLAnchorElement>('#map-attribution'
 const satelliteLevelDebug = document.querySelector<HTMLElement>('#satellite-level-debug');
 const satelliteLevelOffsetInput = document.querySelector<HTMLInputElement>('#satellite-level-offset');
 const satelliteLevelOffsetValue = document.querySelector<HTMLOutputElement>('#satellite-level-offset-value');
+const fpsValue = document.querySelector<HTMLElement>('#fps-value');
+const frameTimeValue = document.querySelector<HTMLElement>('#frame-time-value');
 
 const MIN_LOD_LEVEL = 2;
 const MAX_LOD_LEVEL = 27;
@@ -44,6 +46,31 @@ let terrainTestIndex = 0;
 if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !terrainTest || !attribution || !satelliteLevelDebug || !satelliteLevelOffsetInput || !satelliteLevelOffsetValue) {
   throw new Error('演示页面结构不完整。');
 }
+
+if (!fpsValue || !frameTimeValue) {
+  throw new Error('实时帧率显示结构不完整。');
+}
+
+let fpsAnimationFrame = 0;
+let fpsWindowStart = performance.now();
+let fpsFrameCount = 0;
+let smoothedFps = 0;
+
+const updateFps = (now: number): void => {
+  fpsFrameCount += 1;
+  const elapsed = now - fpsWindowStart;
+  if (elapsed >= 500) {
+    const measuredFps = (fpsFrameCount * 1000) / elapsed;
+    smoothedFps = smoothedFps === 0 ? measuredFps : smoothedFps * 0.35 + measuredFps * 0.65;
+    fpsValue.textContent = `${Math.round(smoothedFps)} FPS`;
+    frameTimeValue.textContent = `${(1000 / Math.max(smoothedFps, 0.1)).toFixed(1)} ms`;
+    fpsFrameCount = 0;
+    fpsWindowStart = now;
+  }
+  fpsAnimationFrame = requestAnimationFrame(updateFps);
+};
+
+fpsAnimationFrame = requestAnimationFrame(updateFps);
 
 const renderStats = (stats: GlobeEngineStats): void => {
   selectedValue.textContent = String(stats.selected);
@@ -194,7 +221,10 @@ mapToggle.addEventListener('click', () => {
   satelliteLevelDebug.hidden = vectorMode;
 });
 
-window.addEventListener('pagehide', () => engine.dispose(), { once: true });
+window.addEventListener('pagehide', () => {
+  cancelAnimationFrame(fpsAnimationFrame);
+  engine.dispose();
+}, { once: true });
 
 if (!terrain) {
   terrainEnabled = false;
