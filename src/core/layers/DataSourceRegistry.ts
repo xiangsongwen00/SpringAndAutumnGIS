@@ -12,6 +12,7 @@ export type DataSourceKind =
   | 'mvt';
 
 export type DataSourceStatus = 'stable' | 'experimental' | 'planned';
+export type DataCoordinateReference = 'wgs84-webmercator' | 'gcj02-webmercator-in-china';
 
 export type DataSourceDefinition = Readonly<{
   id: string;
@@ -32,6 +33,7 @@ export type DataSourceDefinition = Readonly<{
   requires?: readonly string[];
   status?: DataSourceStatus;
   note?: string;
+  coordinateReference?: DataCoordinateReference;
 }>;
 
 export type DataSourceRegistryOptions = Readonly<{

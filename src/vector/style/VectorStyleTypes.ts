@@ -17,6 +17,8 @@ export type StyleLayer = {
 export type VectorSource = {
   type: string;
   tiles?: string[];
+  /** TileJSON URL used by Mapbox Style v8 sources such as MapTiler. */
+  url?: string;
   minzoom?: number;
   maxzoom?: number;
 };

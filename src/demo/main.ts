@@ -141,7 +141,8 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `显示${formatLevelRange(stats.imagery.displayedMinimumLevel, stats.imagery.displayedMaximumLevel)}级 · ` +
       `纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.queued} 排队 · ` +
       `${(stats.imagery.textureBytes / 1024 / 1024).toFixed(0)} MiB · ` +
-      `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败`
+      `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败` +
+      (stats.imagery.lastError ? ` · ${stats.imagery.lastError}` : '')
     : '影像未启用';
   terrainValue.textContent = stats.terrain
     ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.stitchedEdges} 接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
@@ -331,6 +332,8 @@ function populateBaseLayerOptions(candidates: readonly LayerState[]): void {
       ? '（等待原生矢量渲染）'
       : availability.missingVariables.length > 0
         ? `（缺少 ${availability.missingVariables.join('、')}）`
+        : source.coordinateReference === 'gcj02-webmercator-in-china'
+          ? '（中国区 GCJ-02 偏移）'
         : source.status === 'experimental'
           ? '（试验）'
           : '';

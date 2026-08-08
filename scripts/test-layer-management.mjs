@@ -4,6 +4,7 @@ import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
   LayerCollection,
+  MvtTileSource,
   UrlTemplateRasterProvider
 } from '../dist/spring-and-autumn-gis.es.js';
 
@@ -60,6 +61,33 @@ const registry = new DataSourceRegistry([
 ]);
 assert.deepEqual(registry.availability('secured').missingVariables, ['TOKEN']);
 assert.throws(() => registry.createRasterProvider('secured'), /missing variables/);
+
+const originalFetch = globalThis.fetch;
+const requestedUrls = [];
+globalThis.fetch = async (input) => {
+  const url = String(input);
+  requestedUrls.push(url);
+  if (url.endsWith('/tiles.json')) {
+    return new Response(JSON.stringify({
+      tiles: ['https://tiles.example/{z}/{x}/{y}.pbf']
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+  return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+};
+try {
+  const mvtSource = new MvtTileSource({
+    id: 'tilejson-source',
+    source: { type: 'vector', url: 'https://tiles.example/tiles.json' }
+  });
+  const bytes = await mvtSource.load({ level: 4, x: 9, y: 6 });
+  assert.equal(bytes.byteLength, 3);
+  assert.deepEqual(requestedUrls, [
+    'https://tiles.example/tiles.json',
+    'https://tiles.example/4/9/6.pbf'
+  ]);
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 const catalog = JSON.parse(
   await readFile(new URL('../env.config.json', import.meta.url), 'utf8')

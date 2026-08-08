@@ -38,7 +38,8 @@
           "attribution": { "type": "string" },
           "termsUrl": { "type": "string" },
           "status": { "enum": ["stable", "experimental", "planned"] },
-          "note": { "type": "string" }
+          "note": { "type": "string" },
+          "coordinateReference": { "enum": ["wgs84-webmercator", "gcj02-webmercator-in-china"] }
         },
         "additionalProperties": false
       }

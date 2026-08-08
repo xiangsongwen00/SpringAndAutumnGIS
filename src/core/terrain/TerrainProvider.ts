@@ -58,6 +58,8 @@ export class TerrainRgbProvider implements TerrainProvider {
   private readonly noDataHeight: number;
   private metadataPromise: Promise<Required<Pick<TileJson, 'tiles' | 'scheme'>> & TileJson> | null = null;
   private resolvedMaxLevel: number;
+  private readonly disabledTemplates = new Set<string>();
+  private readonly warnedTemplates = new Set<string>();
 
   constructor(options: TerrainRgbProviderOptions) {
     if ((!options.urlTemplates || options.urlTemplates.length === 0) && !options.tileJsonUrl) {
@@ -90,13 +92,27 @@ export class TerrainRgbProvider implements TerrainProvider {
           y: Math.floor(tile.y / 2 ** (tile.level - level))
         };
     let sawNoData = false;
+    let sawForbidden = false;
     let lastError: unknown;
     for (const template of metadata.tiles) {
+      if (this.disabledTemplates.has(template)) {
+        sawForbidden = true;
+        continue;
+      }
       const url = resolveTerrainUrl(template, sourceTile, metadata.scheme);
       try {
         const response = await fetch(url);
         if (response.status === 404 || response.status === 204) {
           sawNoData = true;
+          continue;
+        }
+        if (response.status === 401 || response.status === 403) {
+          sawForbidden = true;
+          this.disabledTemplates.add(template);
+          if (!this.warnedTemplates.has(template)) {
+            this.warnedTemplates.add(template);
+            console.warn(`[地形数据源 ${this.id}] 服务返回 ${response.status}，本次会话已停用该地址并尝试后备源。`);
+          }
           continue;
         }
         if (!response.ok) throw new Error(`地形请求失败：${response.status} ${url}`);
@@ -106,6 +122,7 @@ export class TerrainRgbProvider implements TerrainProvider {
       }
     }
     if (sawNoData && !lastError) return createFlatTerrainTile(sourceTile, this.noDataHeight);
+    if (sawForbidden && !lastError) return createFlatTerrainTile(sourceTile, this.noDataHeight);
     throw lastError ?? new Error(`地形瓦片 ${sourceTile.level}/${sourceTile.x}/${sourceTile.y} 没有可用数据。`);
   }
 

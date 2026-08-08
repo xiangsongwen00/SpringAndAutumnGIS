@@ -33,6 +33,7 @@ export type RasterTileLayerStats = Readonly<{
   desiredMaximumLevel: number | null;
   displayedMinimumLevel: number | null;
   displayedMaximumLevel: number | null;
+  lastError: string | null;
 }>;
 
 type TextureState = 'queued' | 'loading' | 'ready' | 'error';
@@ -90,6 +91,8 @@ export class RasterTileLayer {
   private desiredMaximumLevel: number | null = null;
   private displayedMinimumLevel: number | null = null;
   private displayedMaximumLevel: number | null = null;
+  private lastError: string | null = null;
+  private warnedProviderId: string | null = null;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -184,7 +187,8 @@ export class RasterTileLayer {
       desiredMinimumLevel: this.desiredMinimumLevel,
       desiredMaximumLevel: this.desiredMaximumLevel,
       displayedMinimumLevel: this.displayedMinimumLevel,
-      displayedMaximumLevel: this.displayedMaximumLevel
+      displayedMaximumLevel: this.displayedMaximumLevel,
+      lastError: this.lastError
     };
   }
 
@@ -207,6 +211,8 @@ export class RasterTileLayer {
     this.textures.clear();
     this.visibleTextureKeys.clear();
     this.fallbackCount = 0;
+    this.lastError = null;
+    this.warnedProviderId = null;
     this.lastSelection = null;
     this.observedProviderRevision = -1;
     this.materialsDirty = true;
@@ -647,7 +653,7 @@ export class RasterTileLayer {
     if (provider.loadTexture) {
       void provider.loadTexture(record.id).then(
         (texture) => this.completeTextureLoad(record, provider, texture),
-        () => this.failTextureLoad(record, provider)
+        (error: unknown) => this.failTextureLoad(record, provider, error)
       );
       return;
     }
@@ -655,7 +661,7 @@ export class RasterTileLayer {
       provider.url(record.id),
       (texture) => this.completeTextureLoad(record, provider, texture),
       undefined,
-      () => this.failTextureLoad(record, provider)
+      (error) => this.failTextureLoad(record, provider, error)
     );
   }
 
@@ -690,7 +696,11 @@ export class RasterTileLayer {
     this.pumpQueue();
   }
 
-  private failTextureLoad(record: TextureRecord, provider: RasterTileProvider): void {
+  private failTextureLoad(
+    record: TextureRecord,
+    provider: RasterTileProvider,
+    error?: unknown
+  ): void {
     this.activeRequests = Math.max(0, this.activeRequests - 1);
     if (
       !this.disposed &&
@@ -700,6 +710,11 @@ export class RasterTileLayer {
       record.state = 'error';
       record.attempts += 1;
       record.retryAt = performance.now() + Math.min(30_000, 1_000 * 2 ** (record.attempts - 1));
+      this.lastError = sanitizeError(error);
+      if (this.warnedProviderId !== provider.id) {
+        this.warnedProviderId = provider.id;
+        console.warn(`[影像图层 ${provider.id}] ${this.lastError}`);
+      }
     }
     this.pumpQueue();
   }
@@ -832,6 +847,11 @@ export class RasterTileLayer {
   private releaseTexture(texture: THREE.Texture | null): void {
     if (texture && !this.suspended) texture.dispose();
   }
+}
+
+function sanitizeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? '纹理请求失败');
+  return message.replace(/([?&](?:key|token|access_token)=)[^&\s]+/gi, '$1***');
 }
 
 function ancestorAtLevel(id: TileId, level: number): TileId {

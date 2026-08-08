@@ -28,6 +28,7 @@ export type {
 } from './core/layers/LayerTypes';
 export { DataSourceRegistry } from './core/layers/DataSourceRegistry';
 export type {
+  DataCoordinateReference,
   DataSourceAvailability,
   DataSourceDefinition,
   DataSourceKind,
