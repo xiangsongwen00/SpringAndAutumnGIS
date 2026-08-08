@@ -1,6 +1,9 @@
 import type { TileId } from '../tiling/GeographicTilingScheme';
 import type * as THREE from 'three';
 
+/** Default continuous mapping: source zoom = floor(camera zoom + offset). */
+export const DEFAULT_LEVEL_OFFSET = -1.7;
+
 export interface RasterTileProvider {
   readonly id: string;
   readonly minLevel: number;
@@ -13,6 +16,8 @@ export interface RasterTileProvider {
   setViewLevel?(cameraLevel: number): void;
   /** Changes the continuous camera-to-source zoom offset for diagnostics. */
   setViewLevelOffset?(offset: number | null): void;
+  /** Current continuous camera-to-source zoom offset. */
+  readonly viewLevelOffset?: number | null;
   /** Current integer data zoom selected from the continuous camera level. */
   readonly currentSourceLevel?: number;
   /** Increments when source-level mapping changes without replacing the provider. */
@@ -33,7 +38,7 @@ export type UrlTemplateRasterProviderOptions = {
   maxLevel?: number;
   levelOffset?: number;
   /** Optional data zoom = floor(camera zoom + offset), e.g. -1.7. */
-  viewLevelOffset?: number;
+  viewLevelOffset?: number | null;
   attribution?: string;
   subdomains?: readonly string[];
   tileSize?: number;
@@ -49,7 +54,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
   readonly attribution?: string;
   private readonly urlTemplate: string;
   private readonly subdomains: readonly string[];
-  private viewLevelOffset: number | null;
+  private _viewLevelOffset: number | null;
   private viewSourceLevel: number;
   private _revision = 0;
 
@@ -68,7 +73,9 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
     this.attribution = options.attribution;
     this.urlTemplate = options.urlTemplate;
     this.subdomains = options.subdomains ?? [];
-    this.viewLevelOffset = normalizeViewLevelOffset(options.viewLevelOffset);
+    this._viewLevelOffset = normalizeViewLevelOffset(
+      options.viewLevelOffset === undefined ? DEFAULT_LEVEL_OFFSET : options.viewLevelOffset
+    );
     this.viewSourceLevel = this.maxLevel;
   }
 
@@ -80,10 +87,14 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
     return this.viewSourceLevel;
   }
 
+  get viewLevelOffset(): number | null {
+    return this._viewLevelOffset;
+  }
+
   setViewLevel(cameraLevel: number): void {
-    const next = this.viewLevelOffset === null
+    const next = this._viewLevelOffset === null
       ? this.maxLevel
-      : clampLevel(Math.floor(cameraLevel + this.viewLevelOffset), this.minLevel, this.maxLevel);
+      : clampLevel(floorZoom(cameraLevel + this._viewLevelOffset), this.minLevel, this.maxLevel);
     if (next === this.viewSourceLevel) return;
     this.viewSourceLevel = next;
     this._revision += 1;
@@ -91,8 +102,8 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
 
   setViewLevelOffset(offset: number | null): void {
     const next = normalizeViewLevelOffset(offset);
-    if (next === this.viewLevelOffset) return;
-    this.viewLevelOffset = next;
+    if (next === this._viewLevelOffset) return;
+    this._viewLevelOffset = next;
     // The next setViewLevel call resolves the new integer zoom and invalidates
     // the raster queue only if that effective zoom actually changed.
     this.viewSourceLevel = Number.NaN;
@@ -121,4 +132,8 @@ function normalizeViewLevelOffset(value: number | null | undefined): number | nu
 
 function clampLevel(level: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, level));
+}
+
+function floorZoom(value: number): number {
+  return Math.floor(value + 1e-9);
 }

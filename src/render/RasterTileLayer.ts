@@ -15,6 +15,11 @@ export type RasterTileLayerOptions = {
   surfaceOffset?: number;
   maxAnisotropy?: number;
   terrain?: TerrainHeightSource;
+  visible?: boolean;
+  opacity?: number;
+  order?: number;
+  /** Transparent surface overlay such as a label tile layer. */
+  overlay?: boolean;
 };
 
 export type RasterTileLayerStats = Readonly<{
@@ -67,6 +72,8 @@ export class RasterTileLayer {
   private readonly surfaceOffset: number;
   private readonly maxAnisotropy: number;
   private readonly terrain?: TerrainHeightSource;
+  private readonly overlay: boolean;
+  private layerOpacity: number;
   private readonly cameraHigh = new THREE.Vector3();
   private readonly cameraLow = new THREE.Vector3();
   private readonly tileOrigin = new THREE.Vector3();
@@ -101,8 +108,39 @@ export class RasterTileLayer {
     this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
     this.terrain = options.terrain;
+    this.overlay = options.overlay ?? false;
+    this.layerOpacity = THREE.MathUtils.clamp(options.opacity ?? 1, 0, 1);
     this.loader.setCrossOrigin('anonymous');
-    this.object3d.renderOrder = 1;
+    this.object3d.visible = options.visible ?? true;
+    this.object3d.renderOrder = options.order ?? 1;
+  }
+
+  get visible(): boolean {
+    return this.object3d.visible;
+  }
+
+  get opacity(): number {
+    return this.layerOpacity;
+  }
+
+  setVisible(visible: boolean): void {
+    this.object3d.visible = visible;
+  }
+
+  setOpacity(opacity: number): void {
+    const next = THREE.MathUtils.clamp(opacity, 0, 1);
+    if (next === this.layerOpacity) return;
+    this.layerOpacity = next;
+    for (const renderTile of this.renderTiles.values()) {
+      renderTile.mesh.material.uniforms.layerOpacity!.value = next;
+      renderTile.mesh.material.transparent = this.overlay || next < 1;
+      renderTile.mesh.material.needsUpdate = true;
+    }
+  }
+
+  setOrder(order: number): void {
+    this.object3d.renderOrder = order;
+    for (const renderTile of this.renderTiles.values()) renderTile.mesh.renderOrder = order;
   }
 
   update(
@@ -211,7 +249,7 @@ export class RasterTileLayer {
       const material = this.createMaterial(tile.id);
       const mesh = new THREE.Mesh(this.geometryForLevel(tile.id.level), material);
       mesh.frustumCulled = false;
-      mesh.renderOrder = 1;
+      mesh.renderOrder = this.object3d.renderOrder;
       mesh.onBeforeRender = (_renderer, _scene, camera) => {
         splitVector3(camera.position, this.cameraHigh, this.cameraLow);
       };
@@ -319,6 +357,8 @@ export class RasterTileLayer {
         uvScale: { value: new THREE.Vector2(1, 1) },
         uvOffset: { value: new THREE.Vector2(0, 0) },
         hasTexture: { value: false },
+        layerOpacity: { value: this.layerOpacity },
+        isOverlay: { value: this.overlay },
         terrainTexture: { value: null },
         terrainParentTexture: { value: null },
         terrainUvScale: { value: new THREE.Vector2(1, 1) },
@@ -452,6 +492,8 @@ export class RasterTileLayer {
         uniform sampler2D tileTexture;
         uniform sampler2D terrainTexture;
         uniform bool hasTexture;
+        uniform float layerOpacity;
+        uniform bool isOverlay;
         uniform bool hasTerrain;
         uniform float terrainExaggeration;
         uniform vec2 terrainTexelSize;
@@ -459,12 +501,16 @@ export class RasterTileLayer {
         uniform vec3 placeholder;
         #include <logdepthbuf_pars_fragment>
         void main() {
-          vec3 color = hasTexture ? texture2D(tileTexture, v_uv).rgb : placeholder;
+          vec4 texel = hasTexture
+            ? texture2D(tileTexture, v_uv)
+            : vec4(placeholder, isOverlay ? 0.0 : 1.0);
+          if (texel.a * layerOpacity < 0.002) discard;
+          vec3 color = texel.rgb;
           float daylight = 0.86 + 0.14 * max(
             dot(normalize(v_globeNormal), normalize(vec3(-0.35, 0.55, 1.0))),
             0.0
           );
-          if (hasTerrain) {
+          if (hasTerrain && !isOverlay) {
             float westHeight = texture2D(terrainTexture, v_terrainUv - vec2(terrainTexelSize.x, 0.0)).r;
             float eastHeight = texture2D(terrainTexture, v_terrainUv + vec2(terrainTexelSize.x, 0.0)).r;
             float northHeight = texture2D(terrainTexture, v_terrainUv - vec2(0.0, terrainTexelSize.y)).r;
@@ -480,13 +526,16 @@ export class RasterTileLayer {
             );
             daylight *= relief;
           }
-          color = min(color * 1.24 * daylight + vec3(0.025, 0.04, 0.055), vec3(1.0));
-          gl_FragColor = vec4(color, 1.0);
+          if (!isOverlay) {
+            color = min(color * 1.24 * daylight + vec3(0.025, 0.04, 0.055), vec3(1.0));
+          }
+          gl_FragColor = vec4(color, texel.a * layerOpacity);
           #include <logdepthbuf_fragment>
           #include <colorspace_fragment>
         }
       `,
-      depthWrite: true,
+      transparent: this.overlay || this.layerOpacity < 1,
+      depthWrite: !this.overlay,
       depthTest: true,
       toneMapped: false
     });

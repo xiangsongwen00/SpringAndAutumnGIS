@@ -82,7 +82,40 @@ body { background: radial-gradient(circle at 50% 42%, #17445b 0, #07131d 58%); }
   z-index: 4;
   display: flex;
   gap: 8px;
+  align-items: center;
 }
+
+.source-picker,
+.annotation-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid rgb(100 216 255 / 32%);
+  border-radius: 999px;
+  color: #9ab3bd;
+  background: rgb(3 18 27 / 86%);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(12px);
+  font-size: 11px;
+}
+
+.source-picker select {
+  max-width: 210px;
+  border: 0;
+  outline: 0;
+  color: #dff7ff;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.source-picker option { color: #dff7ff; background: #07131d; }
+.source-picker option:disabled { color: #607984; }
+.annotation-control { cursor: pointer; }
+.annotation-control input { accent-color: #64d8ff; }
+.annotation-control[hidden] { display: none; }
 
 .map-switcher button {
   padding: 10px 16px;

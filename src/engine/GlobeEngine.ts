@@ -108,17 +108,19 @@ export class GlobeEngine {
   private readonly lodCameraPosition = new THREE.Vector3();
   private readonly lodCameraQuaternion = new THREE.Quaternion();
   private contextLost = false;
+  private readonly imageryLayers = new Map<string, RasterTileLayer>();
+  private readonly imageryLayerOptions: RasterTileLayerOptions;
 
   private readonly onContextLost = (event: Event): void => {
     event.preventDefault();
     this.contextLost = true;
-    this.imagery?.handleContextLost();
+    for (const layer of this.imageryLayers.values()) layer.handleContextLost();
     this.terrain?.handleContextLost();
   };
 
   private readonly onContextRestored = (): void => {
     this.contextLost = false;
-    this.imagery?.handleContextRestored();
+    for (const layer of this.imageryLayers.values()) layer.handleContextRestored();
     this.terrain?.handleContextRestored();
     this.grid.handleContextRestored();
     this.lodSelection = null;
@@ -172,6 +174,12 @@ export class GlobeEngine {
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost, false);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored, false);
     this.container.appendChild(this.renderer.domElement);
+    this.imageryLayerOptions = {
+      ...options.raster,
+      terrain: this.terrain ?? undefined,
+      maxAnisotropy:
+        options.raster?.maxAnisotropy ?? this.renderer.capabilities.getMaxAnisotropy()
+    };
 
     // This is an occlusion/fallback body, not the rendered map surface. Keep it
     // slightly below the ellipsoid so its coarse triangles can never protrude
@@ -198,12 +206,8 @@ export class GlobeEngine {
     atmosphere.renderOrder = 3;
     this.imagery = options.imagery === false || options.imagery === undefined
       ? null
-      : new RasterTileLayer(this.ellipsoid, options.imagery, {
-          ...options.raster,
-          terrain: this.terrain ?? undefined,
-          maxAnisotropy:
-            options.raster?.maxAnisotropy ?? this.renderer.capabilities.getMaxAnisotropy()
-        });
+      : new RasterTileLayer(this.ellipsoid, options.imagery, this.imageryLayerOptions);
+    if (this.imagery) this.imageryLayers.set('base', this.imagery);
     this.scene.add(globe, atmosphere);
     if (this.terrain) this.scene.add(this.terrain.object3d);
     if (this.imagery) this.scene.add(this.imagery.object3d);
@@ -254,7 +258,9 @@ export class GlobeEngine {
       this.updateNavigationSensitivity();
       const cameraChanged = this.controls.update();
       const cameraLevel = this.getCameraLevel();
-      this.imagery?.provider.setViewLevel?.(cameraLevel);
+      for (const layer of this.imageryLayers.values()) {
+        if (layer.visible) layer.provider.setViewLevel?.(cameraLevel);
+      }
       const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
       // Satellite imagery does not use a forced minimum. Avoid a complete
       // geodetic view-state calculation on every animation frame in that mode.
@@ -325,7 +331,12 @@ export class GlobeEngine {
       }
       const selection = this.lodSelection!;
       const terrainStats = this.terrain?.update(selection.tiles, this.camera.position) ?? null;
-      const imageryStats = this.imagery?.update(selection.tiles, this.camera.position) ?? null;
+      let imageryStats: RasterTileLayerStats | null = null;
+      for (const layer of this.imageryLayers.values()) {
+        if (!layer.visible) continue;
+        const stats = layer.update(selection.tiles, this.camera.position);
+        if (layer === this.imagery) imageryStats = stats;
+      }
       this.grid.update(selection.tiles, this.camera.position);
       this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
       this.renderer.render(this.scene, this.camera);
@@ -343,7 +354,8 @@ export class GlobeEngine {
     this.stop();
     this.resizeObserver.disconnect();
     this.controls.dispose();
-    this.imagery?.dispose();
+    for (const layer of this.imageryLayers.values()) layer.dispose();
+    this.imageryLayers.clear();
     this.terrain?.dispose();
     this.grid.dispose();
     this.scene.traverse((object) => {
@@ -361,6 +373,40 @@ export class GlobeEngine {
   setImageryProvider(provider: RasterTileProvider): void {
     this.imagery?.setProvider(provider);
     this.lastStatsSignature = '';
+  }
+
+  /** Adds a raster surface layer. Annotation layers should use overlay=true. */
+  addImageryLayer(
+    id: string,
+    provider: RasterTileProvider,
+    options: RasterTileLayerOptions = {}
+  ): RasterTileLayer {
+    if (this.imageryLayers.has(id)) throw new Error(`Imagery layer already exists: ${id}`);
+    const layer = new RasterTileLayer(this.ellipsoid, provider, {
+      ...this.imageryLayerOptions,
+      ...options,
+      terrain: this.terrain ?? undefined,
+      surfaceOffset: options.surfaceOffset ?? (options.overlay ? 0.35 : 0.1)
+    });
+    this.imageryLayers.set(id, layer);
+    this.scene.add(layer.object3d);
+    this.lastStatsSignature = '';
+    return layer;
+  }
+
+  removeImageryLayer(id: string): boolean {
+    if (id === 'base') return false;
+    const layer = this.imageryLayers.get(id);
+    if (!layer) return false;
+    this.scene.remove(layer.object3d);
+    layer.dispose();
+    this.imageryLayers.delete(id);
+    this.lastStatsSignature = '';
+    return true;
+  }
+
+  getImageryLayer(id: string): RasterTileLayer | undefined {
+    return this.imageryLayers.get(id);
   }
 
   setTerrainEnabled(enabled: boolean): void {

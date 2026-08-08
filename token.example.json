@@ -1,0 +1,19 @@
+{
+  "tianditu": {
+    "token": "YOUR_PUBLIC_TOKEN",
+    "serverToken": ""
+  },
+  "maptiler": {
+    "key": "YOUR_PUBLIC_KEY"
+  },
+  "mapbox": {
+    "publicToken": "YOUR_PUBLIC_PK_TOKEN",
+    "serverToken": ""
+  },
+  "geovis": {
+    "terrainToken": "YOUR_PUBLIC_TERRAIN_TOKEN"
+  },
+  "osm": {
+    "vectorVersion": "YOUR_SERVICE_VERSION"
+  }
+}

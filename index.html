@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#07131d" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%2317465c' stroke='%2364d8ff' stroke-width='4'/%3E%3Cpath d='M6 32h52M32 4c10 9 10 47 0 56M32 4c-10 9-10 47 0 56' fill='none' stroke='%23dff7ff' stroke-width='2' opacity='.8'/%3E%3C/svg%3E" />
     <title>SpringAndAutumnGIS · 3D 经纬网 LOD</title>
     <link rel="stylesheet" href="/src/demo/demo.css" />
   </head>
@@ -19,15 +20,22 @@
         <small id="frame-time-value">-- ms</small>
       </div>
     </header>
-    <nav class="map-switcher" aria-label="地图底图切换">
-      <button id="map-toggle" type="button" aria-pressed="false">切换到矢量地图</button>
+    <nav class="map-switcher" aria-label="图层管理">
+      <label class="source-picker">
+        <span>底图</span>
+        <select id="base-layer-select" aria-label="选择底图"></select>
+      </label>
+      <label id="annotation-control" class="annotation-control" hidden>
+        <input id="annotation-toggle" type="checkbox" />
+        <span>显示中文注记</span>
+      </label>
       <button id="terrain-toggle" type="button" aria-pressed="true">关闭地形</button>
       <button id="terrain-test" type="button">定位珠峰地形</button>
     </nav>
-    <label id="satellite-level-debug" class="level-debug">
-      <span>卫星数据层级偏移</span>
-      <input id="satellite-level-offset" type="range" min="-4" max="1" step="0.1" value="-1.7" />
-      <output id="satellite-level-offset-value" for="satellite-level-offset">-1.7</output>
+    <label id="level-debug" class="level-debug">
+      <span>底图数据层级偏移</span>
+      <input id="level-offset" type="range" min="-4" max="1" step="0.1" value="-1.7" />
+      <output id="level-offset-value" for="level-offset">-1.7</output>
     </label>
     <aside class="stats" aria-live="polite">
       <div class="stats__label">实时四叉树状态</div>

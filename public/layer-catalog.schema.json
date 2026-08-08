@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spring-and-autumn-gis.local/schemas/layer-catalog.schema.json",
+  "title": "SpringAndAutumnGIS Layer Catalog",
+  "type": "object",
+  "required": ["version", "defaultBaseLayerId", "defaults", "sources", "layers"],
+  "properties": {
+    "version": { "const": 1 },
+    "defaultBaseLayerId": { "type": "string", "minLength": 1 },
+    "defaults": {
+      "type": "object",
+      "required": ["levelOffset"],
+      "properties": {
+        "levelOffset": { "type": "number", "minimum": -8, "maximum": 2 }
+      },
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["xyz-raster", "wmts-raster", "rasterized-vector-style", "mvt"] },
+          "urlTemplate": { "type": "string" },
+          "styleUrl": { "type": "string" },
+          "sourceId": { "type": "string" },
+          "subdomains": { "type": "array", "items": { "type": "string" } },
+          "requires": { "type": "array", "items": { "type": "string" } },
+          "minLevel": { "type": "integer", "minimum": 0 },
+          "maxLevel": { "type": "integer", "minimum": 0 },
+          "tileSize": { "type": "integer", "minimum": 1 },
+          "levelOffset": { "type": "number", "minimum": -8, "maximum": 2 },
+          "minimumLodLevelOffset": { "type": "number" },
+          "showCountryLabels": { "type": "boolean" },
+          "attribution": { "type": "string" },
+          "termsUrl": { "type": "string" },
+          "status": { "enum": ["stable", "experimental", "planned"] },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind", "role", "sourceId"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["imagery", "rasterized-vector", "terrain", "vector", "feature", "annotation"] },
+          "role": { "enum": ["base", "overlay", "annotation", "terrain"] },
+          "sourceId": { "type": "string", "minLength": 1 },
+          "visible": { "type": "boolean" },
+          "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "order": { "type": "integer", "minimum": 0 },
+          "levelOffset": { "type": "number", "minimum": -8, "maximum": 2 },
+          "exclusiveGroup": { "type": "string" },
+          "parentLayerId": { "type": "string" },
+          "annotationLayerIds": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,40 +1,97 @@
+import layerCatalogJson from '../../env.config.json';
 import {
-  ArcGisVectorRasterProvider,
+  DEFAULT_LEVEL_OFFSET,
+  DataSourceRegistry,
   GlobeEngine,
+  LayerCollection,
   TerrainRgbProvider,
-  UrlTemplateRasterProvider,
-  type GlobeEngineStats
+  type DataSourceDefinition,
+  type GlobeEngineStats,
+  type LayerDefinition,
+  type LayerState,
+  type RasterTileProvider
 } from '../index';
 
-const container = document.querySelector<HTMLElement>('#globe');
-const selectedValue = document.querySelector<HTMLElement>('#selected-value');
-const visitedValue = document.querySelector<HTMLElement>('#visited-value');
-const culledValue = document.querySelector<HTMLElement>('#culled-value');
-const levelsValue = document.querySelector<HTMLElement>('#levels-value');
-const imageryValue = document.querySelector<HTMLElement>('#imagery-value');
-const mapToggle = document.querySelector<HTMLButtonElement>('#map-toggle');
-const terrainToggle = document.querySelector<HTMLButtonElement>('#terrain-toggle');
-const terrainTest = document.querySelector<HTMLButtonElement>('#terrain-test');
-const terrainValue = document.querySelector<HTMLElement>('#terrain-value');
-const attribution = document.querySelector<HTMLAnchorElement>('#map-attribution');
-const satelliteLevelDebug = document.querySelector<HTMLElement>('#satellite-level-debug');
-const satelliteLevelOffsetInput = document.querySelector<HTMLInputElement>('#satellite-level-offset');
-const satelliteLevelOffsetValue = document.querySelector<HTMLOutputElement>('#satellite-level-offset-value');
-const fpsValue = document.querySelector<HTMLElement>('#fps-value');
-const frameTimeValue = document.querySelector<HTMLElement>('#frame-time-value');
+type LayerCatalogConfig = Readonly<{
+  version: 1;
+  defaultBaseLayerId: string;
+  defaults: Readonly<{ levelOffset: number }>;
+  sources: readonly DataSourceDefinition[];
+  layers: readonly LayerDefinition[];
+}>;
+
+type LocalTokenConfig = Readonly<{
+  tianditu?: Readonly<{ token?: string }>;
+  maptiler?: Readonly<{ key?: string }>;
+  mapbox?: Readonly<{ publicToken?: string }>;
+  geovis?: Readonly<{ terrainToken?: string }>;
+  osm?: Readonly<{ vectorVersion?: string }>;
+}>;
+
+const layerCatalog = layerCatalogJson as unknown as LayerCatalogConfig;
+const localTokens = await loadTokenConfig();
+const container = requiredElement<HTMLElement>('#globe');
+const selectedValue = requiredElement<HTMLElement>('#selected-value');
+const visitedValue = requiredElement<HTMLElement>('#visited-value');
+const culledValue = requiredElement<HTMLElement>('#culled-value');
+const levelsValue = requiredElement<HTMLElement>('#levels-value');
+const imageryValue = requiredElement<HTMLElement>('#imagery-value');
+const terrainValue = requiredElement<HTMLElement>('#terrain-value');
+const baseLayerSelect = requiredElement<HTMLSelectElement>('#base-layer-select');
+const annotationControl = requiredElement<HTMLElement>('#annotation-control');
+const annotationToggle = requiredElement<HTMLInputElement>('#annotation-toggle');
+const terrainToggle = requiredElement<HTMLButtonElement>('#terrain-toggle');
+const terrainTest = requiredElement<HTMLButtonElement>('#terrain-test');
+const attribution = requiredElement<HTMLAnchorElement>('#map-attribution');
+const levelOffsetInput = requiredElement<HTMLInputElement>('#level-offset');
+const levelOffsetValue = requiredElement<HTMLOutputElement>('#level-offset-value');
+const fpsValue = requiredElement<HTMLElement>('#fps-value');
+const frameTimeValue = requiredElement<HTMLElement>('#frame-time-value');
 
 const MIN_LOD_LEVEL = 2;
 const MAX_LOD_LEVEL = 27;
-const MAX_GOOGLE_IMAGERY_LEVEL = 20;
-const ESRI_LEVEL_OFFSET = -1.7;
-const DEFAULT_GOOGLE_LEVEL_OFFSET = -1.7;
-const initialGoogleLevelOffset = queryNumber(
-  'satelliteLevelOffset',
-  DEFAULT_GOOGLE_LEVEL_OFFSET,
+const DEFAULT_LEVEL_OFFSET_VALUE = normalizeLevelOffset(
+  layerCatalog.defaults.levelOffset ?? DEFAULT_LEVEL_OFFSET
+);
+const registry = new DataSourceRegistry(layerCatalog.sources, {
+  defaultLevelOffset: DEFAULT_LEVEL_OFFSET_VALUE,
+  variables: {
+    TIANDITU_TOKEN:
+      environmentValue(import.meta.env.VITE_TIANDITU_TOKEN) ??
+      environmentValue(localTokens.tianditu?.token),
+    MAPTILER_KEY:
+      environmentValue(import.meta.env.VITE_MAPTILER_KEY) ??
+      environmentValue(localTokens.maptiler?.key),
+    OSM_VECTOR_VERSION:
+      environmentValue(import.meta.env.VITE_OSM_VECTOR_VERSION) ??
+      environmentValue(localTokens.osm?.vectorVersion)
+  }
+});
+const layers = new LayerCollection(
+  layerCatalog.layers.map((layer) => ({
+    ...layer,
+    levelOffset: layer.levelOffset ?? DEFAULT_LEVEL_OFFSET_VALUE
+  }))
+);
+const baseLayers = layers.values().filter((layer) => layer.role === 'base');
+populateBaseLayerOptions(baseLayers);
+
+let activeBaseLayer = chooseInitialBaseLayer(baseLayers);
+const initialLevelOffset = queryNumber(
+  'levelOffset',
+  activeBaseLayer.levelOffset,
   -4,
   1
 );
-let vectorMode = false;
+activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, initialLevelOffset);
+layers.setVisible(activeBaseLayer.id, true);
+baseLayerSelect.value = activeBaseLayer.id;
+let baseProvider: RasterTileProvider = registry.createRasterProvider(
+  activeBaseLayer.sourceId,
+  { levelOffset: activeBaseLayer.levelOffset }
+);
+let annotationLayerId: string | null = null;
+
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
 let terrainEnabled = terrainEnabledByConfig;
 const terrainTestLocations = [
@@ -43,19 +100,10 @@ const terrainTestLocations = [
 ] as const;
 let terrainTestIndex = 0;
 
-if (!container || !selectedValue || !visitedValue || !culledValue || !levelsValue || !imageryValue || !terrainValue || !mapToggle || !terrainToggle || !terrainTest || !attribution || !satelliteLevelDebug || !satelliteLevelOffsetInput || !satelliteLevelOffsetValue) {
-  throw new Error('演示页面结构不完整。');
-}
-
-if (!fpsValue || !frameTimeValue) {
-  throw new Error('实时帧率显示结构不完整。');
-}
-
 let fpsAnimationFrame = 0;
 let fpsWindowStart = performance.now();
 let fpsFrameCount = 0;
 let smoothedFps = 0;
-
 const updateFps = (now: number): void => {
   fpsFrameCount += 1;
   const elapsed = now - fpsWindowStart;
@@ -69,7 +117,6 @@ const updateFps = (now: number): void => {
   }
   fpsAnimationFrame = requestAnimationFrame(updateFps);
 };
-
 fpsAnimationFrame = requestAnimationFrame(updateFps);
 
 const renderStats = (stats: GlobeEngineStats): void => {
@@ -82,12 +129,13 @@ const renderStats = (stats: GlobeEngineStats): void => {
   levelsValue.textContent =
     `相机层级 ${stats.cameraLevel.toFixed(1)} / 范围 ${MIN_LOD_LEVEL}–${MAX_LOD_LEVEL}　` +
     `可见层级 ${minimumLevel}–${maximumLevel}　` +
-    [...stats.levels]
-      .map(([level, count]) => `${level}级：${count}`)
-      .join('　');
-  const sourceName = vectorMode
-    ? '矢量（数据层级=floor(相机-2)）'
-    : `卫星（实际${imagery.currentSourceLevel}级，偏移${formatOffset(initialGoogleLevelOffsetState)}）`;
+    [...stats.levels].map(([level, count]) => `${level}级：${count}`).join('　');
+  const currentSourceLevel = Number.isFinite(baseProvider.currentSourceLevel)
+    ? String(baseProvider.currentSourceLevel)
+    : '—';
+  const sourceName =
+    `${activeBaseLayer.name}（实际${currentSourceLevel}级，偏移` +
+    `${formatOffset(activeBaseLayer.levelOffset)}）`;
   imageryValue.textContent = stats.imagery
     ? `${sourceName} 目标${formatLevelRange(stats.imagery.desiredMinimumLevel, stats.imagery.desiredMaximumLevel)}级 / ` +
       `显示${formatLevelRange(stats.imagery.displayedMinimumLevel, stats.imagery.displayedMaximumLevel)}级 · ` +
@@ -100,8 +148,10 @@ const renderStats = (stats: GlobeEngineStats): void => {
     : '地形未配置';
 };
 
-const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_URL);
-const mapTilerKey = environmentValue(import.meta.env.VITE_MAPTILER_KEY);
+const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_URL) ??
+  geovisTerrainUrlFromToken(environmentValue(localTokens.geovis?.terrainToken));
+const mapTilerKey = environmentValue(import.meta.env.VITE_MAPTILER_KEY) ??
+  environmentValue(localTokens.maptiler?.key);
 const terrain = terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
   ? new TerrainRgbProvider({
       id: 'terrain-rgb-demo',
@@ -115,43 +165,6 @@ const terrain = terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
       attribution: 'GeoVIS / MapTiler'
     })
   : undefined;
-
-const imagery = new UrlTemplateRasterProvider({
-  id: 'google-satellite-demo',
-  urlTemplate: 'https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-  subdomains: ['0', '1', '2', '3'],
-  maxLevel: MAX_GOOGLE_IMAGERY_LEVEL,
-  viewLevelOffset: initialGoogleLevelOffset,
-  attribution: 'Google Maps'
-});
-
-let initialGoogleLevelOffsetState = initialGoogleLevelOffset;
-satelliteLevelOffsetInput.value = String(initialGoogleLevelOffsetState);
-satelliteLevelOffsetValue.value = formatOffset(initialGoogleLevelOffsetState);
-satelliteLevelOffsetValue.textContent = formatOffset(initialGoogleLevelOffsetState);
-satelliteLevelOffsetInput.addEventListener('input', () => {
-  const offset = Number(satelliteLevelOffsetInput.value);
-  if (!Number.isFinite(offset)) return;
-  initialGoogleLevelOffsetState = offset;
-  satelliteLevelOffsetValue.value = formatOffset(offset);
-  satelliteLevelOffsetValue.textContent = formatOffset(offset);
-  imagery.setViewLevelOffset(offset);
-  const url = new URL(window.location.href);
-  url.searchParams.set('satelliteLevelOffset', offset.toFixed(1));
-  window.history.replaceState(null, '', url);
-});
-
-const vectorMap = new ArcGisVectorRasterProvider({
-  id: 'esri-vector-style-demo',
-  styleUrl: '/En.json',
-  sourceId: 'esri',
-  maxLevel: 20,
-  levelOffset: ESRI_LEVEL_OFFSET,
-  minimumLodLevelOffset: -1,
-  showCountryLabels: true,
-  tileSize: 512,
-  attribution: 'Esri'
-});
 
 const engine = new GlobeEngine({
   container,
@@ -168,11 +181,8 @@ const engine = new GlobeEngine({
       1
     ) : 0
   },
-  grid: {
-    subdivisions: 8,
-    heightOffset: 0.3
-  },
-  imagery,
+  grid: { subdivisions: 8, heightOffset: 0.3 },
+  imagery: baseProvider,
   terrain,
   terrainLayer: {
     segments: 64,
@@ -189,11 +199,7 @@ const engine = new GlobeEngine({
     maxTextureBytes: 192 * 1024 * 1024,
     surfaceOffset: 0.1
   },
-  initialView: {
-    longitude: 105,
-    latitude: 32,
-    altitude: 8_600_000
-  },
+  initialView: { longitude: 105, latitude: 32, altitude: 8_600_000 },
   navigation: {
     rotateSpeed: 0.38,
     minRotateSpeed: 0.000001,
@@ -208,17 +214,66 @@ const engine = new GlobeEngine({
   onStats: renderStats
 });
 
+applyActiveLayerUi();
 engine.start();
 
-mapToggle.addEventListener('click', () => {
-  vectorMode = !vectorMode;
-  engine.setImageryProvider(vectorMode ? vectorMap : imagery);
-  mapToggle.textContent = vectorMode ? '切换到卫星影像' : '切换到矢量地图';
-  mapToggle.classList.toggle('is-vector', vectorMode);
-  mapToggle.setAttribute('aria-pressed', String(vectorMode));
-  attribution.textContent = vectorMode ? 'Esri · Vector Basemap' : 'Google Maps · Satellite';
-  attribution.href = vectorMode ? 'https://www.esri.com/' : 'https://maps.google.com/';
-  satelliteLevelDebug.hidden = vectorMode;
+baseLayerSelect.addEventListener('change', () => {
+  const next = layers.get(baseLayerSelect.value);
+  if (!next || next.role !== 'base') return;
+  const availability = registry.availability(next.sourceId);
+  if (!availability.available) {
+    baseLayerSelect.value = activeBaseLayer.id;
+    return;
+  }
+  layers.setVisible(next.id, true);
+  activeBaseLayer = layers.get(next.id)!;
+  baseProvider = registry.createRasterProvider(activeBaseLayer.sourceId, {
+    levelOffset: activeBaseLayer.levelOffset
+  });
+  engine.setImageryProvider(baseProvider);
+  annotationToggle.checked = false;
+  removeAnnotationLayer();
+  applyActiveLayerUi();
+  updateQueryState();
+});
+
+levelOffsetInput.addEventListener('input', () => {
+  const offset = Number(levelOffsetInput.value);
+  if (!Number.isFinite(offset)) return;
+  activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, offset);
+  baseProvider.setViewLevelOffset?.(offset);
+  if (annotationLayerId) {
+    const annotationLayer = engine.getImageryLayer('annotation');
+    annotationLayer?.provider.setViewLevelOffset?.(offset);
+  }
+  setLevelOffsetUi(offset);
+  updateQueryState();
+});
+
+annotationToggle.addEventListener('change', () => {
+  if (!annotationToggle.checked) {
+    removeAnnotationLayer();
+    return;
+  }
+  const candidateId = activeBaseLayer.annotationLayerIds?.[0];
+  const candidate = candidateId ? layers.get(candidateId) : undefined;
+  if (!candidate || !registry.availability(candidate.sourceId).available) {
+    annotationToggle.checked = false;
+    return;
+  }
+  removeAnnotationLayer();
+  const provider = registry.createRasterProvider(candidate.sourceId, {
+    levelOffset: activeBaseLayer.levelOffset
+  });
+  engine.addImageryLayer('annotation', provider, {
+    overlay: true,
+    order: 2,
+    surfaceOffset: 0.45,
+    maxCachedTiles: 1_024,
+    maxTextureBytes: 96 * 1024 * 1024
+  });
+  annotationLayerId = candidate.id;
+  layers.setVisible(candidate.id, true);
 });
 
 window.addEventListener('pagehide', () => {
@@ -264,6 +319,90 @@ if (!terrain) {
   });
 }
 
+function populateBaseLayerOptions(candidates: readonly LayerState[]): void {
+  for (const layer of candidates) {
+    const source = registry.get(layer.sourceId);
+    if (!source) continue;
+    const availability = registry.availability(source.id);
+    const option = document.createElement('option');
+    option.value = layer.id;
+    option.disabled = !availability.available;
+    const suffix = !availability.supported
+      ? '（等待原生矢量渲染）'
+      : availability.missingVariables.length > 0
+        ? `（缺少 ${availability.missingVariables.join('、')}）`
+        : source.status === 'experimental'
+          ? '（试验）'
+          : '';
+    option.textContent = `${layer.name}${suffix}`;
+    baseLayerSelect.appendChild(option);
+  }
+}
+
+function chooseInitialBaseLayer(candidates: readonly LayerState[]): LayerState {
+  const requestedId =
+    new URLSearchParams(window.location.search).get('baseLayer') ??
+    layerCatalog.defaultBaseLayerId;
+  const requested = candidates.find((layer) => layer.id === requestedId);
+  if (requested && registry.availability(requested.sourceId).available) return requested;
+  const fallback = candidates.find((layer) => registry.availability(layer.sourceId).available);
+  if (!fallback) throw new Error('图层目录中没有当前可用的底图。');
+  return fallback;
+}
+
+function applyActiveLayerUi(): void {
+  baseLayerSelect.value = activeBaseLayer.id;
+  setLevelOffsetUi(activeBaseLayer.levelOffset);
+  const annotationId = activeBaseLayer.annotationLayerIds?.[0];
+  const annotation = annotationId ? layers.get(annotationId) : undefined;
+  annotationControl.hidden = !annotation;
+  annotationToggle.disabled = !annotation || !registry.availability(annotation.sourceId).available;
+  const source = registry.get(activeBaseLayer.sourceId);
+  attribution.textContent = source?.attribution ?? activeBaseLayer.name;
+  attribution.href = source?.termsUrl ?? '#';
+}
+
+function removeAnnotationLayer(): void {
+  engine.removeImageryLayer('annotation');
+  if (annotationLayerId) layers.setVisible(annotationLayerId, false);
+  annotationLayerId = null;
+}
+
+function setLevelOffsetUi(offset: number): void {
+  levelOffsetInput.value = String(offset);
+  levelOffsetValue.value = formatOffset(offset);
+  levelOffsetValue.textContent = formatOffset(offset);
+}
+
+function updateQueryState(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set('baseLayer', activeBaseLayer.id);
+  url.searchParams.set('levelOffset', activeBaseLayer.levelOffset.toFixed(1));
+  window.history.replaceState(null, '', url);
+}
+
+function requiredElement<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector);
+  if (!element) throw new Error(`演示页面缺少元素：${selector}`);
+  return element;
+}
+
+async function loadTokenConfig(): Promise<LocalTokenConfig> {
+  try {
+    const response = await fetch('/token.json', { cache: 'no-store' });
+    if (!response.ok) return {};
+    return await response.json() as LocalTokenConfig;
+  } catch {
+    return {};
+  }
+}
+
+function geovisTerrainUrlFromToken(token: string | undefined): string | undefined {
+  return token
+    ? `https://tiles1.geovisearth.com/base/v1/terrain-rgb/{z}/{x}/{y}?format=png&tmsIds=w&token=${encodeURIComponent(token)}`
+    : undefined;
+}
+
 function environmentValue(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return !trimmed || trimmed.includes('YOUR_') ? undefined : trimmed;
@@ -274,16 +413,15 @@ function numericEnvironmentValue(value: string | undefined, fallback: number): n
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function queryNumber(
-  name: string,
-  fallback: number,
-  minimum: number,
-  maximum: number
-): number {
+function queryNumber(name: string, fallback: number, minimum: number, maximum: number): number {
   const raw = new URLSearchParams(window.location.search).get(name);
   if (raw === null || raw.trim() === '') return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, parsed)) : fallback;
+}
+
+function normalizeLevelOffset(value: number): number {
+  return Number.isFinite(value) ? Math.max(-8, Math.min(2, value)) : DEFAULT_LEVEL_OFFSET;
 }
 
 function formatOffset(value: number): string {

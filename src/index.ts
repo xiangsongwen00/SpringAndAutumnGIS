@@ -8,11 +8,33 @@ export { GeographicTilingScheme, tileKey } from './core/tiling/GeographicTilingS
 export type { Rectangle, TileId, TilingScheme } from './core/tiling/GeographicTilingScheme';
 export { WebMercatorTilingScheme } from './core/tiling/WebMercatorTilingScheme';
 
-export { UrlTemplateRasterProvider } from './core/tiles/RasterTileProvider';
+export {
+  DEFAULT_LEVEL_OFFSET,
+  UrlTemplateRasterProvider
+} from './core/tiles/RasterTileProvider';
 export type {
   RasterTileProvider,
   UrlTemplateRasterProviderOptions
 } from './core/tiles/RasterTileProvider';
+export { LayerCollection } from './core/layers/LayerCollection';
+export type {
+  LayerCollectionChange,
+  LayerCollectionListener,
+  LayerDefinition,
+  LayerKind,
+  LayerRole,
+  LayerState,
+  LayerStatePatch
+} from './core/layers/LayerTypes';
+export { DataSourceRegistry } from './core/layers/DataSourceRegistry';
+export type {
+  DataSourceAvailability,
+  DataSourceDefinition,
+  DataSourceKind,
+  DataSourceRegistryOptions,
+  DataSourceStatus,
+  RasterProviderOverrides
+} from './core/layers/DataSourceRegistry';
 export { ArcGisVectorRasterProvider } from './core/tiles/ArcGisVectorRasterProvider';
 export type { ArcGisVectorRasterProviderOptions } from './core/tiles/ArcGisVectorRasterProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';

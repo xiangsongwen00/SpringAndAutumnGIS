@@ -23,7 +23,8 @@
     "build": "vite build && tsc -p tsconfig.build.json",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:terrain": "npm run build && node scripts/test-terrain-stitch.mjs"
+    "test:terrain": "npm run build && node scripts/test-terrain-stitch.mjs",
+    "test:layers": "npm run build && node scripts/test-layer-management.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.182.0",
