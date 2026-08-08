@@ -26,3 +26,4 @@ dist/
 *.zip
 .env.local
 .env.*.local
+env.config.json
