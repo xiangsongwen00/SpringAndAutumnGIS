@@ -19,7 +19,7 @@ export interface TerrainProvider {
   readonly minLevel: number;
   readonly maxLevel: number;
   readonly attribution?: string;
-  loadTile(tile: TileId): Promise<TerrainTileData>;
+  loadTile(tile: TileId, signal?: AbortSignal): Promise<TerrainTileData>;
 }
 
 export type TerrainRgbProviderOptions = {
@@ -81,7 +81,7 @@ export class TerrainRgbProvider implements TerrainProvider {
     return this.resolvedMaxLevel;
   }
 
-  async loadTile(tile: TileId): Promise<TerrainTileData> {
+  async loadTile(tile: TileId, signal?: AbortSignal): Promise<TerrainTileData> {
     const metadata = await this.metadata();
     const level = Math.min(tile.level, this.maxLevel);
     const sourceTile = level === tile.level
@@ -101,7 +101,7 @@ export class TerrainRgbProvider implements TerrainProvider {
       }
       const url = resolveTerrainUrl(template, sourceTile, metadata.scheme);
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, { signal });
         if (response.status === 404 || response.status === 204) {
           sawNoData = true;
           continue;

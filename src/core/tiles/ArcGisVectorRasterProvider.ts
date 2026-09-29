@@ -111,11 +111,11 @@ export class ArcGisVectorRasterProvider implements RasterTileProvider {
     return `${this.styleAdapter.styleUrl}#${tile.level}/${tile.x}/${tile.y}`;
   }
 
-  async loadTexture(tile: TileId): Promise<THREE.Texture> {
+  async loadTexture(tile: TileId, signal?: AbortSignal): Promise<THREE.Texture> {
     const style = await this.styleAdapter.load();
     const selected = this.styleAdapter.selectVectorSource(style);
     const source = this.source ??= new MvtTileSource(selected);
-    const bytes = await source.load(tile);
+    const bytes = await source.load(tile, signal);
     const decoded = this.decoder.decode(
       bytes,
       this.styleAdapter.sourceLayerNames(style, selected.id)

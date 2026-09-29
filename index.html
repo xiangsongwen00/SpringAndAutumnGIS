@@ -31,7 +31,20 @@
       </label>
       <button id="terrain-toggle" type="button" aria-pressed="true">关闭地形</button>
       <button id="terrain-test" type="button">定位珠峰地形</button>
+      <button id="business-layer-control" type="button" aria-expanded="false" aria-controls="business-layer-panel">业务图层</button>
+      <button id="business-layer-test" type="button">测试永远村</button>
+      <button id="geojson-test" type="button">测试 GeoJSON</button>
     </nav>
+    <aside id="business-layer-panel" class="business-layer-panel" hidden aria-label="业务图层控制">
+      <div class="business-layer-panel__header">
+        <div>
+          <strong>业务图层</strong>
+          <small>独立叠加，不替换底图</small>
+        </div>
+        <span id="business-layer-summary">0 个已启用</span>
+      </div>
+      <div id="business-layer-list" class="business-layer-list"></div>
+    </aside>
     <label id="level-debug" class="level-debug">
       <span>底图数据层级偏移</span>
       <input id="level-offset" type="range" min="-4" max="1" step="0.1" value="-1.7" />

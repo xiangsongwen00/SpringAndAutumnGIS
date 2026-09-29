@@ -16,6 +16,39 @@ export type {
   RasterTileProvider,
   UrlTemplateRasterProviderOptions
 } from './core/tiles/RasterTileProvider';
+export {
+  WmtsRasterProvider,
+  loadWmtsCapabilities,
+  parseWmtsCapabilities
+} from './core/tiles/WmtsSource';
+export type {
+  WmtsCapabilities,
+  WmtsLayer,
+  WmtsRasterProviderOptions,
+  WmtsResourceUrl,
+  WmtsTileMatrixLimit,
+  WmtsTileMatrix,
+  WmtsTileMatrixSet,
+  WmtsTileMatrixSetLink
+} from './core/tiles/WmtsSource';
+export { TileStateMachine, tileContentId } from './core/tiles/TileStateMachine';
+export type {
+  TileContentKey,
+  TileContentKind,
+  TileContentState,
+  TileRecord,
+  TileRecordPatch,
+  TileStateChange,
+  TileStateListener
+} from './core/tiles/TileStateMachine';
+export { RequestScheduler } from './core/tiles/RequestScheduler';
+export type {
+  RequestLease,
+  RequestScheduleOptions,
+  RequestSchedulerOptions,
+  RequestSchedulerStats,
+  RequestTask
+} from './core/tiles/RequestScheduler';
 export { LayerCollection } from './core/layers/LayerCollection';
 export type {
   LayerCollectionChange,
@@ -23,10 +56,32 @@ export type {
   LayerDefinition,
   LayerKind,
   LayerRole,
+  LayerRuntimePatch,
+  LayerRuntimePhase,
+  LayerRuntimeState,
   LayerState,
   LayerStatePatch
 } from './core/layers/LayerTypes';
+export {
+  createLayerCatalog,
+  parseLayerCatalog,
+  serializeLayerCatalog,
+  validateLayerCatalog
+} from './core/layers/LayerCatalog';
+export type {
+  LayerCatalog,
+  LayerCatalogIssue,
+  LayerCatalogValidation
+} from './core/layers/LayerCatalog';
 export { DataSourceRegistry } from './core/layers/DataSourceRegistry';
+export { GeoJsonSource } from './feature/GeoJsonSource';
+export type {
+  GeoJsonFeature,
+  GeoJsonFeatureCollection,
+  GeoJsonGeometry,
+  GeoJsonPosition,
+  GeoJsonSourceOptions
+} from './feature/GeoJsonSource';
 export type {
   DataCoordinateReference,
   DataSourceAvailability,
@@ -88,6 +143,8 @@ export type {
 export { GlobeGridRenderer } from './render/GlobeGridRenderer';
 export type { GlobeGridRendererOptions } from './render/GlobeGridRenderer';
 export { RasterTileLayer } from './render/RasterTileLayer';
+export { GeoJsonLayer } from './render/GeoJsonLayer';
+export type { GeoJsonLayerOptions } from './render/GeoJsonLayer';
 export type { RasterTileLayerOptions, RasterTileLayerStats } from './render/RasterTileLayer';
 export { TerrainTileLayer } from './render/TerrainTileLayer';
 export type {

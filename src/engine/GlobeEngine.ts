@@ -8,6 +8,7 @@ import {
 } from '../core/lod/GlobeLodSelector';
 import { GlobeGridRenderer, type GlobeGridRendererOptions } from '../render/GlobeGridRenderer';
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
+import { TileStateMachine } from '../core/tiles/TileStateMachine';
 import { WebMercatorTilingScheme } from '../core/tiling/WebMercatorTilingScheme';
 import {
   RasterTileLayer,
@@ -20,6 +21,7 @@ import {
   type TerrainTileLayerOptions,
   type TerrainTileLayerStats
 } from '../render/TerrainTileLayer';
+import { GeoJsonLayer } from '../render/GeoJsonLayer';
 import {
   GlobeCameraController,
   type GlobeCameraViewState,
@@ -85,6 +87,8 @@ export class GlobeEngine {
   readonly grid: GlobeGridRenderer;
   readonly imagery: RasterTileLayer | null;
   readonly terrain: TerrainTileLayer | null;
+  /** Shared per-content lifecycle registry for all raster surface layers. */
+  readonly tileStateMachine = new TileStateMachine();
 
   private readonly container: HTMLElement;
   private readonly onStats?: (stats: GlobeEngineStats) => void;
@@ -109,6 +113,7 @@ export class GlobeEngine {
   private readonly lodCameraQuaternion = new THREE.Quaternion();
   private contextLost = false;
   private readonly imageryLayers = new Map<string, RasterTileLayer>();
+  private readonly featureLayers = new Map<string, GeoJsonLayer>();
   private readonly imageryLayerOptions: RasterTileLayerOptions;
 
   private readonly onContextLost = (event: Event): void => {
@@ -176,6 +181,7 @@ export class GlobeEngine {
     this.container.appendChild(this.renderer.domElement);
     this.imageryLayerOptions = {
       ...options.raster,
+      tileStateMachine: options.raster?.tileStateMachine ?? this.tileStateMachine,
       terrain: this.terrain ?? undefined,
       maxAnisotropy:
         options.raster?.maxAnisotropy ?? this.renderer.capabilities.getMaxAnisotropy()
@@ -337,6 +343,9 @@ export class GlobeEngine {
         const stats = layer.update(selection.tiles, this.camera.position);
         if (layer === this.imagery) imageryStats = stats;
       }
+      for (const layer of this.featureLayers.values()) {
+        if (layer.object3d.visible) layer.update(this.camera.position, now);
+      }
       this.grid.update(selection.tiles, this.camera.position);
       this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
       this.renderer.render(this.scene, this.camera);
@@ -356,6 +365,8 @@ export class GlobeEngine {
     this.controls.dispose();
     for (const layer of this.imageryLayers.values()) layer.dispose();
     this.imageryLayers.clear();
+    for (const layer of this.featureLayers.values()) layer.dispose();
+    this.featureLayers.clear();
     this.terrain?.dispose();
     this.grid.dispose();
     this.scene.traverse((object) => {
@@ -386,7 +397,10 @@ export class GlobeEngine {
       ...this.imageryLayerOptions,
       ...options,
       terrain: this.terrain ?? undefined,
-      surfaceOffset: options.surfaceOffset ?? (options.overlay ? 0.35 : 0.1)
+      // Surface imagery and polygon rasters must use the exact same displaced
+      // mesh as the base layer. A small physical lift is below logarithmic
+      // depth precision at oblique views and produces triangle-shaped holes.
+      surfaceOffset: options.surfaceOffset ?? this.imageryLayerOptions.surfaceOffset ?? 0.1
     });
     this.imageryLayers.set(id, layer);
     this.scene.add(layer.object3d);
@@ -407,6 +421,26 @@ export class GlobeEngine {
 
   getImageryLayer(id: string): RasterTileLayer | undefined {
     return this.imageryLayers.get(id);
+  }
+
+  addFeatureLayer(id: string, layer: GeoJsonLayer): GeoJsonLayer {
+    if (this.featureLayers.has(id)) throw new Error(`Feature layer already exists: ${id}`);
+    this.featureLayers.set(id, layer);
+    this.scene.add(layer.object3d);
+    return layer;
+  }
+
+  removeFeatureLayer(id: string): boolean {
+    const layer = this.featureLayers.get(id);
+    if (!layer) return false;
+    this.scene.remove(layer.object3d);
+    layer.dispose();
+    this.featureLayers.delete(id);
+    return true;
+  }
+
+  getFeatureLayer(id: string): GeoJsonLayer | undefined {
+    return this.featureLayers.get(id);
   }
 
   setTerrainEnabled(enabled: boolean): void {

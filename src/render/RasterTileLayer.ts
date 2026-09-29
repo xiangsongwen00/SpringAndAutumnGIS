@@ -2,6 +2,11 @@ import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
+import {
+  TileStateMachine,
+  type TileContentKey,
+  type TileContentKind
+} from '../core/tiles/TileStateMachine';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
@@ -20,6 +25,9 @@ export type RasterTileLayerOptions = {
   order?: number;
   /** Transparent surface overlay such as a label tile layer. */
   overlay?: boolean;
+  /** Shared lifecycle registry. GlobeEngine supplies one registry to every raster layer. */
+  tileStateMachine?: TileStateMachine;
+  contentKind?: Extract<TileContentKind, 'imagery' | 'rasterized-vector'>;
 };
 
 export type RasterTileLayerStats = Readonly<{
@@ -47,6 +55,8 @@ type TextureRecord = {
   byteSize: number;
   attempts: number;
   retryAt: number;
+  controller: AbortController | null;
+  active: boolean;
 };
 type RenderTile = {
   id: TileId;
@@ -63,7 +73,6 @@ export class RasterTileLayer {
   private readonly ellipsoid: Ellipsoid;
   private readonly geometries = new Map<number, THREE.BufferGeometry>();
   private readonly baseSegments: number;
-  private readonly loader = new THREE.TextureLoader();
   private readonly renderTiles = new Map<string, RenderTile>();
   private readonly textures = new Map<string, TextureRecord>();
   private readonly visibleTextureKeys = new Set<string>();
@@ -74,6 +83,8 @@ export class RasterTileLayer {
   private readonly maxAnisotropy: number;
   private readonly terrain?: TerrainHeightSource;
   private readonly overlay: boolean;
+  readonly tileStateMachine: TileStateMachine;
+  private readonly contentKind: Extract<TileContentKind, 'imagery' | 'rasterized-vector'>;
   private layerOpacity: number;
   private readonly cameraHigh = new THREE.Vector3();
   private readonly cameraLow = new THREE.Vector3();
@@ -93,6 +104,7 @@ export class RasterTileLayer {
   private displayedMaximumLevel: number | null = null;
   private lastError: string | null = null;
   private warnedProviderId: string | null = null;
+  private readonly transitionTextures = new Set<THREE.Texture>();
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -112,8 +124,9 @@ export class RasterTileLayer {
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
     this.terrain = options.terrain;
     this.overlay = options.overlay ?? false;
+    this.tileStateMachine = options.tileStateMachine ?? new TileStateMachine();
+    this.contentKind = options.contentKind ?? 'imagery';
     this.layerOpacity = THREE.MathUtils.clamp(options.opacity ?? 1, 0, 1);
-    this.loader.setCrossOrigin('anonymous');
     this.object3d.visible = options.visible ?? true;
     this.object3d.renderOrder = options.order ?? 1;
   }
@@ -180,6 +193,7 @@ export class RasterTileLayer {
       if (record.state === 'error') counts.errors += 1;
       else counts[record.state] += 1;
     }
+    this.releaseTransitionTextures(true);
     return {
       ...counts,
       fallbacks: this.fallbackCount,
@@ -196,7 +210,10 @@ export class RasterTileLayer {
     if (this.disposed) return;
     this.disposed = true;
     for (const renderTile of this.renderTiles.values()) renderTile.mesh.material.dispose();
-    for (const record of this.textures.values()) this.releaseTexture(record.texture);
+    for (const record of this.textures.values()) {
+      this.cancelTileRecord(record);
+      this.releaseTexture(record.texture);
+    }
     this.renderTiles.clear();
     this.textures.clear();
     for (const geometry of this.geometries.values()) geometry.dispose();
@@ -206,8 +223,24 @@ export class RasterTileLayer {
 
   setProvider(provider: RasterTileProvider): void {
     if (provider.id === this.provider.id) return;
+    const displayedTextures = new Set<THREE.Texture>();
+    for (const renderTile of this.renderTiles.values()) {
+      const texture = renderTile.mesh.material.uniforms.tileTexture?.value;
+      if (texture instanceof THREE.Texture) displayedTextures.add(texture);
+      renderTile.textureKey = '';
+    }
+    for (const texture of this.transitionTextures) {
+      if (!displayedTextures.has(texture)) this.releaseTexture(texture);
+    }
+    this.transitionTextures.clear();
+    for (const texture of displayedTextures) this.transitionTextures.add(texture);
+    for (const record of this.textures.values()) {
+      this.cancelTileRecord(record);
+      if (record.texture && !this.transitionTextures.has(record.texture)) {
+        this.releaseTexture(record.texture);
+      }
+    }
     this.provider = provider;
-    for (const record of this.textures.values()) this.releaseTexture(record.texture);
     this.textures.clear();
     this.visibleTextureKeys.clear();
     this.fallbackCount = 0;
@@ -216,13 +249,7 @@ export class RasterTileLayer {
     this.lastSelection = null;
     this.observedProviderRevision = -1;
     this.materialsDirty = true;
-    for (const renderTile of this.renderTiles.values()) {
-      renderTile.textureKey = '';
-      const uniforms = renderTile.mesh.material.uniforms;
-      if (!uniforms) continue;
-      uniforms.tileTexture!.value = null;
-      uniforms.hasTexture!.value = false;
-    }
+    this.activeRequests = 0;
   }
 
   handleContextLost(): void {
@@ -535,7 +562,11 @@ export class RasterTileLayer {
           if (!isOverlay) {
             color = min(color * 1.24 * daylight + vec3(0.025, 0.04, 0.055), vec3(1.0));
           }
-          gl_FragColor = vec4(color, texel.a * layerOpacity);
+          float outputAlpha = texel.a * layerOpacity;
+          // Overlay textures are uploaded with premultiplied alpha. Preserve
+          // that invariant when the whole layer opacity is reduced.
+          vec3 outputColor = isOverlay ? color * layerOpacity : color;
+          gl_FragColor = vec4(outputColor, outputAlpha);
           #include <logdepthbuf_fragment>
           #include <colorspace_fragment>
         }
@@ -543,6 +574,8 @@ export class RasterTileLayer {
       transparent: this.overlay || this.layerOpacity < 1,
       depthWrite: !this.overlay,
       depthTest: true,
+      depthFunc: THREE.LessEqualDepth,
+      premultipliedAlpha: this.overlay,
       toneMapped: false
     });
   }
@@ -555,7 +588,8 @@ export class RasterTileLayer {
       if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
-      (a, b) => b.id.level - a.id.level || b.screenPixels - a.screenPixels
+      (a, b) => a.viewCenterDistance - b.viewCenterDistance ||
+        b.screenPixels - a.screenPixels || b.id.level - a.id.level
     );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const tile = prioritized[rank];
@@ -576,22 +610,26 @@ export class RasterTileLayer {
         : Math.max(this.desiredMaximumLevel, maximumSourceLevel);
 
       const desired = ancestorAtLevel(tile.id, maximumSourceLevel);
+      if (this.provider.hasTile && !this.provider.hasTile(desired)) continue;
       this.visibleTextureKeys.add(tileKey(desired));
-      this.queueTexture(desired, rank);
+      const detailPriority = rank * 2 + 1;
       const ready = this.findReadyAncestor(tile.id);
       if (ready) {
         this.visibleTextureKeys.add(ready.key);
       } else {
         const bridgeLevel = Math.max(this.provider.minLevel, maximumSourceLevel - 3);
         const bridge = ancestorAtLevel(tile.id, bridgeLevel);
+        if (this.provider.hasTile && !this.provider.hasTile(bridge)) continue;
         this.visibleTextureKeys.add(tileKey(bridge));
         // Missing coverage is more urgent than sharpening an already covered
         // tile. Deduplication makes these coarse bridge requests inexpensive.
-        this.queueTexture(bridge, rank - prioritized.length * 2);
+        this.queueTexture(bridge, rank * 2);
       }
+      this.queueTexture(desired, detailPriority);
     }
     for (const [key, record] of this.textures) {
-      if (this.visibleTextureKeys.has(key) || record.state === 'loading' || record.state === 'ready') continue;
+      if (this.visibleTextureKeys.has(key) || record.state === 'ready') continue;
+      this.cancelTileRecord(record);
       this.textures.delete(key);
     }
   }
@@ -613,7 +651,15 @@ export class RasterTileLayer {
       texture: null,
       byteSize: 0,
       attempts: 0,
-      retryAt: 0
+      retryAt: 0,
+      controller: null,
+      active: false
+    });
+    const contentKey = this.contentKey(id);
+    this.tileStateMachine.ensure(contentKey, { priority, lastAccessFrame: this.frame });
+    this.tileStateMachine.transition(contentKey, 'queued', {
+      priority,
+      lastAccessFrame: this.frame
     });
   }
 
@@ -637,7 +683,13 @@ export class RasterTileLayer {
           record.state === 'error' &&
           this.visibleTextureKeys.has(record.key) &&
           record.retryAt <= now
-        ) record.state = 'queued';
+        ) {
+          record.state = 'queued';
+          this.tileStateMachine.transition(this.contentKey(record.id), 'queued', {
+            priority: record.priority,
+            lastAccessFrame: this.frame
+          });
+        }
         if (record.state !== 'queued' || record.retryAt > now) continue;
         if (!next || record.priority < next.priority) next = record;
       }
@@ -648,20 +700,24 @@ export class RasterTileLayer {
 
   private load(record: TextureRecord): void {
     record.state = 'loading';
+    this.tileStateMachine.transition(this.contentKey(record.id), 'loading', {
+      priority: record.priority,
+      lastAccessFrame: this.frame
+    });
+    record.controller = new AbortController();
+    record.active = true;
     this.activeRequests += 1;
     const provider = this.provider;
     if (provider.loadTexture) {
-      void provider.loadTexture(record.id).then(
+      void provider.loadTexture(record.id, record.controller.signal).then(
         (texture) => this.completeTextureLoad(record, provider, texture),
         (error: unknown) => this.failTextureLoad(record, provider, error)
       );
       return;
     }
-    this.loader.load(
-      provider.url(record.id),
+    void loadTextureWithFetch(provider.url(record.id), record.controller.signal).then(
       (texture) => this.completeTextureLoad(record, provider, texture),
-      undefined,
-      (error) => this.failTextureLoad(record, provider, error)
+      (error: unknown) => this.failTextureLoad(record, provider, error)
     );
   }
 
@@ -670,7 +726,7 @@ export class RasterTileLayer {
     provider: RasterTileProvider,
     texture: THREE.Texture
   ): void {
-    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    this.releaseActiveRequest(record);
     if (
       this.disposed ||
       this.provider !== provider ||
@@ -683,15 +739,25 @@ export class RasterTileLayer {
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    // Transparent surface overlays are already sampled at screen-selected
+    // source levels. Mipmaps average transparent-black PNG texels with dark
+    // vector outlines and produce wide halos at coverage/tile boundaries.
+    texture.generateMipmaps = !this.overlay;
+    texture.premultiplyAlpha = this.overlay;
+    texture.minFilter = this.overlay ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
     texture.magFilter = THREE.LinearFilter;
     texture.anisotropy = this.maxAnisotropy;
     record.texture = texture;
+    record.controller = null;
     record.byteSize = estimateTextureBytes(texture, this.provider.estimatedTextureBytes);
     record.state = 'ready';
     record.attempts = 0;
     record.retryAt = 0;
     record.lastUsedFrame = this.frame;
+    this.tileStateMachine.transition(this.contentKey(record.id), 'ready', {
+      byteSize: record.byteSize,
+      lastAccessFrame: this.frame
+    });
     this.materialsDirty = true;
     this.pumpQueue();
   }
@@ -701,16 +767,21 @@ export class RasterTileLayer {
     provider: RasterTileProvider,
     error?: unknown
   ): void {
-    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    this.releaseActiveRequest(record);
     if (
       !this.disposed &&
       this.provider === provider &&
       this.textures.get(record.key) === record
     ) {
       record.state = 'error';
+      record.controller = null;
       record.attempts += 1;
       record.retryAt = performance.now() + Math.min(30_000, 1_000 * 2 ** (record.attempts - 1));
       this.lastError = sanitizeError(error);
+      this.tileStateMachine.transition(this.contentKey(record.id), 'failed', {
+        error: this.lastError,
+        lastAccessFrame: this.frame
+      });
       if (this.warnedProviderId !== provider.id) {
         this.warnedProviderId = provider.id;
         console.warn(`[影像图层 ${provider.id}] ${this.lastError}`);
@@ -726,7 +797,12 @@ export class RasterTileLayer {
     for (const tile of selection) {
       const renderTile = this.renderTiles.get(tileKey(tile.id));
       if (!renderTile) continue;
-      const source = this.findReadyAncestor(tile.id);
+      const desired = ancestorAtLevel(tile.id, this.maximumSourceLevel(tile.id));
+      const hasCoverage = this.provider.hasTile?.(desired) !== false;
+      // Explicitly uncovered WMTS children must stay transparent. Stretching
+      // a ready parent into them filters the parent's dark boundary into the
+      // transparent area and creates a persistent rectangular smear.
+      const source = hasCoverage ? this.findReadyAncestor(tile.id) : undefined;
       const sourceKey = source?.key ?? '';
       if (source && source.id.level < tile.id.level) this.fallbackCount += 1;
       if (source) {
@@ -739,7 +815,11 @@ export class RasterTileLayer {
       }
       const uniforms = renderTile.mesh.material.uniforms;
       if (!uniforms) continue;
-      if (sourceKey !== renderTile.textureKey) {
+      const currentTexture = uniforms.tileTexture!.value;
+      const keepsPreviousProvider = currentTexture instanceof THREE.Texture &&
+        this.transitionTextures.has(currentTexture) &&
+        source !== undefined && source.id.level < this.maximumSourceLevel(tile.id);
+      if (sourceKey !== renderTile.textureKey && !keepsPreviousProvider) {
         renderTile.textureKey = sourceKey;
         uniforms.tileTexture!.value = source?.texture ?? null;
         uniforms.hasTexture!.value = source !== undefined;
@@ -785,6 +865,7 @@ export class RasterTileLayer {
         (circumference * cosLatitude) / (sourceSize * (terrain?.height ?? 1))
       );
     }
+    this.releaseTransitionTextures(false);
   }
 
   private findReadyAncestor(id: TileId): TextureRecord | undefined {
@@ -832,6 +913,10 @@ export class RasterTileLayer {
       if (!record) break;
       this.releaseTexture(record.texture);
       remainingBytes -= record.byteSize;
+      const contentKey = this.contentKey(record.id);
+      const state = this.tileStateMachine.get(contentKey)?.state;
+      if (state === 'ready') this.tileStateMachine.transition(contentKey, 'expired');
+      this.tileStateMachine.remove(contentKey);
       this.textures.delete(record.key);
     }
   }
@@ -845,8 +930,118 @@ export class RasterTileLayer {
   }
 
   private releaseTexture(texture: THREE.Texture | null): void {
-    if (texture && !this.suspended) texture.dispose();
+    if (!texture || this.suspended) return;
+    const image = texture.image as { close?: () => void } | undefined;
+    image?.close?.();
+    texture.dispose();
   }
+
+  private contentKey(id: TileId): TileContentKey {
+    return {
+      sourceId: this.provider.id,
+      kind: this.contentKind,
+      level: id.level,
+      x: id.x,
+      y: id.y
+    };
+  }
+
+  private cancelTileRecord(record: TextureRecord): void {
+    record.controller?.abort();
+    record.controller = null;
+    this.releaseActiveRequest(record);
+    const key = this.contentKey(record.id);
+    const state = this.tileStateMachine.get(key)?.state;
+    if (state && state !== 'cancelled') {
+      if (state === 'ready') this.tileStateMachine.transition(key, 'expired');
+      else this.tileStateMachine.transition(key, 'cancelled');
+    }
+    this.tileStateMachine.remove(key);
+  }
+
+  private releaseActiveRequest(record: TextureRecord): void {
+    if (!record.active) return;
+    record.active = false;
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
+  }
+
+  private maximumSourceLevel(id: TileId): number {
+    const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
+    return Math.min(
+      this.provider.maximumSourceLevel?.(id.level) ?? id.level + levelOffset,
+      this.provider.maxLevel,
+      id.level
+    );
+  }
+
+  private releaseTransitionTextures(force: boolean): void {
+    if (this.transitionTextures.size === 0) return;
+    const referenced = force ? new Set<THREE.Texture>() : new Set(
+      [...this.renderTiles.values()]
+        .map((tile) => tile.mesh.material.uniforms.tileTexture?.value)
+        .filter((texture): texture is THREE.Texture => texture instanceof THREE.Texture)
+    );
+    for (const texture of this.transitionTextures) {
+      if (referenced.has(texture)) continue;
+      this.releaseTexture(texture);
+      this.transitionTextures.delete(texture);
+    }
+  }
+}
+
+async function loadTextureWithFetch(url: string, signal: AbortSignal): Promise<THREE.Texture> {
+  const response = await fetch(url, { signal, mode: 'cors' });
+  if (!response.ok) throw new Error(`纹理请求失败 (${response.status}): ${url}`);
+  // Keep the same upload orientation as THREE.TextureLoader. ImageBitmap has
+  // different flipY semantics in WebGL (UNPACK_FLIP_Y_WEBGL is ignored by
+  // browsers for ImageBitmap), which inverted every tile internally and
+  // produced north/south striping at tile boundaries.
+  const image = await loadHtmlImage(await response.blob(), signal);
+  const texture = new THREE.Texture(image);
+  texture.flipY = true;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function loadHtmlImage(blob: Blob, signal: AbortSignal): Promise<HTMLImageElement> {
+  if (signal.aborted) return Promise.reject(createAbortError());
+  const objectUrl = URL.createObjectURL(blob);
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.decoding = 'async';
+    let settled = false;
+    const cleanup = (): void => {
+      image.onload = null;
+      image.onerror = null;
+      signal.removeEventListener('abort', onAbort);
+      URL.revokeObjectURL(objectUrl);
+    };
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      image.src = '';
+      cleanup();
+      reject(createAbortError());
+    };
+    image.onload = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(image);
+    };
+    image.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('纹理解码失败。'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    image.src = objectUrl;
+  });
+}
+
+function createAbortError(): DOMException {
+  return new DOMException('Texture request aborted', 'AbortError');
 }
 
 function sanitizeError(error: unknown): string {

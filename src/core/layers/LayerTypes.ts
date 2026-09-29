@@ -33,9 +33,26 @@ export type LayerDefinition = Omit<LayerState, 'visible' | 'opacity' | 'order' |
 export type LayerStatePatch = Partial<Omit<LayerState, 'id' | 'sourceId' | 'kind'>>;
 
 export type LayerCollectionChange = Readonly<{
-  type: 'add' | 'remove' | 'update' | 'reorder' | 'reset';
+  type: 'add' | 'remove' | 'update' | 'reorder' | 'status' | 'reset';
   layerId?: string;
   revision: number;
+  layer?: LayerState;
+  previousLayer?: LayerState;
+  runtime?: LayerRuntimeState;
 }>;
 
 export type LayerCollectionListener = (change: LayerCollectionChange) => void;
+
+export type LayerRuntimePhase = 'idle' | 'loading' | 'ready' | 'error';
+
+/** Ephemeral diagnostics; deliberately excluded from project serialization. */
+export type LayerRuntimeState = Readonly<{
+  phase: LayerRuntimePhase;
+  pending: number;
+  ready: number;
+  failed: number;
+  lastError: string | null;
+  updatedAt: number;
+}>;
+
+export type LayerRuntimePatch = Partial<Omit<LayerRuntimeState, 'updatedAt'>>;

@@ -50,11 +50,35 @@ npm install
 npm run dev
 ```
 
+本机服务和业务测试数据见 [`测试数据.md`](./测试数据.md)。底图与业务图层在产品语义上严格分离：底图选择器只管理影像底图和“矢量渲染成栅格”的底图；GeoServer、永远村静态影像、MVT 和后续 GeoJSON 都进入独立的“业务图层”面板，以叠加方式显示，不参与 `basemap` 互斥组。
+
+页面右上角提供两个独立入口：
+
+- **业务图层**：打开图层控制面板，可分别启停业务图层并调整透明度。
+- **测试永远村**：启用永远村正射影像并定位到其覆盖范围，不改变当前底图。
+- **测试 GeoJSON**：加载省级边界并定位到全国视角；市、县边界可在业务图层面板中单独测试。
+
+Vite 开发服务器会把 `/test/geoserver`、`/test/mapservice` 和 `/test/business-map` 转发到对应测试服务，避免服务未配置 CORS 时阻断浏览器测试；该代理不是生产部署方案。
+
+## 统一瓦片运行时与 WMTS
+
+- `TileStateMachine` 以 `sourceId/kind/z/x/y/variant` 为键，记录网络、解码、上传、ready、failed、expired 和 cancelled 生命周期，并提供祖先回退与四子完整替换判定。
+- `RequestScheduler` 提供跨消费者去重、动态优先级、全局/同源并发限制、引用取消和按字节 LRU。新 Provider 不应再私建请求队列。
+- `WmtsRasterProvider` 支持 WMTS 1.0.0 `GetCapabilities`、REST/KVP、Layer/Style/Format/TileMatrixSet 选择及服务声明的真实 TileMatrix 标识符。
+- `LayerCollection` 的加载/错误统计属于临时 runtime 状态，不进入项目 JSON；`parseLayerCatalog` / `serializeLayerCatalog` 对导入项目进行交叉引用和范围校验。
+- Raster/Terrain 请求按视线中心距离优先，同级再比较屏幕误差；离开视口的请求会被取消。切换底图时旧 Provider 不再占用新队列，并在新目标层级纹理就绪前保留旧清晰纹理，避免粗祖先纹理覆盖后长时间模糊。
+- `GeoJsonSource + GeoJsonLayer` 提供业务测试链路：FeatureCollection 校验、要素数量保护、点/线及 Polygon/MultiPolygon 边界、显隐、透明度和资源释放。边界采用 GPU 经纬度投影避免与底图争深度，并支持按固定帧预算对去重顶点渐进采样地形；面填充、空间索引和拾取仍属于后续完整 Feature Runtime。
+- WMTS 会执行服务声明的 `TileMatrixSetLimits`，范围外瓦片保持透明且不使用父级回退；透明图片/面业务层与底图共享同一地形位移面和深度基准，并使用预乘 Alpha、无 mipmap 的线性采样，避免覆盖边界黑带和地形视角下的三角形空洞。
+- 系统底图注记使用独立最高合成顺序和更高表面偏移，始终绘制在 Raster/GeoJSON 业务图层之上。
+
 构建与类型检查：
 
 ```bash
 npm run typecheck
 npm run build
+npm run test:layers
+npm run test:runtime
+npm run test:terrain
 ```
 
 相机交互：

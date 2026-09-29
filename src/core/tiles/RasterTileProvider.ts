@@ -27,8 +27,10 @@ export interface RasterTileProvider {
   /** Resolves the highest data level allowed for a globe render tile. */
   maximumSourceLevel?(renderLevel: number): number;
   readonly attribution?: string;
+  /** Returns false when the source has no content for this tile. */
+  hasTile?(tile: TileId): boolean;
   url(tile: TileId): string;
-  loadTexture?(tile: TileId): Promise<THREE.Texture>;
+  loadTexture?(tile: TileId, signal?: AbortSignal): Promise<THREE.Texture>;
 }
 
 export type UrlTemplateRasterProviderOptions = {
@@ -42,6 +44,8 @@ export type UrlTemplateRasterProviderOptions = {
   attribution?: string;
   subdomains?: readonly string[];
   tileSize?: number;
+  /** Geographic coverage [west, south, east, north] in WGS84 degrees. */
+  bounds?: readonly [number, number, number, number];
 };
 
 /** XYZ URL template provider supporting {z}, {x}, {y} and optional {s}. */
@@ -54,6 +58,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
   readonly attribution?: string;
   private readonly urlTemplate: string;
   private readonly subdomains: readonly string[];
+  private readonly bounds?: readonly [number, number, number, number];
   private _viewLevelOffset: number | null;
   private viewSourceLevel: number;
   private _revision = 0;
@@ -61,8 +66,8 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
   constructor(options: UrlTemplateRasterProviderOptions) {
     if (!options.urlTemplate.includes('{z}') ||
         !options.urlTemplate.includes('{x}') ||
-        !options.urlTemplate.includes('{y}')) {
-      throw new Error('Raster tile URL must include {z}, {x}, and {y}.');
+        (!options.urlTemplate.includes('{y}') && !options.urlTemplate.includes('{-y}'))) {
+      throw new Error('Raster tile URL must include {z}, {x}, and either {y} or {-y}.');
     }
     this.id = options.id ?? 'raster';
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
@@ -73,6 +78,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
     this.attribution = options.attribution;
     this.urlTemplate = options.urlTemplate;
     this.subdomains = options.subdomains ?? [];
+    this.bounds = options.bounds ? normalizeBounds(options.bounds) : undefined;
     this._viewLevelOffset = normalizeViewLevelOffset(
       options.viewLevelOffset === undefined ? DEFAULT_LEVEL_OFFSET : options.viewLevelOffset
     );
@@ -113,16 +119,50 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
     return Math.min(renderLevel, this.viewSourceLevel, this.maxLevel);
   }
 
+  hasTile(tile: TileId): boolean {
+    if (!this.bounds) return true;
+    const [west, south, east, north] = tileBounds(tile);
+    const [boundsWest, boundsSouth, boundsEast, boundsNorth] = this.bounds;
+    const latitudeIntersects = south < boundsNorth && north > boundsSouth;
+    const longitudeIntersects = boundsWest <= boundsEast
+      ? west < boundsEast && east > boundsWest
+      : west < boundsEast || east > boundsWest;
+    return latitudeIntersects && longitudeIntersects;
+  }
+
   url(tile: TileId): string {
     const subdomain = this.subdomains.length > 0
       ? this.subdomains[(tile.x + tile.y) % this.subdomains.length] ?? ''
       : '';
+    const invertedY = 2 ** tile.level - tile.y - 1;
     return this.urlTemplate
       .split('{z}').join(String(tile.level))
       .split('{x}').join(String(tile.x))
       .split('{y}').join(String(tile.y))
+      .split('{-y}').join(String(invertedY))
       .split('{s}').join(subdomain);
   }
+}
+
+function normalizeBounds(
+  value: readonly [number, number, number, number]
+): readonly [number, number, number, number] {
+  const [west, south, east, north] = value;
+  if (![west, south, east, north].every(Number.isFinite) ||
+      west < -180 || west > 180 || east < -180 || east > 180 ||
+      south < -85.05112878 || north > 85.05112878 || south >= north) {
+    throw new Error('Raster bounds must be [west, south, east, north] in Web Mercator latitude range.');
+  }
+  return Object.freeze([west, south, east, north]);
+}
+
+function tileBounds(tile: TileId): readonly [number, number, number, number] {
+  const size = 2 ** tile.level;
+  const west = tile.x / size * 360 - 180;
+  const east = (tile.x + 1) / size * 360 - 180;
+  const north = Math.atan(Math.sinh(Math.PI - tile.y / size * Math.PI * 2)) * 180 / Math.PI;
+  const south = Math.atan(Math.sinh(Math.PI - (tile.y + 1) / size * Math.PI * 2)) * 180 / Math.PI;
+  return [west, south, east, north];
 }
 
 function normalizeViewLevelOffset(value: number | null | undefined): number | null {

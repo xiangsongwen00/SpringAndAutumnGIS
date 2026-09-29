@@ -3,6 +3,8 @@ import type {
   LayerCollectionChange,
   LayerCollectionListener,
   LayerDefinition,
+  LayerRuntimePatch,
+  LayerRuntimeState,
   LayerState,
   LayerStatePatch
 } from './LayerTypes';
@@ -11,6 +13,7 @@ import type {
 export class LayerCollection implements Iterable<LayerState> {
   private layers: LayerState[] = [];
   private readonly listeners = new Set<LayerCollectionListener>();
+  private readonly runtimeStates = new Map<string, LayerRuntimeState>();
   private _revision = 0;
 
   constructor(initialLayers: readonly LayerDefinition[] = []) {
@@ -43,17 +46,19 @@ export class LayerCollection implements Iterable<LayerState> {
     const layer = normalizeLayer(definition, this.layers.length);
     if (layer.visible) this.hideExclusivePeers(layer);
     this.layers.push(layer);
+    this.runtimeStates.set(layer.id, defaultRuntimeState());
     this.sortLayers();
-    if (notify) this.emit('add', layer.id);
+    if (notify) this.emit('add', layer.id, { layer });
     return layer;
   }
 
   remove(id: string): boolean {
     const index = this.layers.findIndex((layer) => layer.id === id);
     if (index < 0) return false;
-    this.layers.splice(index, 1);
+    const [removed] = this.layers.splice(index, 1);
+    this.runtimeStates.delete(id);
     this.normalizeOrder();
-    this.emit('remove', id);
+    this.emit('remove', id, { previousLayer: removed });
     return true;
   }
 
@@ -65,7 +70,10 @@ export class LayerCollection implements Iterable<LayerState> {
     if (next.visible) this.hideExclusivePeers(next);
     this.layers[index] = next;
     this.sortLayers();
-    this.emit(patch.order === undefined ? 'update' : 'reorder', id);
+    this.emit(patch.order === undefined ? 'update' : 'reorder', id, {
+      layer: next,
+      previousLayer: current
+    });
     return next;
   }
 
@@ -87,6 +95,7 @@ export class LayerCollection implements Iterable<LayerState> {
 
   replace(definitions: readonly LayerDefinition[]): void {
     this.layers = [];
+    this.runtimeStates.clear();
     for (const definition of definitions) this.add(definition, false);
     this.normalizeOrder();
     this.emit('reset');
@@ -99,6 +108,26 @@ export class LayerCollection implements Iterable<LayerState> {
 
   toJSON(): readonly LayerState[] {
     return this.values();
+  }
+
+  runtime(id: string): LayerRuntimeState | undefined {
+    return this.runtimeStates.get(id);
+  }
+
+  setRuntime(id: string, patch: LayerRuntimePatch): LayerRuntimeState {
+    if (!this.get(id)) throw new Error(`Unknown layer: ${id}`);
+    const current = this.runtimeStates.get(id) ?? defaultRuntimeState();
+    const next: LayerRuntimeState = Object.freeze({
+      phase: patch.phase ?? current.phase,
+      pending: normalizeCount(patch.pending ?? current.pending, 'pending'),
+      ready: normalizeCount(patch.ready ?? current.ready, 'ready'),
+      failed: normalizeCount(patch.failed ?? current.failed, 'failed'),
+      lastError: patch.lastError === undefined ? current.lastError : patch.lastError,
+      updatedAt: Date.now()
+    });
+    this.runtimeStates.set(id, next);
+    this.emit('status', id, { layer: this.get(id), runtime: next });
+    return next;
   }
 
   private hideExclusivePeers(layer: LayerState): void {
@@ -121,9 +150,13 @@ export class LayerCollection implements Iterable<LayerState> {
     this.layers = this.layers.map((layer, order) => ({ ...layer, order }));
   }
 
-  private emit(type: LayerCollectionChange['type'], layerId?: string): void {
+  private emit(
+    type: LayerCollectionChange['type'],
+    layerId?: string,
+    detail: Pick<LayerCollectionChange, 'layer' | 'previousLayer' | 'runtime'> = {}
+  ): void {
     this._revision += 1;
-    const change: LayerCollectionChange = { type, layerId, revision: this._revision };
+    const change: LayerCollectionChange = { type, layerId, revision: this._revision, ...detail };
     for (const listener of this.listeners) listener(change);
   }
 }
@@ -149,4 +182,22 @@ function normalizeLevelOffset(value: number): number {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function defaultRuntimeState(): LayerRuntimeState {
+  return Object.freeze({
+    phase: 'idle',
+    pending: 0,
+    ready: 0,
+    failed: 0,
+    lastError: null,
+    updatedAt: Date.now()
+  });
+}
+
+function normalizeCount(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`Layer runtime ${name} must be a non-negative integer.`);
+  }
+  return value;
 }

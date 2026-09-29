@@ -12,6 +12,8 @@ export type SelectedTile = Readonly<{
   id: TileId;
   rectangle: Rectangle;
   screenPixels: number;
+  /** Approximate distance from the viewport centre in normalized device coordinates. */
+  viewCenterDistance: number;
 }>;
 
 export type GlobeLodStats = Readonly<{
@@ -56,6 +58,7 @@ type ViewSurfaceSample = {
   latitude: number;
   point: THREE.Vector3;
   normal: THREE.Vector3;
+  screenDistance: number;
 };
 
 /** Camera-dependent selection only. It intentionally knows nothing about meshes or imagery. */
@@ -83,6 +86,7 @@ export class GlobeLodSelector {
   private readonly surfacePoint = new THREE.Vector3();
   private readonly surfaceToCamera = new THREE.Vector3();
   private readonly projectionView = new THREE.Matrix4();
+  private readonly projectedCenter = new THREE.Vector3();
   private readonly frustum = new THREE.Frustum();
   private readonly tileBounds = new THREE.Sphere();
   private readonly viewSurfaceSamples: ViewSurfaceSample[] = [];
@@ -282,7 +286,14 @@ export class GlobeLodSelector {
         this.projectedDetailPixels(sample.point, sample.normal, worldSpan)
       );
     }
-    return { id, rectangle, screenPixels, canSplit: true };
+    this.projectedCenter.copy(this.surfacePoint).applyMatrix4(this.projectionView);
+    let viewCenterDistance = Math.hypot(this.projectedCenter.x, this.projectedCenter.y);
+    for (const sample of this.viewSurfaceSamples) {
+      if (rectangleContains(rectangle, sample.longitude, sample.latitude)) {
+        viewCenterDistance = Math.min(viewCenterDistance, sample.screenDistance);
+      }
+    }
+    return { id, rectangle, screenPixels, viewCenterDistance, canSplit: true };
   }
 
   private projectedDetailPixels(
@@ -338,7 +349,8 @@ export class GlobeLodSelector {
         longitude,
         latitude,
         point,
-        normal: ellipsoidSurfaceNormal(point, this.ellipsoid)
+        normal: ellipsoidSurfaceNormal(point, this.ellipsoid),
+        screenDistance: Math.hypot(x, y)
       });
     }
   }

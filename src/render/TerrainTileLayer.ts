@@ -57,6 +57,7 @@ export type TerrainTextureBinding = Readonly<{
 export interface TerrainHeightSource extends SurfaceDisplacementBoundsSource {
   readonly revision: number;
   readonly exaggeration: number;
+  readonly enabled: boolean;
   resolveTexture(id: TileId): TerrainTextureBinding | undefined;
   sampleHeight(longitude: number, latitude: number): number | null;
 }
@@ -69,6 +70,8 @@ type TerrainRecord = {
   priority: number;
   lastUsedFrame: number;
   data: TerrainTileData | null;
+  controller: AbortController | null;
+  active: boolean;
 };
 type RenderTile = {
   mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
@@ -98,7 +101,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private fallbackCount = 0;
   private disposed = false;
   private suspended = false;
-  private enabled = true;
+  private _enabled = true;
   private _revision = 0;
   private lastSelection: readonly SelectedTile[] | null = null;
   private materialsDirty = true;
@@ -128,6 +131,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
     return this._revision;
   }
 
+  get enabled(): boolean {
+    return this._enabled;
+  }
+
   get stats(): TerrainTileLayerStats {
     const counts = { ready: 0, loading: 0, queued: 0, errors: 0 };
     for (const record of this.records.values()) {
@@ -149,7 +156,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   ): TerrainTileLayerStats {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
-    if (!this.enabled) return this.stats;
+    if (!this._enabled) return this.stats;
     const selectionChanged = selection !== this.lastSelection;
     if (selectionChanged) {
       this.frame += 1;
@@ -170,7 +177,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   resolveTexture(id: TileId): TerrainTextureBinding | undefined {
-    if (!this.enabled || !this.coverageReady) return undefined;
+    if (!this._enabled || !this.coverageReady) return undefined;
     const record = this.findReadyAncestor(id);
     if (!record?.data) return undefined;
     const levels = id.level - record.id.level;
@@ -200,7 +207,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   sampleHeight(longitude: number, latitude: number): number | null {
-    if (!this.enabled) return null;
+    if (!this._enabled) return null;
     const clampedLatitude = THREE.MathUtils.clamp(
       latitude,
       -WEB_MERCATOR_MAX_LATITUDE,
@@ -223,13 +230,13 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   maximumHeight(id: TileId): number | null {
-    if (!this.enabled) return 0;
+    if (!this._enabled) return 0;
     const range = this.heightRange(id);
     return range ? Math.max(0, range.maximumHeight) : null;
   }
 
   heightRange(id: TileId): SurfaceDisplacementRange | null {
-    if (!this.enabled) return { minimumHeight: 0, maximumHeight: 0 };
+    if (!this._enabled) return { minimumHeight: 0, maximumHeight: 0 };
     const record = this.findReadyAncestor(id);
     if (!record?.data) return null;
     return {
@@ -242,7 +249,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (this.disposed) return;
     this.disposed = true;
     for (const renderTile of this.renderTiles.values()) renderTile.mesh.material.dispose();
-    for (const record of this.records.values()) this.releaseTexture(record.data?.texture);
+    for (const record of this.records.values()) {
+      this.cancelRequest(record);
+      this.releaseTexture(record.data?.texture);
+    }
     for (const geometry of this.geometries.values()) geometry.dispose();
     this.renderTiles.clear();
     this.records.clear();
@@ -251,12 +261,17 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   setEnabled(enabled: boolean): void {
-    if (this.enabled === enabled) return;
-    this.enabled = enabled;
+    if (this._enabled === enabled) return;
+    this._enabled = enabled;
     this.object3d.visible = enabled;
     this.lastSelection = null;
     this.materialsDirty = true;
     this.coverageReady = !enabled;
+    if (!enabled) {
+      for (const record of this.records.values()) {
+        if (record.state === 'loading' || record.state === 'queued') this.cancelRequest(record);
+      }
+    }
     this._revision += 1;
   }
 
@@ -317,7 +332,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
-      (a, b) => b.id.level - a.id.level || b.screenPixels - a.screenPixels
+      (a, b) => a.viewCenterDistance - b.viewCenterDistance ||
+        b.screenPixels - a.screenPixels || b.id.level - a.id.level
     );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const selected = prioritized[rank];
@@ -342,7 +358,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       }
     }
     for (const [key, record] of this.records) {
-      if (this.visibleKeys.has(key) || record.state === 'ready' || record.state === 'loading') continue;
+      if (this.visibleKeys.has(key) || record.state === 'ready') continue;
+      this.cancelRequest(record);
       this.records.delete(key);
     }
   }
@@ -369,7 +386,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
       state: 'queued',
       priority,
       lastUsedFrame: this.frame,
-      data: null
+      data: null,
+      controller: null,
+      active: false
     });
   }
 
@@ -389,10 +408,13 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   private load(record: TerrainRecord): void {
     record.state = 'loading';
+    record.controller = new AbortController();
+    record.active = true;
     this.activeRequests += 1;
-    void this.provider.loadTile(record.id).then(
+    void this.provider.loadTile(record.id, record.controller.signal).then(
       (data) => {
-        this.activeRequests = Math.max(0, this.activeRequests - 1);
+        this.releaseActiveRequest(record);
+        record.controller = null;
         if (this.disposed || this.records.get(record.key) !== record) {
           this.releaseTexture(data.texture);
         } else {
@@ -406,11 +428,24 @@ export class TerrainTileLayer implements TerrainHeightSource {
         this.pumpQueue();
       },
       () => {
-        this.activeRequests = Math.max(0, this.activeRequests - 1);
+        this.releaseActiveRequest(record);
+        record.controller = null;
         if (!this.disposed && this.records.get(record.key) === record) record.state = 'error';
         this.pumpQueue();
       }
     );
+  }
+
+  private cancelRequest(record: TerrainRecord): void {
+    record.controller?.abort();
+    record.controller = null;
+    this.releaseActiveRequest(record);
+  }
+
+  private releaseActiveRequest(record: TerrainRecord): void {
+    if (!record.active) return;
+    record.active = false;
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
   }
 
   private syncMaterials(selection: readonly SelectedTile[]): void {

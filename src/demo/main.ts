@@ -3,6 +3,7 @@ import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
   GlobeEngine,
+  GeoJsonLayer,
   LayerCollection,
   TerrainRgbProvider,
   type DataSourceDefinition,
@@ -40,6 +41,12 @@ const terrainValue = requiredElement<HTMLElement>('#terrain-value');
 const baseLayerSelect = requiredElement<HTMLSelectElement>('#base-layer-select');
 const annotationControl = requiredElement<HTMLElement>('#annotation-control');
 const annotationToggle = requiredElement<HTMLInputElement>('#annotation-toggle');
+const businessLayerControl = requiredElement<HTMLButtonElement>('#business-layer-control');
+const businessLayerTest = requiredElement<HTMLButtonElement>('#business-layer-test');
+const geoJsonTest = requiredElement<HTMLButtonElement>('#geojson-test');
+const businessLayerPanel = requiredElement<HTMLElement>('#business-layer-panel');
+const businessLayerList = requiredElement<HTMLElement>('#business-layer-list');
+const businessLayerSummary = requiredElement<HTMLElement>('#business-layer-summary');
 const terrainToggle = requiredElement<HTMLButtonElement>('#terrain-toggle');
 const terrainTest = requiredElement<HTMLButtonElement>('#terrain-test');
 const attribution = requiredElement<HTMLAnchorElement>('#map-attribution');
@@ -74,7 +81,9 @@ const layers = new LayerCollection(
   }))
 );
 const baseLayers = layers.values().filter((layer) => layer.role === 'base');
+const businessLayers = layers.values().filter((layer) => layer.role === 'overlay');
 populateBaseLayerOptions(baseLayers);
+populateBusinessLayerControls(businessLayers);
 
 let activeBaseLayer = chooseInitialBaseLayer(baseLayers);
 const initialLevelOffset = queryNumber(
@@ -86,11 +95,37 @@ const initialLevelOffset = queryNumber(
 activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, initialLevelOffset);
 layers.setVisible(activeBaseLayer.id, true);
 baseLayerSelect.value = activeBaseLayer.id;
-let baseProvider: RasterTileProvider = registry.createRasterProvider(
-  activeBaseLayer.sourceId,
-  { levelOffset: activeBaseLayer.levelOffset }
-);
+let baseProvider: RasterTileProvider;
+try {
+  layers.setRuntime(activeBaseLayer.id, { phase: 'loading', pending: 1 });
+  baseProvider = await registry.createRasterProviderAsync(
+    activeBaseLayer.sourceId,
+    { levelOffset: activeBaseLayer.levelOffset }
+  );
+  layers.setRuntime(activeBaseLayer.id, { phase: 'ready', pending: 0, ready: 1 });
+} catch (error) {
+  const failedLayer = activeBaseLayer;
+  layers.setRuntime(failedLayer.id, {
+    phase: 'error', pending: 0, failed: 1,
+    lastError: error instanceof Error ? error.message : String(error)
+  });
+  const fallback = baseLayers.find((layer) =>
+    layer.id !== failedLayer.id && registry.availability(layer.sourceId).available &&
+    registry.get(layer.sourceId)?.capabilitiesUrl === undefined
+  );
+  if (!fallback) throw error;
+  console.error(`[图层 ${failedLayer.id}] 初始加载失败，回退到 ${fallback.id}`, error);
+  layers.setVisible(fallback.id, true);
+  activeBaseLayer = layers.get(fallback.id)!;
+  baseLayerSelect.value = activeBaseLayer.id;
+  baseProvider = await registry.createRasterProviderAsync(activeBaseLayer.sourceId, {
+    levelOffset: activeBaseLayer.levelOffset
+  });
+  layers.setRuntime(activeBaseLayer.id, { phase: 'ready', pending: 0, ready: 1 });
+}
 let annotationLayerId: string | null = null;
+const businessLayerRevisions = new Map<string, number>();
+const businessLayerControllers = new Map<string, AbortController>();
 
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
 let terrainEnabled = terrainEnabledByConfig;
@@ -218,7 +253,9 @@ const engine = new GlobeEngine({
 applyActiveLayerUi();
 engine.start();
 
-baseLayerSelect.addEventListener('change', () => {
+let layerSwitchRevision = 0;
+baseLayerSelect.addEventListener('change', async () => {
+  const revision = ++layerSwitchRevision;
   const next = layers.get(baseLayerSelect.value);
   if (!next || next.role !== 'base') return;
   const availability = registry.availability(next.sourceId);
@@ -226,12 +263,29 @@ baseLayerSelect.addEventListener('change', () => {
     baseLayerSelect.value = activeBaseLayer.id;
     return;
   }
+  const previous = activeBaseLayer;
+  layers.setRuntime(next.id, { phase: 'loading', pending: 1, failed: 0, lastError: null });
+  let provider: RasterTileProvider;
+  try {
+    provider = await registry.createRasterProviderAsync(next.sourceId, {
+      levelOffset: next.levelOffset
+    });
+  } catch (error) {
+    if (revision !== layerSwitchRevision) return;
+    layers.setRuntime(next.id, {
+      phase: 'error', pending: 0, failed: 1,
+      lastError: error instanceof Error ? error.message : String(error)
+    });
+    baseLayerSelect.value = previous.id;
+    console.error(`[图层 ${next.id}] 加载失败`, error);
+    return;
+  }
+  if (revision !== layerSwitchRevision) return;
   layers.setVisible(next.id, true);
   activeBaseLayer = layers.get(next.id)!;
-  baseProvider = registry.createRasterProvider(activeBaseLayer.sourceId, {
-    levelOffset: activeBaseLayer.levelOffset
-  });
+  baseProvider = provider;
   engine.setImageryProvider(baseProvider);
+  layers.setRuntime(next.id, { phase: 'ready', pending: 0, ready: 1, failed: 0 });
   annotationToggle.checked = false;
   removeAnnotationLayer();
   applyActiveLayerUi();
@@ -268,13 +322,74 @@ annotationToggle.addEventListener('change', () => {
   });
   engine.addImageryLayer('annotation', provider, {
     overlay: true,
-    order: 2,
-    surfaceOffset: 0.45,
+    // System basemap labels are always composed above business overlays.
+    order: 10_000,
+    surfaceOffset: 0.1,
     maxCachedTiles: 1_024,
     maxTextureBytes: 96 * 1024 * 1024
   });
   annotationLayerId = candidate.id;
   layers.setVisible(candidate.id, true);
+});
+
+businessLayerControl.addEventListener('click', () => {
+  const open = businessLayerPanel.hidden;
+  businessLayerPanel.hidden = !open;
+  businessLayerControl.setAttribute('aria-expanded', String(open));
+});
+
+businessLayerTest.addEventListener('click', async () => {
+  const layer = layers.get('business-yongyuan-static');
+  if (!layer) return;
+  const checkbox = businessLayerList.querySelector<HTMLInputElement>(
+    `[data-layer-toggle="${layer.id}"]`
+  );
+  if (checkbox && !checkbox.checked) {
+    checkbox.checked = true;
+    try {
+      await setBusinessLayerEnabled(layer.id, true);
+    } catch {
+      checkbox.checked = false;
+      return;
+    }
+  }
+  businessLayerPanel.hidden = false;
+  businessLayerControl.setAttribute('aria-expanded', 'true');
+  engine.flyTo({
+    longitude: 107.295381,
+    latitude: 30.240534,
+    altitude: 1_800,
+    heading: 0,
+    pitch: -90,
+    duration: 1_500
+  });
+});
+
+geoJsonTest.addEventListener('click', async () => {
+  const layer = layers.get('geojson-china-provinces');
+  if (!layer) return;
+  const checkbox = businessLayerList.querySelector<HTMLInputElement>(
+    `[data-layer-toggle="${layer.id}"]`
+  );
+  if (checkbox && !checkbox.checked) {
+    checkbox.checked = true;
+    try {
+      await setBusinessLayerEnabled(layer.id, true);
+    } catch {
+      checkbox.checked = false;
+      return;
+    }
+  }
+  businessLayerPanel.hidden = false;
+  businessLayerControl.setAttribute('aria-expanded', 'true');
+  engine.flyTo({
+    longitude: 104,
+    latitude: 35,
+    altitude: 5_500_000,
+    heading: 0,
+    pitch: -90,
+    duration: 1_500
+  });
 });
 
 window.addEventListener('pagehide', () => {
@@ -340,6 +455,157 @@ function populateBaseLayerOptions(candidates: readonly LayerState[]): void {
     option.textContent = `${layer.name}${suffix}`;
     baseLayerSelect.appendChild(option);
   }
+}
+
+function populateBusinessLayerControls(candidates: readonly LayerState[]): void {
+  businessLayerList.replaceChildren();
+  for (const layer of candidates) {
+    const source = registry.get(layer.sourceId);
+    if (!source) continue;
+    const availability = registry.availability(source.id);
+    const renderSupported = layer.kind === 'imagery' || layer.kind === 'rasterized-vector' ||
+      (layer.kind === 'feature' && source.kind === 'geojson');
+    const enabled = availability.available && renderSupported;
+    const row = document.createElement('label');
+    row.className = `business-layer-row${enabled ? '' : ' is-disabled'}`;
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = layer.visible;
+    checkbox.disabled = !enabled;
+    checkbox.dataset.layerToggle = layer.id;
+    const identity = document.createElement('span');
+    const name = document.createElement('span');
+    name.className = 'business-layer-row__name';
+    name.textContent = layer.name;
+    const status = document.createElement('small');
+    status.className = 'business-layer-row__state';
+    status.dataset.layerStatus = layer.id;
+    status.textContent = enabled ? '未加载' : availability.supported ? '当前渲染器不支持' : '等待原生矢量渲染';
+    identity.append(name, status);
+    const opacity = document.createElement('input');
+    opacity.type = 'range';
+    opacity.min = '0';
+    opacity.max = '1';
+    opacity.step = '0.05';
+    opacity.value = String(layer.opacity);
+    opacity.disabled = !enabled;
+    opacity.setAttribute('aria-label', `${layer.name}透明度`);
+    checkbox.addEventListener('change', () => {
+      void setBusinessLayerEnabled(layer.id, checkbox.checked).catch(() => {
+        checkbox.checked = false;
+      });
+    });
+    opacity.addEventListener('input', () => {
+      const value = Number(opacity.value);
+      layers.setOpacity(layer.id, value);
+      engine.getImageryLayer(businessEngineLayerId(layer.id))?.setOpacity(value);
+      engine.getFeatureLayer(businessEngineLayerId(layer.id))?.setOpacity(value);
+    });
+    row.append(checkbox, identity, opacity);
+    businessLayerList.appendChild(row);
+  }
+  updateBusinessLayerSummary();
+}
+
+async function setBusinessLayerEnabled(layerId: string, enabled: boolean): Promise<void> {
+  const layer = layers.get(layerId);
+  if (!layer || layer.role !== 'overlay') return;
+  const revision = (businessLayerRevisions.get(layerId) ?? 0) + 1;
+  businessLayerRevisions.set(layerId, revision);
+  businessLayerControllers.get(layerId)?.abort();
+  businessLayerControllers.delete(layerId);
+  const engineLayerId = businessEngineLayerId(layer.id);
+  if (!enabled) {
+    engine.removeImageryLayer(engineLayerId);
+    engine.removeFeatureLayer(engineLayerId);
+    layers.setVisible(layer.id, false);
+    layers.setRuntime(layer.id, { phase: 'idle', pending: 0, ready: 0, failed: 0, lastError: null });
+    updateBusinessLayerStatus(layer.id, 'idle', '未加载');
+    updateBusinessLayerSummary();
+    return;
+  }
+  if (engine.getImageryLayer(engineLayerId) || engine.getFeatureLayer(engineLayerId)) return;
+  layers.setRuntime(layer.id, { phase: 'loading', pending: 1, failed: 0, lastError: null });
+  updateBusinessLayerStatus(layer.id, 'loading', '加载配置…');
+  try {
+    const controller = new AbortController();
+    businessLayerControllers.set(layerId, controller);
+    const sourceDefinition = registry.get(layer.sourceId);
+    if (layer.kind === 'feature' && sourceDefinition?.kind === 'geojson') {
+      updateBusinessLayerStatus(layer.id, 'loading', '解析 GeoJSON…');
+      const collection = await registry.createGeoJsonSource(layer.sourceId).load(controller.signal);
+      if (businessLayerRevisions.get(layerId) !== revision) return;
+      const featureLayer = new GeoJsonLayer(engine.ellipsoid, collection, {
+        color: geoJsonLayerColor(layer.id),
+        opacity: layer.opacity,
+        heightOffset: 3,
+        terrain: engine.terrain ?? undefined,
+        terrainSampleBudget: 4096,
+        order: 200 + layer.order
+      });
+      engine.addFeatureLayer(engineLayerId, featureLayer);
+      updateBusinessLayerStatus(layer.id, 'ready', `${collection.features.length} 个要素`);
+    } else {
+      const provider = await registry.createRasterProviderAsync(layer.sourceId, {
+        levelOffset: layer.levelOffset
+      });
+      if (businessLayerRevisions.get(layerId) !== revision) return;
+      engine.addImageryLayer(engineLayerId, provider, {
+        overlay: true,
+        opacity: layer.opacity,
+        order: 100 + layer.order,
+        // All surface rasters share the base mesh/depth and differ only by
+        // render order; physical metre offsets cause terrain-shaped holes.
+        surfaceOffset: 0.1,
+        contentKind: layer.kind === 'rasterized-vector' ? 'rasterized-vector' : 'imagery',
+        maxCachedTiles: 1_024,
+        maxTextureBytes: 128 * 1024 * 1024
+      });
+      updateBusinessLayerStatus(layer.id, 'ready', '已叠加');
+    }
+    if (businessLayerRevisions.get(layerId) !== revision) return;
+    layers.setVisible(layer.id, true);
+    layers.setRuntime(layer.id, { phase: 'ready', pending: 0, ready: 1, failed: 0 });
+  } catch (error) {
+    if (businessLayerRevisions.get(layerId) !== revision) return;
+    const message = error instanceof Error ? error.message : String(error);
+    layers.setVisible(layer.id, false);
+    layers.setRuntime(layer.id, { phase: 'error', pending: 0, failed: 1, lastError: message });
+    updateBusinessLayerStatus(layer.id, 'error', message);
+    console.error(`[业务图层 ${layer.id}] 加载失败`, error);
+    throw error;
+  } finally {
+    if (businessLayerControllers.get(layerId)?.signal.aborted === false) {
+      businessLayerControllers.delete(layerId);
+    }
+    updateBusinessLayerSummary();
+  }
+}
+
+function updateBusinessLayerStatus(
+  layerId: string,
+  phase: 'idle' | 'loading' | 'ready' | 'error',
+  message: string
+): void {
+  const element = businessLayerList.querySelector<HTMLElement>(`[data-layer-status="${layerId}"]`);
+  if (!element) return;
+  element.dataset.phase = phase;
+  element.textContent = message;
+}
+
+function updateBusinessLayerSummary(): void {
+  const enabled = businessLayers.filter((layer) => layers.get(layer.id)?.visible).length;
+  businessLayerSummary.textContent = `${enabled} 个已启用`;
+}
+
+function businessEngineLayerId(layerId: string): string {
+  return `business:${layerId}`;
+}
+
+function geoJsonLayerColor(layerId: string): number {
+  if (layerId.includes('provinces')) return 0x32e6a1;
+  if (layerId.includes('cities')) return 0x64d8ff;
+  return 0xffc857;
 }
 
 function chooseInitialBaseLayer(candidates: readonly LayerState[]): LayerState {
