@@ -1,0 +1,142 @@
+{
+  "version": 8,
+  "name": "China Admin Business Overlay",
+  "sources": {
+    "china_admin": {
+      "type": "vector"
+    }
+  },
+  "layers": [
+    {
+      "id": "country-fill",
+      "type": "fill",
+      "source": "china_admin",
+      "source-layer": "china_boundary",
+      "maxzoom": 5,
+      "paint": {
+        "fill-color": "#42b8d8",
+        "fill-opacity": 0.08,
+        "fill-outline-color": "#08364a"
+      }
+    },
+    {
+      "id": "province-fill",
+      "type": "fill",
+      "source": "china_admin",
+      "source-layer": "china_province",
+      "minzoom": 3,
+      "paint": {
+        "fill-color": "#4fd6a5",
+        "fill-opacity": 0.13,
+        "fill-outline-color": "#126a56"
+      }
+    },
+    {
+      "id": "city-fill",
+      "type": "fill",
+      "source": "china_admin",
+      "source-layer": "china_city",
+      "minzoom": 5,
+      "paint": {
+        "fill-color": "#60d7ff",
+        "fill-opacity": 0.1,
+        "fill-outline-color": "#16708e"
+      }
+    },
+    {
+      "id": "county-fill",
+      "type": "fill",
+      "source": "china_admin",
+      "source-layer": "china_county",
+      "minzoom": 7,
+      "paint": {
+        "fill-color": "#ffd166",
+        "fill-opacity": 0.08,
+        "fill-outline-color": "#a66b00"
+      }
+    },
+    {
+      "id": "town-line",
+      "type": "line",
+      "source": "china_admin",
+      "source-layer": "china_town",
+      "minzoom": 9,
+      "paint": {
+        "line-color": "#ff9f43",
+        "line-opacity": 0.9,
+        "line-width": 0.8,
+        "line-dasharray": [3, 2]
+      }
+    },
+    {
+      "id": "province-label",
+      "type": "symbol",
+      "source": "china_admin",
+      "source-layer": "china_province_label",
+      "minzoom": 3,
+      "maxzoom": 8,
+      "layout": {
+        "text-field": "{name}",
+        "text-size": 12,
+        "text-padding": 3
+      },
+      "paint": {
+        "text-color": "#073b4c",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.5
+      }
+    },
+    {
+      "id": "city-label",
+      "type": "symbol",
+      "source": "china_admin",
+      "source-layer": "china_city_label",
+      "minzoom": 5,
+      "maxzoom": 10,
+      "layout": {
+        "text-field": "{name}",
+        "text-size": 11,
+        "text-padding": 2
+      },
+      "paint": {
+        "text-color": "#0b526a",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.25
+      }
+    },
+    {
+      "id": "county-label",
+      "type": "symbol",
+      "source": "china_admin",
+      "source-layer": "china_county_label",
+      "minzoom": 8,
+      "layout": {
+        "text-field": "{name}",
+        "text-size": 10,
+        "text-padding": 2
+      },
+      "paint": {
+        "text-color": "#694400",
+        "text-halo-color": "#fffaf0",
+        "text-halo-width": 1
+      }
+    },
+    {
+      "id": "town-label",
+      "type": "symbol",
+      "source": "china_admin",
+      "source-layer": "china_town_label",
+      "minzoom": 10,
+      "layout": {
+        "text-field": "{name}",
+        "text-size": 9,
+        "text-padding": 2
+      },
+      "paint": {
+        "text-color": "#8f4b00",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1
+      }
+    }
+  ]
+}

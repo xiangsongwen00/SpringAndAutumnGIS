@@ -91,8 +91,11 @@ export type {
   DataSourceStatus,
   RasterProviderOverrides
 } from './core/layers/DataSourceRegistry';
+export type { MvtVectorLayerOverrides } from './core/layers/DataSourceRegistry';
 export { ArcGisVectorRasterProvider } from './core/tiles/ArcGisVectorRasterProvider';
 export type { ArcGisVectorRasterProviderOptions } from './core/tiles/ArcGisVectorRasterProvider';
+export { MvtRasterProvider } from './core/tiles/MvtRasterProvider';
+export type { MvtRasterProviderOptions } from './core/tiles/MvtRasterProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';
 export type { VectorStyleTileProviderOptions } from './core/tiles/VectorStyleTileProvider';
 export { MvtTileSource } from './vector/source/MvtTileSource';
@@ -100,6 +103,12 @@ export type { MvtTileSourceOptions } from './vector/source/MvtTileSource';
 export { MvtDecoder } from './vector/decoder/MvtDecoder';
 export { ArcGisStyleAdapter } from './vector/style/ArcGisStyleAdapter';
 export type { ArcGisStyleAdapterOptions } from './vector/style/ArcGisStyleAdapter';
+export { MapStyleLoader, analyzeMapStyle, validateMapStyle } from './vector/style/MapStyleLoader';
+export type {
+  MapStyleCapabilityIssue,
+  MapStyleCapabilityReport,
+  MapStyleLoaderOptions
+} from './vector/style/MapStyleLoader';
 export { CanvasVectorRasterizer } from './vector/raster/CanvasVectorRasterizer';
 export type { CanvasVectorRasterizerOptions } from './vector/raster/CanvasVectorRasterizer';
 export type {
@@ -145,6 +154,8 @@ export type { GlobeGridRendererOptions } from './render/GlobeGridRenderer';
 export { RasterTileLayer } from './render/RasterTileLayer';
 export { GeoJsonLayer } from './render/GeoJsonLayer';
 export type { GeoJsonLayerOptions } from './render/GeoJsonLayer';
+export { MvtVectorLayer, geographicDegreesToShaderRadians } from './render/MvtVectorLayer';
+export type { MvtVectorLayerOptions, MvtVectorLayerStats } from './render/MvtVectorLayer';
 export type { RasterTileLayerOptions, RasterTileLayerStats } from './render/RasterTileLayer';
 export { TerrainTileLayer } from './render/TerrainTileLayer';
 export type {

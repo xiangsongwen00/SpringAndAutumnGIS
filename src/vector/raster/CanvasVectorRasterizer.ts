@@ -77,6 +77,8 @@ export class CanvasVectorRasterizer {
           drawFill(context, feature, layer, zoom, this.tileSize);
         } else if (layer.type === 'line') {
           drawLine(context, feature, layer, zoom, this.tileSize, renderScale);
+        } else if (layer.type === 'circle') {
+          drawCircle(context, feature, layer, zoom, this.tileSize, renderScale);
         } else if (layer.type === 'symbol') {
           symbolCandidates.push({
             feature,
@@ -103,6 +105,47 @@ export class CanvasVectorRasterizer {
     }
     context.globalAlpha = 1;
     context.setLineDash([]);
+  }
+}
+
+function drawCircle(
+  context: CanvasRenderingContext2D,
+  feature: DecodedFeature,
+  layer: StyleLayer,
+  zoom: number,
+  tileSize: number,
+  renderScale: number
+): void {
+  if (feature.type !== 1) return;
+  const radius = Math.max(
+    0.5,
+    numberValue(resolveStyleValue(layer.paint?.['circle-radius'], zoom, feature.properties), 5) * renderScale
+  );
+  const strokeWidth = Math.max(
+    0,
+    numberValue(resolveStyleValue(layer.paint?.['circle-stroke-width'], zoom, feature.properties), 0) * renderScale
+  );
+  const scale = tileSize / feature.extent;
+  context.globalAlpha = numberValue(
+    resolveStyleValue(layer.paint?.['circle-opacity'], zoom, feature.properties),
+    1
+  );
+  context.fillStyle = colorValue(
+    resolveStyleValue(layer.paint?.['circle-color'], zoom, feature.properties),
+    '#36c5f0'
+  );
+  context.strokeStyle = colorValue(
+    resolveStyleValue(layer.paint?.['circle-stroke-color'], zoom, feature.properties),
+    '#ffffff'
+  );
+  context.lineWidth = strokeWidth;
+  for (const line of feature.geometry) {
+    for (const point of line) {
+      context.beginPath();
+      context.arc(point.x * scale, point.y * scale, radius, 0, Math.PI * 2);
+      context.fill();
+      if (strokeWidth > 0) context.stroke();
+    }
   }
 }
 

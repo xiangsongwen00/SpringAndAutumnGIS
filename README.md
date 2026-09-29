@@ -28,12 +28,16 @@ LOD 选择器不依赖瓦片纹理、网络请求或缓存；影像层消费同�
 | 能力 | 当前状态 | 产品含义 |
 |---|---|---|
 | URL template/TileJSON 请求与 PBF 解码 | 已有基础实现 | 本机 `china_admin` z0–z10 已验证可请求、可解码 |
-| `draped-raster` | 具备实现基础，待通用 Provider/UI 接线 | MVT 按样式栅格化后复用公共地形表面，可贴地、可换样式，但不是可编辑矢量 |
-| `native-vector` | 未完成 | 尚缺 Worker Bucket、原生 fill/line/circle、地形绑定、拾取和 SymbolPass |
+| `draped-raster` | 已实现试验版 | `MvtRasterProvider` 接受 Style v8 URL/对象，把 MVT 栅格化后复用公共地形表面；可贴地、可换样式，但不是可编辑矢量 |
+| `native-vector` | 试验子集 | `china_admin` 已走原生 GPU fill/line/circle、渐进地形采样和简化 symbol；尚缺 Worker Bucket、拾取、glyph/sprite 与完整 SymbolPass |
 
 首版样式自定义以 Mapbox Style v8 **受控子集**为边界：基础 background/fill/line/circle、`source-layer`、层级显隐、常用 filter/expression、颜色、透明度、线宽/虚线/端点连接和圆点样式。glyph/sprite、沿线文字、pattern/gradient、heatmap、hillshade、fill-extrusion 等不能静默忽略，接入界面必须显示“支持/降级/不支持”诊断。完整设计和实施顺序见 [`设计.md`](./设计.md#8-原生矢量瓦片渲染路线)，服务与层级样本见 [`测试数据.md`](./测试数据.md#4-localhost8085--china_admin-矢量瓦片)。
 
-Esri 矢量底图当前使用 `levelOffset: -2`，但制图层级与球面叶节点解耦：整个视口统一使用 `floor(相机层级 - 2)` 作为最高数据/样式层级，再由更精细的球面几何通过 UV 裁切共享这些纹理。相机 5.1 级统一使用 Esri 3 级，相机 16.2 级统一使用 Esri 14 级。Google 卫星影像保持 `levelOffset: 0`，与球面 LOD 一一对应。
+演示中 `public/En.json` 作为标准 Style v8 输入驱动“Esri 矢量底图（兼容栅格化）”，可与影像、WMTS 和普通栅格底图互斥切换；`china_admin` 使用 [`public/styles/china-admin-overlay.json`](./public/styles/china-admin-overlay.json) 进入原生 GPU 业务矢量通道，只在“业务图层”面板中叠加，不加入底图互斥组。原生通道当前覆盖基础 fill/line/circle/symbol 子集，复杂 Esri 底图仍保留 Canvas 兼容路径。库调用方也可以直接向 `MvtRasterProvider` 传入内联 `MapStyle`。
+
+当前能力扫描结果：`En.json` 共 913 层，其中 212 层完整支持、701 层因 sprite icon、沿线文字等能力降级、0 层属于未知图层类型；这说明它可以作为兼容底图测试，但尚不等价于完整 Mapbox/ArcGIS 制图效果。`china_admin` 的 9 个自定义图层落在原生通道当前支持子集；注记只在目标数据层级参与视口碰撞，并受瓦片级和全视口预算限制，父级回退瓦片只保留点线面。
+
+底图与业务 MVT 默认使用 `levelOffset: -1.7`，但数据层级与球面叶节点解耦：整个视口统一使用 `floor(相机层级 + levelOffset)` 作为最高数据/样式层级，再由更精细的球面几何复用相应内容。图层目录可显式覆盖该值，运行统计会显示实际数据层级，避免把相机 LOD 与源瓦片 z 混为一谈。
 
 矢量模式通常把视口最低叶节点约束为“当前相机整数层级减 1”，避免卫星影像可接受、但矢量制图会产生样式断层的超大跨级混合。若极地或特殊角度触及瓦片预算，运行时会整体降低最低层级后重新选择，禁止输出跨越多级的半完成叶节点集合。标注在单瓦片内执行碰撞检测和边缘安全区过滤；跨瓦片的完整屏幕空间标注将在独立符号渲染层中继续实现。
 

@@ -5,6 +5,7 @@ import {
   GlobeEngine,
   GeoJsonLayer,
   LayerCollection,
+  MvtRasterProvider,
   TerrainRgbProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
@@ -102,6 +103,7 @@ try {
     activeBaseLayer.sourceId,
     { levelOffset: activeBaseLayer.levelOffset }
   );
+  await diagnoseMvtStyle(baseProvider, `底图 ${activeBaseLayer.id}`);
   layers.setRuntime(activeBaseLayer.id, { phase: 'ready', pending: 0, ready: 1 });
 } catch (error) {
   const failedLayer = activeBaseLayer;
@@ -121,6 +123,7 @@ try {
   baseProvider = await registry.createRasterProviderAsync(activeBaseLayer.sourceId, {
     levelOffset: activeBaseLayer.levelOffset
   });
+  await diagnoseMvtStyle(baseProvider, `回退底图 ${activeBaseLayer.id}`);
   layers.setRuntime(activeBaseLayer.id, { phase: 'ready', pending: 0, ready: 1 });
 }
 let annotationLayerId: string | null = null;
@@ -179,6 +182,13 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败` +
       (stats.imagery.lastError ? ` · ${stats.imagery.lastError}` : '')
     : '影像未启用';
+  const nativeMvt = [...stats.vectorLayers.values()][0];
+  if (nativeMvt) {
+    imageryValue.textContent +=
+      ` ｜ 业务 MVT ${nativeMvt.sourceLevel}级 · ${nativeMvt.ready} 就绪 · ` +
+      `${nativeMvt.loading} 加载 · ${nativeMvt.queued} 排队 · ${nativeMvt.visible} 显示 · ` +
+      `${nativeMvt.visibleLabels}/${nativeMvt.allocatedLabels} 注记 · ${nativeMvt.errors} 失败`;
+  }
   terrainValue.textContent = stats.terrain
     ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.stitchedEdges} 接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
@@ -235,7 +245,11 @@ const engine = new GlobeEngine({
     maxTextureBytes: 192 * 1024 * 1024,
     surfaceOffset: 0.1
   },
-  initialView: { longitude: 105, latitude: 32, altitude: 8_600_000 },
+  initialView: {
+    longitude: queryNumber('longitude', 105, -180, 180),
+    latitude: queryNumber('latitude', 32, -85, 85),
+    altitude: queryNumber('altitude', 8_600_000, 100, 100_000_000)
+  },
   navigation: {
     rotateSpeed: 0.38,
     minRotateSpeed: 0.000001,
@@ -252,6 +266,7 @@ const engine = new GlobeEngine({
 
 applyActiveLayerUi();
 engine.start();
+void enableQueryBusinessLayers();
 
 let layerSwitchRevision = 0;
 baseLayerSelect.addEventListener('change', async () => {
@@ -270,6 +285,7 @@ baseLayerSelect.addEventListener('change', async () => {
     provider = await registry.createRasterProviderAsync(next.sourceId, {
       levelOffset: next.levelOffset
     });
+    await diagnoseMvtStyle(provider, `底图 ${next.id}`);
   } catch (error) {
     if (revision !== layerSwitchRevision) return;
     layers.setRuntime(next.id, {
@@ -444,7 +460,7 @@ function populateBaseLayerOptions(candidates: readonly LayerState[]): void {
     option.value = layer.id;
     option.disabled = !availability.available;
     const suffix = !availability.supported
-      ? '（等待原生矢量渲染）'
+      ? source.kind === 'mvt' ? '（缺少 MVT 样式）' : '（当前不支持）'
       : availability.missingVariables.length > 0
         ? `（缺少 ${availability.missingVariables.join('、')}）`
         : source.coordinateReference === 'gcj02-webmercator-in-china'
@@ -457,6 +473,23 @@ function populateBaseLayerOptions(candidates: readonly LayerState[]): void {
   }
 }
 
+async function enableQueryBusinessLayers(): Promise<void> {
+  const requested = new URLSearchParams(window.location.search).getAll('businessLayer');
+  for (const layerId of requested) {
+    const layer = layers.get(layerId);
+    if (!layer || layer.role !== 'overlay') continue;
+    const checkbox = businessLayerList.querySelector<HTMLInputElement>(
+      `[data-layer-toggle="${layerId}"]`
+    );
+    try {
+      await setBusinessLayerEnabled(layerId, true);
+      if (checkbox) checkbox.checked = true;
+    } catch {
+      if (checkbox) checkbox.checked = false;
+    }
+  }
+}
+
 function populateBusinessLayerControls(candidates: readonly LayerState[]): void {
   businessLayerList.replaceChildren();
   for (const layer of candidates) {
@@ -464,6 +497,7 @@ function populateBusinessLayerControls(candidates: readonly LayerState[]): void 
     if (!source) continue;
     const availability = registry.availability(source.id);
     const renderSupported = layer.kind === 'imagery' || layer.kind === 'rasterized-vector' ||
+      layer.kind === 'vector' ||
       (layer.kind === 'feature' && source.kind === 'geojson');
     const enabled = availability.available && renderSupported;
     const row = document.createElement('label');
@@ -480,7 +514,11 @@ function populateBusinessLayerControls(candidates: readonly LayerState[]): void 
     const status = document.createElement('small');
     status.className = 'business-layer-row__state';
     status.dataset.layerStatus = layer.id;
-    status.textContent = enabled ? '未加载' : availability.supported ? '当前渲染器不支持' : '等待原生矢量渲染';
+    status.textContent = enabled ? '未加载' : availability.supported
+      ? '当前渲染器不支持'
+      : source.kind === 'mvt'
+        ? '缺少 MVT 样式'
+        : '当前数据源不支持';
     identity.append(name, status);
     const opacity = document.createElement('input');
     opacity.type = 'range';
@@ -500,6 +538,7 @@ function populateBusinessLayerControls(candidates: readonly LayerState[]): void 
       layers.setOpacity(layer.id, value);
       engine.getImageryLayer(businessEngineLayerId(layer.id))?.setOpacity(value);
       engine.getFeatureLayer(businessEngineLayerId(layer.id))?.setOpacity(value);
+      engine.getVectorLayer(businessEngineLayerId(layer.id))?.setOpacity(value);
     });
     row.append(checkbox, identity, opacity);
     businessLayerList.appendChild(row);
@@ -518,20 +557,42 @@ async function setBusinessLayerEnabled(layerId: string, enabled: boolean): Promi
   if (!enabled) {
     engine.removeImageryLayer(engineLayerId);
     engine.removeFeatureLayer(engineLayerId);
+    engine.removeVectorLayer(engineLayerId);
     layers.setVisible(layer.id, false);
     layers.setRuntime(layer.id, { phase: 'idle', pending: 0, ready: 0, failed: 0, lastError: null });
     updateBusinessLayerStatus(layer.id, 'idle', '未加载');
     updateBusinessLayerSummary();
     return;
   }
-  if (engine.getImageryLayer(engineLayerId) || engine.getFeatureLayer(engineLayerId)) return;
+  if (
+    engine.getImageryLayer(engineLayerId) ||
+    engine.getFeatureLayer(engineLayerId) ||
+    engine.getVectorLayer(engineLayerId)
+  ) return;
   layers.setRuntime(layer.id, { phase: 'loading', pending: 1, failed: 0, lastError: null });
   updateBusinessLayerStatus(layer.id, 'loading', '加载配置…');
   try {
     const controller = new AbortController();
     businessLayerControllers.set(layerId, controller);
     const sourceDefinition = registry.get(layer.sourceId);
-    if (layer.kind === 'feature' && sourceDefinition?.kind === 'geojson') {
+    if (layer.kind === 'vector' && sourceDefinition?.kind === 'mvt') {
+      updateBusinessLayerStatus(layer.id, 'loading', '解析 MVT 样式…');
+      const vectorLayer = registry.createMvtVectorLayer(layer.sourceId, engine.ellipsoid, {
+        levelOffset: layer.levelOffset,
+        opacity: layer.opacity,
+        order: 300 + layer.order,
+        terrain: engine.terrain ?? undefined,
+        maxLabelsPerTile: 8,
+        maxVisibleLabels: 32
+      });
+      await vectorLayer.initialize();
+      if (businessLayerRevisions.get(layerId) !== revision) {
+        vectorLayer.dispose();
+        return;
+      }
+      engine.addVectorLayer(engineLayerId, vectorLayer);
+      updateBusinessLayerStatus(layer.id, 'ready', '原生 MVT · GPU 点线面/三维标注');
+    } else if (layer.kind === 'feature' && sourceDefinition?.kind === 'geojson') {
       updateBusinessLayerStatus(layer.id, 'loading', '解析 GeoJSON…');
       const collection = await registry.createGeoJsonSource(layer.sourceId).load(controller.signal);
       if (businessLayerRevisions.get(layerId) !== revision) return;
@@ -549,6 +610,9 @@ async function setBusinessLayerEnabled(layerId: string, enabled: boolean): Promi
       const provider = await registry.createRasterProviderAsync(layer.sourceId, {
         levelOffset: layer.levelOffset
       });
+      const capability = provider instanceof MvtRasterProvider
+        ? await diagnoseMvtStyle(provider, `业务图层 ${layer.id}`)
+        : null;
       if (businessLayerRevisions.get(layerId) !== revision) return;
       engine.addImageryLayer(engineLayerId, provider, {
         overlay: true,
@@ -557,11 +621,20 @@ async function setBusinessLayerEnabled(layerId: string, enabled: boolean): Promi
         // All surface rasters share the base mesh/depth and differ only by
         // render order; physical metre offsets cause terrain-shaped holes.
         surfaceOffset: 0.1,
-        contentKind: layer.kind === 'rasterized-vector' ? 'rasterized-vector' : 'imagery',
+        contentKind: layer.kind === 'rasterized-vector' || layer.kind === 'vector'
+          ? 'rasterized-vector'
+          : 'imagery',
         maxCachedTiles: 1_024,
         maxTextureBytes: 128 * 1024 * 1024
       });
-      updateBusinessLayerStatus(layer.id, 'ready', '已叠加');
+      if (capability) {
+        const suffix = capability.unsupportedLayers > 0 || capability.degradedLayers > 0
+          ? ` · ${capability.degradedLayers} 降级/${capability.unsupportedLayers} 不支持`
+          : ' · 样式完整支持';
+        updateBusinessLayerStatus(layer.id, 'ready', `MVT 已叠加${suffix}`);
+      } else {
+        updateBusinessLayerStatus(layer.id, 'ready', '已叠加');
+      }
     }
     if (businessLayerRevisions.get(layerId) !== revision) return;
     layers.setVisible(layer.id, true);
@@ -606,6 +679,15 @@ function geoJsonLayerColor(layerId: string): number {
   if (layerId.includes('provinces')) return 0x32e6a1;
   if (layerId.includes('cities')) return 0x64d8ff;
   return 0xffc857;
+}
+
+async function diagnoseMvtStyle(provider: RasterTileProvider, label: string) {
+  if (!(provider instanceof MvtRasterProvider)) return null;
+  const capability = await provider.styleCapabilities();
+  if (capability.issues.length > 0) {
+    console.warn(`[${label}] MVT 样式能力诊断`, capability);
+  }
+  return capability;
 }
 
 function chooseInitialBaseLayer(candidates: readonly LayerState[]): LayerState {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import * as THREE from 'three';
 import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
@@ -7,7 +8,11 @@ import {
   GeoJsonLayer,
   GeoJsonSource,
   LayerCollection,
+  MapStyleLoader,
   MvtTileSource,
+  MvtRasterProvider,
+  MvtVectorLayer,
+  geographicDegreesToShaderRadians,
   UrlTemplateRasterProvider,
   parseLayerCatalog,
   serializeLayerCatalog,
@@ -15,6 +20,11 @@ import {
 } from '../dist/spring-and-autumn-gis.es.js';
 
 assert.equal(DEFAULT_LEVEL_OFFSET, -1.7);
+assert.deepEqual(
+  geographicDegreesToShaderRadians(180, 90),
+  [Math.PI, Math.PI / 2],
+  'native MVT GPU positions must be radians even though terrain and labels use degrees'
+);
 
 const provider = new UrlTemplateRasterProvider({
   id: 'test',
@@ -174,6 +184,88 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+const tmsMvtSource = new MvtTileSource({
+  id: 'tms-mvt',
+  source: {
+    type: 'vector',
+    tiles: ['https://{s}.example/{z}/{x}/{y}.pbf'],
+    scheme: 'tms',
+    subdomains: ['a', 'b']
+  }
+});
+assert.equal(tmsMvtSource.url({ level: 4, x: 9, y: 6 }), 'https://b.example/4/9/9.pbf');
+
+const customMvtStyle = {
+  version: 8,
+  sources: { business: { type: 'vector' } },
+  layers: [{
+    id: 'boundary',
+    type: 'line',
+    source: 'business',
+    'source-layer': 'china_province',
+    paint: { 'line-color': '#00ffff', 'line-width': 2 }
+  }]
+};
+const styleLoader = new MapStyleLoader({ style: customMvtStyle });
+assert.equal(styleLoader.selectVectorSource(await styleLoader.load()).id, 'business');
+assert.deepEqual([...styleLoader.sourceLayerNames(customMvtStyle, 'business')], ['china_province']);
+assert.deepEqual(await styleLoader.capabilities(), {
+  supportedLayers: 1,
+  degradedLayers: 0,
+  unsupportedLayers: 0,
+  issues: []
+});
+const customMvtProvider = new MvtRasterProvider({
+  id: 'business-mvt',
+  urlTemplate: 'https://tiles.example/{z}/{x}/{y}.pbf',
+  style: customMvtStyle,
+  sourceId: 'business',
+  levelOffset: 0,
+  maxLevel: 18
+});
+assert.equal(customMvtProvider.url({ level: 8, x: 202, y: 97 }), 'https://tiles.example/8/202/97.pbf');
+assert.equal(customMvtProvider.viewLevelOffset, 0);
+
+const nativeMvtLayer = new MvtVectorLayer(Ellipsoid.WGS84, {
+  id: 'native-business-mvt',
+  urlTemplate: 'https://tiles.example/{z}/{x}/{y}.pbf',
+  style: customMvtStyle,
+  sourceId: 'business',
+  levelOffset: DEFAULT_LEVEL_OFFSET
+});
+await nativeMvtLayer.initialize();
+nativeMvtLayer.update([], 10.2, new THREE.PerspectiveCamera(), 1280, 720);
+assert.equal(nativeMvtLayer.stats.sourceLevel, 8, 'native MVT must apply the -1.7 level offset');
+nativeMvtLayer.dispose();
+
+const receiverCheckedRequests = [];
+const receiverCheckedFetch = function (input) {
+  assert.equal(this, globalThis, 'fetch must retain the browser/global receiver');
+  receiverCheckedRequests.push(String(input));
+  if (String(input).endsWith('/style.json')) {
+    return Promise.resolve(new Response(JSON.stringify(customMvtStyle), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    }));
+  }
+  return Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+};
+const receiverStyleLoader = new MapStyleLoader({
+  styleUrl: 'https://tiles.example/style.json',
+  fetcher: receiverCheckedFetch
+});
+assert.equal((await receiverStyleLoader.load()).version, 8);
+const receiverMvtSource = new MvtTileSource({
+  id: 'receiver-mvt',
+  source: { type: 'vector', tiles: ['https://tiles.example/{z}/{x}/{y}.pbf'] },
+  fetcher: receiverCheckedFetch
+});
+assert.equal((await receiverMvtSource.load({ level: 3, x: 4, y: 2 })).byteLength, 3);
+assert.deepEqual(receiverCheckedRequests, [
+  'https://tiles.example/style.json',
+  'https://tiles.example/3/4/2.pbf'
+]);
+
 const catalog = JSON.parse(
   await readFile(new URL('../env.config.json', import.meta.url), 'utf8')
 );
@@ -189,6 +281,22 @@ assert.equal(catalog.version, 1);
 assert.equal(catalog.defaults.levelOffset, DEFAULT_LEVEL_OFFSET);
 assert.ok(catalog.sources.length >= 10);
 assert.ok(catalog.layers.some((layer) => layer.id === catalog.defaultBaseLayerId));
+const catalogRegistry = new DataSourceRegistry(catalog.sources);
+assert.equal(catalogRegistry.availability('local-china-admin-mvt').available, true);
+assert.ok(catalogRegistry.createRasterProvider('local-china-admin-mvt') instanceof MvtRasterProvider);
+assert.ok(catalogRegistry.createRasterProvider('esri-vector-basemap') instanceof MvtRasterProvider);
+assert.equal(catalog.sources.find((source) => source.id === 'esri-vector-basemap').styleUrl, '/En.json');
+assert.equal(catalog.layers.find((layer) => layer.id === 'esri-vector-basemap').role, 'base');
+assert.equal(catalog.layers.find((layer) => layer.id === 'local-china-admin-mvt').role, 'overlay');
+assert.equal(catalog.layers.find((layer) => layer.id === 'local-china-admin-mvt').levelOffset, undefined);
+const configuredLayers = new LayerCollection(catalog.layers);
+assert.equal(configuredLayers.get('local-china-admin-mvt').levelOffset, DEFAULT_LEVEL_OFFSET);
+configuredLayers.setVisible('esri-vector-basemap', true);
+assert.equal(configuredLayers.get('esri-vector-basemap').visible, true);
+assert.equal(configuredLayers.get('google-satellite').visible, false);
+configuredLayers.setVisible('google-satellite', true);
+assert.equal(configuredLayers.get('esri-vector-basemap').visible, false);
+assert.equal(configuredLayers.get('google-satellite').visible, true);
 const sourceIds = new Set(catalog.sources.map((source) => source.id));
 for (const layer of catalog.layers) {
   assert.ok(sourceIds.has(layer.sourceId), `Missing source for layer ${layer.id}`);

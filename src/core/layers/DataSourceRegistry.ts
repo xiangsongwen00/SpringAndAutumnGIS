@@ -1,4 +1,5 @@
 import { ArcGisVectorRasterProvider } from '../tiles/ArcGisVectorRasterProvider';
+import { MvtRasterProvider } from '../tiles/MvtRasterProvider';
 import {
   DEFAULT_LEVEL_OFFSET,
   UrlTemplateRasterProvider,
@@ -6,6 +7,9 @@ import {
 } from '../tiles/RasterTileProvider';
 import { WmtsRasterProvider, loadWmtsCapabilities } from '../tiles/WmtsSource';
 import { GeoJsonSource } from '../../feature/GeoJsonSource';
+import { Ellipsoid } from '../geo/Ellipsoid';
+import { MvtVectorLayer } from '../../render/MvtVectorLayer';
+import type { TerrainHeightSource } from '../../render/TerrainTileLayer';
 
 export type DataSourceKind =
   | 'xyz-raster'
@@ -34,6 +38,7 @@ export type DataSourceDefinition = Readonly<{
   maxFeatures?: number;
   styleUrl?: string;
   sourceId?: string;
+  scheme?: 'xyz' | 'tms';
   subdomains?: readonly string[];
   minLevel?: number;
   maxLevel?: number;
@@ -58,6 +63,15 @@ export type DataSourceRegistryOptions = Readonly<{
 
 export type RasterProviderOverrides = Readonly<{
   levelOffset?: number;
+}>;
+
+export type MvtVectorLayerOverrides = Readonly<{
+  levelOffset?: number;
+  opacity?: number;
+  order?: number;
+  terrain?: TerrainHeightSource;
+  maxLabelsPerTile?: number;
+  maxVisibleLabels?: number;
 }>;
 
 export type DataSourceAvailability = Readonly<{
@@ -117,10 +131,11 @@ export class DataSourceRegistry {
     const missingVariables = (source.requires ?? []).filter(
       (name) => !this.variables[name]?.trim()
     );
+    const supported = source.kind !== 'mvt' || Boolean(source.styleUrl);
     return {
-      available: missingVariables.length === 0 && source.kind !== 'mvt',
+      available: missingVariables.length === 0 && supported,
       missingVariables,
-      supported: source.kind !== 'mvt'
+      supported
     };
   }
 
@@ -131,7 +146,7 @@ export class DataSourceRegistry {
     const source = this.require(id);
     const availability = this.availability(id);
     if (!availability.supported) {
-      throw new Error(`Data source ${id} requires the planned native MVT renderer.`);
+      throw new Error(`Data source ${id} requires a Mapbox Style v8 styleUrl.`);
     }
     if (!availability.available) {
       throw new Error(
@@ -156,7 +171,29 @@ export class DataSourceRegistry {
         minimumLodLevelOffset: source.minimumLodLevelOffset,
         showCountryLabels: source.showCountryLabels,
         tileSize: source.tileSize,
-        attribution: source.attribution
+        attribution: source.attribution,
+        fetcher: this.fetcher
+      });
+    }
+    if (source.kind === 'mvt') {
+      if (!source.urlTemplate) throw new Error(`urlTemplate is required: ${id}`);
+      if (!source.styleUrl) throw new Error(`styleUrl is required for MVT rendering: ${id}`);
+      return new MvtRasterProvider({
+        id: source.id,
+        urlTemplate: resolveVariables(source.urlTemplate, this.variables),
+        styleUrl: resolveVariables(source.styleUrl, this.variables),
+        sourceId: source.sourceId,
+        scheme: source.scheme,
+        subdomains: source.subdomains,
+        minLevel: source.minLevel,
+        maxLevel: source.maxLevel,
+        bounds: source.bounds,
+        viewLevelOffset: levelOffset,
+        minimumLodLevelOffset: source.minimumLodLevelOffset,
+        showCountryLabels: source.showCountryLabels,
+        tileSize: source.tileSize,
+        attribution: source.attribution,
+        fetcher: this.fetcher
       });
     }
     if (!source.urlTemplate) throw new Error(`urlTemplate is required: ${id}`);
@@ -215,6 +252,40 @@ export class DataSourceRegistry {
       url: resolveVariables(source.url, this.variables),
       crs: source.crs,
       maxFeatures: source.maxFeatures
+    });
+  }
+
+  createMvtVectorLayer(
+    id: string,
+    ellipsoid: Ellipsoid,
+    overrides: MvtVectorLayerOverrides = {}
+  ): MvtVectorLayer {
+    const source = this.require(id);
+    if (source.kind !== 'mvt') throw new Error(`Data source ${id} is not MVT.`);
+    const availability = this.availability(id);
+    if (!availability.available) {
+      throw new Error(`Data source ${id} is unavailable or missing a Style v8 styleUrl.`);
+    }
+    if (!source.urlTemplate || !source.styleUrl) {
+      throw new Error(`MVT urlTemplate and styleUrl are required: ${id}`);
+    }
+    return new MvtVectorLayer(ellipsoid, {
+      id: source.id,
+      urlTemplate: resolveVariables(source.urlTemplate, this.variables),
+      styleUrl: resolveVariables(source.styleUrl, this.variables),
+      sourceId: source.sourceId,
+      scheme: source.scheme,
+      subdomains: source.subdomains,
+      minLevel: source.minLevel,
+      maxLevel: source.maxLevel,
+      bounds: source.bounds,
+      levelOffset: overrides.levelOffset ?? source.levelOffset ?? this.defaultLevelOffset,
+      opacity: overrides.opacity,
+      order: overrides.order,
+      terrain: overrides.terrain,
+      maxLabelsPerTile: overrides.maxLabelsPerTile,
+      maxVisibleLabels: overrides.maxVisibleLabels,
+      fetcher: this.fetcher
     });
   }
 

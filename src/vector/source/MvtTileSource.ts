@@ -4,6 +4,7 @@ import type { VectorSource } from '../style/VectorStyleTypes';
 export type MvtTileSourceOptions = {
   id: string;
   source: VectorSource;
+  fetcher?: typeof fetch;
 };
 
 /** Fetches raw MVT bytes. Decoding and rendering deliberately live elsewhere. */
@@ -14,6 +15,9 @@ export class MvtTileSource {
 
   private templates: readonly string[];
   private readonly tileJsonUrl?: string;
+  private readonly scheme: 'xyz' | 'tms';
+  private readonly subdomains: readonly string[];
+  private readonly fetcher: typeof fetch;
   private metadataPromise: Promise<readonly string[]> | null = null;
 
   constructor(options: MvtTileSourceOptions) {
@@ -24,6 +28,9 @@ export class MvtTileSource {
     this.id = options.id;
     this.templates = templates;
     this.tileJsonUrl = options.source.url;
+    this.scheme = options.source.scheme ?? 'xyz';
+    this.subdomains = options.source.subdomains ?? [];
+    this.fetcher = options.fetcher ?? fetch;
     this.minLevel = Math.max(0, Math.round(options.source.minzoom ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.source.maxzoom ?? 30));
   }
@@ -36,18 +43,15 @@ export class MvtTileSource {
     if (!template) {
       throw new Error(`矢量数据源 ${this.id} 的 TileJSON 尚未解析，请通过 load() 请求瓦片。`);
     }
-    return template
-      .split('{z}').join(String(tile.level))
-      .split('{x}').join(String(tile.x))
-      .split('{y}').join(String(tile.y));
+    return resolveTileUrl(template, tile, this.scheme, this.subdomains);
   }
 
   async load(tile: TileId, signal?: AbortSignal): Promise<ArrayBuffer> {
     const templates = await this.resolveTemplates(signal);
     const template = templates[(tile.x + tile.y) % templates.length];
     if (!template) throw new Error(`矢量数据源 ${this.id} 没有可用 tiles 模板。`);
-    const tileUrl = resolveTileUrl(template, tile);
-    const response = await fetch(tileUrl, { signal });
+    const tileUrl = resolveTileUrl(template, tile, this.scheme, this.subdomains);
+    const response = await this.fetcher.call(globalThis, tileUrl, { signal });
     if (!response.ok) throw new Error(`MVT 请求失败：${response.status} ${tileUrl}`);
     return response.arrayBuffer();
   }
@@ -59,25 +63,50 @@ export class MvtTileSource {
 
   private async loadTileJson(signal?: AbortSignal): Promise<readonly string[]> {
     if (!this.tileJsonUrl) throw new Error(`矢量数据源 ${this.id} 没有 TileJSON URL。`);
-    const response = await fetch(this.tileJsonUrl, { signal });
+    const response = await this.fetcher.call(globalThis, this.tileJsonUrl, { signal });
     if (!response.ok) {
       throw new Error(`矢量 TileJSON 加载失败：${response.status} ${sanitizeUrl(this.tileJsonUrl)}`);
     }
     const tileJson = await response.json() as { tiles?: string[] };
-    const templates = tileJson.tiles ?? [];
+    const templates = (tileJson.tiles ?? []).map((template) =>
+      resolveMetadataUrl(template, this.tileJsonUrl!)
+    );
     if (templates.length === 0) throw new Error(`矢量 TileJSON ${this.id} 没有 tiles 模板。`);
     this.templates = templates;
     return templates;
   }
 }
 
-function resolveTileUrl(template: string, tile: TileId): string {
+function resolveTileUrl(
+  template: string,
+  tile: TileId,
+  scheme: 'xyz' | 'tms',
+  subdomains: readonly string[]
+): string {
+  const invertedY = 2 ** tile.level - tile.y - 1;
+  const y = scheme === 'tms' ? invertedY : tile.y;
+  const subdomain = subdomains.length > 0
+    ? subdomains[(tile.x + tile.y) % subdomains.length] ?? ''
+    : '';
   return template
     .split('{z}').join(String(tile.level))
     .split('{x}').join(String(tile.x))
-    .split('{y}').join(String(tile.y));
+    .split('{y}').join(String(y))
+    .split('{-y}').join(String(invertedY))
+    .split('{s}').join(subdomain);
 }
 
 function sanitizeUrl(value: string): string {
   return value.replace(/([?&](?:key|token|access_token)=)[^&]+/gi, '$1***');
+}
+
+function resolveMetadataUrl(value: string, metadataUrl: string): string {
+  try {
+    const runtimeBase = typeof location === 'undefined' ? 'http://localhost/' : location.href;
+    return new URL(value, new URL(metadataUrl, runtimeBase)).toString()
+      .replace(/%7B/gi, '{')
+      .replace(/%7D/gi, '}');
+  } catch {
+    return value;
+  }
 }

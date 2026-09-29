@@ -50,6 +50,9 @@ export function validateLayerCatalog(input: unknown): LayerCatalogValidation {
     if (value.kind === 'rasterized-vector-style' && !nonEmptyString(value.styleUrl)) {
       issue(issues, `${path}.styleUrl`, 'styleUrl is required for rasterized vector styles.');
     }
+    if (value.scheme !== undefined && value.scheme !== 'xyz' && value.scheme !== 'tms') {
+      issue(issues, `${path}.scheme`, 'scheme must be xyz or tms.');
+    }
     if (['xyz-raster', 'mvt'].includes(String(value.kind)) && !nonEmptyString(value.urlTemplate)) {
       issue(issues, `${path}.urlTemplate`, 'urlTemplate is required for tiled sources.');
     }

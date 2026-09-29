@@ -4,7 +4,7 @@ export type StyleValue = unknown;
 
 export type StyleLayer = {
   id: string;
-  type: 'background' | 'fill' | 'line' | 'symbol' | string;
+  type: 'background' | 'fill' | 'line' | 'circle' | 'symbol' | string;
   source?: string;
   'source-layer'?: string;
   minzoom?: number;
@@ -21,6 +21,8 @@ export type VectorSource = {
   url?: string;
   minzoom?: number;
   maxzoom?: number;
+  scheme?: 'xyz' | 'tms';
+  subdomains?: readonly string[];
 };
 
 export type MapStyle = {

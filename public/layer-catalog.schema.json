@@ -37,6 +37,7 @@
           "maxFeatures": { "type": "integer", "minimum": 1 },
           "styleUrl": { "type": "string" },
           "sourceId": { "type": "string" },
+          "scheme": { "enum": ["xyz", "tms"] },
           "subdomains": { "type": "array", "items": { "type": "string" } },
           "requires": { "type": "array", "items": { "type": "string" } },
           "minLevel": { "type": "integer", "minimum": 0 },

@@ -22,6 +22,7 @@ import {
   type TerrainTileLayerStats
 } from '../render/TerrainTileLayer';
 import { GeoJsonLayer } from '../render/GeoJsonLayer';
+import { MvtVectorLayer, type MvtVectorLayerStats } from '../render/MvtVectorLayer';
 import {
   GlobeCameraController,
   type GlobeCameraViewState,
@@ -32,6 +33,7 @@ export type GlobeEngineStats = GlobeLodStats & Readonly<{
   cameraLevel: number;
   imagery: RasterTileLayerStats | null;
   terrain: TerrainTileLayerStats | null;
+  vectorLayers: ReadonlyMap<string, MvtVectorLayerStats>;
 }>;
 
 export type GlobeNavigationOptions = {
@@ -114,6 +116,7 @@ export class GlobeEngine {
   private contextLost = false;
   private readonly imageryLayers = new Map<string, RasterTileLayer>();
   private readonly featureLayers = new Map<string, GeoJsonLayer>();
+  private readonly vectorLayers = new Map<string, MvtVectorLayer>();
   private readonly imageryLayerOptions: RasterTileLayerOptions;
 
   private readonly onContextLost = (event: Event): void => {
@@ -346,6 +349,11 @@ export class GlobeEngine {
       for (const layer of this.featureLayers.values()) {
         if (layer.object3d.visible) layer.update(this.camera.position, now);
       }
+      for (const layer of this.vectorLayers.values()) {
+        if (layer.object3d.visible) {
+          layer.update(selection.tiles, cameraLevel, this.camera, viewportWidth, viewportHeight);
+        }
+      }
       this.grid.update(selection.tiles, this.camera.position);
       this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
       this.renderer.render(this.scene, this.camera);
@@ -367,6 +375,8 @@ export class GlobeEngine {
     this.imageryLayers.clear();
     for (const layer of this.featureLayers.values()) layer.dispose();
     this.featureLayers.clear();
+    for (const layer of this.vectorLayers.values()) layer.dispose();
+    this.vectorLayers.clear();
     this.terrain?.dispose();
     this.grid.dispose();
     this.scene.traverse((object) => {
@@ -441,6 +451,26 @@ export class GlobeEngine {
 
   getFeatureLayer(id: string): GeoJsonLayer | undefined {
     return this.featureLayers.get(id);
+  }
+
+  addVectorLayer(id: string, layer: MvtVectorLayer): MvtVectorLayer {
+    if (this.vectorLayers.has(id)) throw new Error(`Vector layer already exists: ${id}`);
+    this.vectorLayers.set(id, layer);
+    this.scene.add(layer.object3d);
+    return layer;
+  }
+
+  removeVectorLayer(id: string): boolean {
+    const layer = this.vectorLayers.get(id);
+    if (!layer) return false;
+    this.scene.remove(layer.object3d);
+    layer.dispose();
+    this.vectorLayers.delete(id);
+    return true;
+  }
+
+  getVectorLayer(id: string): MvtVectorLayer | undefined {
+    return this.vectorLayers.get(id);
   }
 
   setTerrainEnabled(enabled: boolean): void {
@@ -564,10 +594,16 @@ export class GlobeEngine {
     const terrainSignature = terrain
       ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges},${terrain.coverageReady}`
       : 'none';
-    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${roundedCameraLevel}`;
+    const vectorLayers = new Map(
+      [...this.vectorLayers].map(([id, layer]) => [id, layer.stats] as const)
+    );
+    const vectorSignature = [...vectorLayers]
+      .map(([id, value]) => `${id}:${value.sourceLevel},${value.ready},${value.loading},${value.queued},${value.errors},${value.visible}`)
+      .join(';');
+    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${vectorSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;
     this.lastStatsSignature = signature;
-    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain });
+    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers });
   }
 }
 
