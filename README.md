@@ -21,6 +21,18 @@ LOD 选择器不依赖瓦片纹理、网络请求或缓存；影像层消费同�
 
 `public/En.json` 是 Mapbox Style v8 样式，当前包含一个 Esri MVT 数据源和 913 个样式图层，后续矢量瓦片渲染器可直接以它作为样式解析测试入口。
 
+## MVT 接入状态
+
+当前可以开始接入 MVT，但能力需要按渲染模式区分：
+
+| 能力 | 当前状态 | 产品含义 |
+|---|---|---|
+| URL template/TileJSON 请求与 PBF 解码 | 已有基础实现 | 本机 `china_admin` z0–z10 已验证可请求、可解码 |
+| `draped-raster` | 具备实现基础，待通用 Provider/UI 接线 | MVT 按样式栅格化后复用公共地形表面，可贴地、可换样式，但不是可编辑矢量 |
+| `native-vector` | 未完成 | 尚缺 Worker Bucket、原生 fill/line/circle、地形绑定、拾取和 SymbolPass |
+
+首版样式自定义以 Mapbox Style v8 **受控子集**为边界：基础 background/fill/line/circle、`source-layer`、层级显隐、常用 filter/expression、颜色、透明度、线宽/虚线/端点连接和圆点样式。glyph/sprite、沿线文字、pattern/gradient、heatmap、hillshade、fill-extrusion 等不能静默忽略，接入界面必须显示“支持/降级/不支持”诊断。完整设计和实施顺序见 [`设计.md`](./设计.md#8-原生矢量瓦片渲染路线)，服务与层级样本见 [`测试数据.md`](./测试数据.md#4-localhost8085--china_admin-矢量瓦片)。
+
 Esri 矢量底图当前使用 `levelOffset: -2`，但制图层级与球面叶节点解耦：整个视口统一使用 `floor(相机层级 - 2)` 作为最高数据/样式层级，再由更精细的球面几何通过 UV 裁切共享这些纹理。相机 5.1 级统一使用 Esri 3 级，相机 16.2 级统一使用 Esri 14 级。Google 卫星影像保持 `levelOffset: 0`，与球面 LOD 一一对应。
 
 矢量模式通常把视口最低叶节点约束为“当前相机整数层级减 1”，避免卫星影像可接受、但矢量制图会产生样式断层的超大跨级混合。若极地或特殊角度触及瓦片预算，运行时会整体降低最低层级后重新选择，禁止输出跨越多级的半完成叶节点集合。标注在单瓦片内执行碰撞检测和边缘安全区过滤；跨瓦片的完整屏幕空间标注将在独立符号渲染层中继续实现。
