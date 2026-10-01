@@ -297,6 +297,48 @@ try {
       .some((value) => value === 1), 'flat globe must keep shared ECEF edge active without DEM');
   });
   renderer.render(surfaceScene, camera);
+  // Exercise the production fragment shader's coverage rectangle/XYZ mapping.
+  const coverageMaterial = ((surface.object3d.children[0] as THREE.Mesh).material as THREE.ShaderMaterial).clone();
+  coverageMaterial.vertexShader = `varying vec2 v_uv; varying vec2 v_tileUv;
+    varying vec3 v_globeNormal; varying vec3 v_terrainNormal;
+    #include <logdepthbuf_pars_vertex>
+    void main() { v_tileUv=vec2(uv.x,1.0-uv.y); v_uv=uv;
+      v_globeNormal=vec3(0.,0.,1.); v_terrainNormal=v_globeNormal;
+      gl_Position=vec4(position.xy,0.,1.);
+      #include <logdepthbuf_vertex>
+    }`;
+  coverageMaterial.depthTest = false; coverageMaterial.depthWrite = false;
+  coverageMaterial.uniforms.isOverlay.value = true;
+  coverageMaterial.uniforms.hasTerrain.value = false;
+  coverageMaterial.uniforms.coverageCount.value = 4;
+  const quadrantColors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255]];
+  const quadrantTextures = quadrantColors.map((rgba, i) => {
+    const texture = new THREE.DataTexture(new Uint8Array(rgba), 1, 1);
+    texture.needsUpdate = true;
+    coverageMaterial.uniforms[`coverageTexture${i}`].value = texture;
+    const x = i % 2 * .5, y = Math.floor(i / 2) * .5;
+    coverageMaterial.uniforms[`coverageRect${i}`].value.set(x, y, .5, .5);
+    coverageMaterial.uniforms[`coverageUv${i}`].value.set(2, -x * 2, -y * 2);
+    return texture;
+  });
+  const coverageScene = new THREE.Scene(); coverageScene.add(new THREE.Mesh(geometry, coverageMaterial));
+  renderer.setRenderTarget(target); renderer.render(coverageScene, camera);
+  renderer.readRenderTargetPixels(target, 0, 0, 128, 128, pixels);
+  for (let i = 0; i < 4; i++) {
+    const x = i % 2 ? 96 : 32, y = i < 2 ? 96 : 32;
+    const offset = (y * 128 + x) * 4;
+    check(quadrantColors[i].every((channel, c) => Math.abs(pixels[offset + c] - channel) <= 2),
+      `retained coverage GPU quadrant ${i} must stay in its XYZ footprint`);
+  }
+  coverageMaterial.uniforms.coverageCount.value = 0;
+  coverageMaterial.uniforms.hasTexture.value = false;
+  const coverageClearColor = renderer.getClearColor(new THREE.Color()), coverageClearAlpha = renderer.getClearAlpha();
+  renderer.setClearColor(0, 0);
+  renderer.render(coverageScene, camera);
+  renderer.readRenderTargetPixels(target, 0, 0, 128, 128, pixels);
+  check(pixels[(96 * 128 + 32) * 4 + 3] === 0, 'released coverage must not remain visible');
+  renderer.setClearColor(coverageClearColor, coverageClearAlpha);
+  quadrantTextures.forEach(texture => texture.dispose()); coverageMaterial.dispose();
   surface.dispose(); dem.dispose();
   const labelId = { level: 2, x: 2, y: 1 };
   const labelStyle: MapStyle = { version: 8, sources: { fixture: { type: 'vector', tiles: ['https://fixture/{z}/{x}/{y}'] } },
@@ -489,7 +531,7 @@ try {
   }
   probe.dispose(); coverage.dispose();
   check(failures.length === 0, failures.join('\n'));
-  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + prepared display DEM GPU/CPU/native bindings, DEM/native/surface Workers, chunk publication/cancellation, point labels; no shader errors';
+  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + retained imagery GPU quadrants + prepared display DEM GPU/CPU/native bindings, DEM/native/surface Workers, chunk publication/cancellation, point labels; no shader errors';
   result.setAttribute('data-status', 'passed');
 } catch (error) {
   result.textContent = `FAIL: ${error instanceof Error ? error.stack : error}`;

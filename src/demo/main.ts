@@ -188,6 +188,7 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `纹理 ${stats.imagery.ready} 就绪 · ${stats.imagery.loading} 加载 · ${stats.imagery.queued} 排队 · ` +
       `${(stats.imagery.textureBytes / 1024 / 1024).toFixed(0)} MiB · ` +
       `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败` +
+      ` · 高清保留 ${stats.imagery.continuityPatches} 块/${(stats.imagery.continuityBytes / 1024 / 1024).toFixed(1)} MiB` +
       (stats.imagery.lastError ? ` · ${stats.imagery.lastError}` : '')
     : '影像未启用';
   if (nativeBase) {

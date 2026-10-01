@@ -13,6 +13,10 @@ import type { TerrainHeightSource } from './TerrainTileLayer';
 import { terrainSurfaceEdges } from '../core/terrain/TerrainSurfaceEdges';
 
 export type RasterTileLayerOptions = {
+  /** Short-lived previous high-detail coverage on the same surface mesh. */
+  continuityMs?: number;
+  maxContinuityBytes?: number;
+  maxContinuityPatches?: number;
   segments?: number;
   maxConcurrentRequests?: number;
   maxCachedTiles?: number;
@@ -43,6 +47,8 @@ export type RasterTileLayerStats = Readonly<{
   displayedMinimumLevel: number | null;
   displayedMaximumLevel: number | null;
   lastError: string | null;
+  continuityPatches: number;
+  continuityBytes: number;
 }>;
 
 type TextureState = 'queued' | 'loading' | 'ready' | 'error';
@@ -58,6 +64,7 @@ type TextureRecord = {
   retryAt: number;
   controller: AbortController | null;
   active: boolean;
+  requestClass?: 'coverage' | 'detail';
 };
 type RenderTile = {
   id: TileId;
@@ -65,6 +72,7 @@ type RenderTile = {
   textureKey: string;
   terrainKey: string;
 };
+type ContinuityPatch = { id: TileId; sourceKey: string; expires: number };
 
 /** Visible-leaf raster consumer. Selection remains owned by GlobeLodSelector. */
 export class RasterTileLayer {
@@ -114,6 +122,14 @@ export class RasterTileLayer {
   private lastError: string | null = null;
   private warnedProviderId: string | null = null;
   private readonly transitionTextures = new Set<THREE.Texture>();
+  private readonly continuity = new Map<string, ContinuityPatch>();
+  private continuitySamplingOrder: ContinuityPatch[] = [];
+  private readonly continuityMs: number;
+  private readonly maxContinuityBytes: number;
+  private readonly maxContinuityPatches: number;
+  private coverageRun = 0;
+  private nextContinuityExpiry = Infinity;
+  private observedMappingOffset: number | null | undefined;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -121,6 +137,9 @@ export class RasterTileLayer {
     options: RasterTileLayerOptions = {}
   ) {
     this.ellipsoid = ellipsoid;
+    this.continuityMs = Math.max(0, options.continuityMs ?? 2000);
+    this.maxContinuityBytes = Math.max(0, options.maxContinuityBytes ?? 24 * 1024 * 1024);
+    this.maxContinuityPatches = Math.max(0, Math.floor(options.maxContinuityPatches ?? 64));
     this.provider = provider;
     this.baseSegments = Math.max(2, Math.round(options.segments ?? 16));
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 8));
@@ -129,6 +148,8 @@ export class RasterTileLayer {
       16 * 1024 * 1024,
       Math.round(options.maxTextureBytes ?? 192 * 1024 * 1024)
     );
+    this.maxContinuityBytes = Math.min(this.maxContinuityBytes, this.maxTextureBytes / 4);
+    this.observedMappingOffset = provider.viewLevelOffset ?? provider.levelOffset;
     this.surfaceOffset = Math.max(0, options.surfaceOffset ?? 0.1);
     this.maxAnisotropy = Math.max(1, options.maxAnisotropy ?? 1);
     this.terrain = options.terrain;
@@ -180,6 +201,15 @@ export class RasterTileLayer {
     const terrainChanged = terrainRevision !== this.observedTerrainRevision;
     const providerRevision = this.provider.revision ?? 0;
     const sourceLevelsChanged = providerRevision !== this.observedProviderRevision;
+    const coverageExpired = performance.now() >= this.nextContinuityExpiry;
+    const mappingOffset = this.provider.viewLevelOffset ?? this.provider.levelOffset;
+    const explicitOffsetChanged = mappingOffset !== this.observedMappingOffset;
+    this.observedMappingOffset = mappingOffset;
+    if (explicitOffsetChanged) this.continuity.clear();
+    // Provider revision also advances on ordinary camera/source zoom changes.
+    // Those are precisely the changes that need a display handoff, not invalidation.
+    if ((selectionChanged || sourceLevelsChanged) && !explicitOffsetChanged) this.captureContinuity(selection);
+    if (selectionChanged || sourceLevelsChanged || coverageExpired || this.materialsDirty) this.pruneContinuity(selection);
     if (selectionChanged || sourceLevelsChanged) {
       this.frame += 1;
       this.lastSelection = selection;
@@ -187,7 +217,7 @@ export class RasterTileLayer {
       if (selectionChanged) this.syncRenderTiles(selection);
       this.queueVisibleTextures(selection);
     }
-    if (selectionChanged || sourceLevelsChanged || terrainChanged || this.materialsDirty) {
+    if (selectionChanged || sourceLevelsChanged || terrainChanged || this.materialsDirty || coverageExpired) {
       this.observedTerrainRevision = terrainRevision;
       this.syncMaterials(selection);
       this.evictTextures();
@@ -212,13 +242,17 @@ export class RasterTileLayer {
       desiredMaximumLevel: this.desiredMaximumLevel,
       displayedMinimumLevel: this.displayedMinimumLevel,
       displayedMaximumLevel: this.displayedMaximumLevel,
-      lastError: this.lastError
+      lastError: this.lastError,
+      continuityPatches: this.continuity.size,
+      continuityBytes: this.continuityBytes()
     };
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.continuity.clear();
+    this.continuitySamplingOrder = [];
     for (const renderTile of this.renderTiles.values()) {
       renderTile.mesh.material.dispose(); renderTile.mesh.geometry.dispose();
     }
@@ -258,6 +292,9 @@ export class RasterTileLayer {
       }
     }
     this.provider = provider;
+    this.observedMappingOffset = provider.viewLevelOffset ?? provider.levelOffset;
+    this.continuity.clear(); this.nextContinuityExpiry = Infinity; this.coverageRun = 0;
+    this.continuitySamplingOrder = [];
     this.textures.clear();
     this.visibleTextureKeys.clear();
     this.fallbackCount = 0;
@@ -293,6 +330,8 @@ export class RasterTileLayer {
       this.object3d.remove(renderTile.mesh);
       const uniforms = renderTile.mesh.material.uniforms;
       for (const name of ['tileTexture', 'terrainTexture', 'terrainParentTexture']) uniforms[name]!.value = null;
+      for (let i = 0; i < 4; i++) uniforms[`coverageTexture${i}`]!.value = null;
+      uniforms.coverageCount!.value = 0;
       for (const name of ['hasTexture', 'hasTerrain', 'hasTerrainParent']) uniforms[name]!.value = false;
       renderTile.textureKey = ''; renderTile.terrainKey = '';
       const geometry = renderTile.mesh.geometry;
@@ -331,6 +370,84 @@ export class RasterTileLayer {
       entry.tile.mesh.material.dispose(); entry.tile.mesh.geometry.dispose();
       this.spareBytes -= entry.bytes; this.spareTiles.delete(key);
     }
+  }
+
+  private continuityBytes(): number {
+    const keys = new Set([...this.continuity.values()].map(patch => patch.sourceKey));
+    return [...keys].reduce((bytes, key) => bytes + (this.textures.get(key)?.byteSize ?? 0), 0);
+  }
+
+  private captureContinuity(selection: readonly SelectedTile[]): void {
+    if (this.overlay || !this.continuityMs) return;
+    const now = performance.now();
+    const targets = new Map(selection.map(tile => [tileKey(tile.id), tile]));
+    for (const tile of this.renderTiles.values()) {
+      const source = this.textures.get(tile.textureKey);
+      if (source?.state !== 'ready' || !source.texture) continue;
+      const target = this.continuityTarget(tile.id, targets);
+      if (!target || source.id.level <= (this.findReadyAncestor(target.id)?.id.level ?? -1)) continue;
+      const key = tileKey(tile.id);
+      // Do not renew a held patch on every movement: zoom-out must eventually settle.
+      if (!this.continuity.has(key)) this.continuity.set(key,
+        { id: tile.id, sourceKey: source.key, expires: now + this.continuityMs });
+    }
+  }
+
+  private pruneContinuity(selection: readonly SelectedTile[]): void {
+    const now = performance.now(), slots = new Map<string, number>(), sources = new Set<string>();
+    const targets = new Map(selection.map(tile => [tileKey(tile.id), tile]));
+    let bytes = 0, count = 0;
+    this.nextContinuityExpiry = Infinity;
+    const patches = [...this.continuity].sort((a, b) =>
+      (this.textures.get(b[1].sourceKey)?.id.level ?? 0) - (this.textures.get(a[1].sourceKey)?.id.level ?? 0));
+    for (const [key, patch] of patches) {
+      const source = this.textures.get(patch.sourceKey);
+      const target = this.continuityTarget(patch.id, targets);
+      const targetKey = target && tileKey(target.id);
+      const cost = sources.has(patch.sourceKey) ? 0 : source?.byteSize ?? 0;
+      if (!target || !targetKey || source?.state !== 'ready' || !source.texture || patch.expires <= now ||
+          source.id.level <= (this.findReadyAncestor(target.id)?.id.level ?? -1) ||
+          this.provider.hasTile?.(ancestorAtLevel(target.id, this.maximumSourceLevel(target.id))) === false ||
+          (slots.get(targetKey) ?? 0) >= 4 || count >= this.maxContinuityPatches || bytes + cost > this.maxContinuityBytes) {
+        this.continuity.delete(key); continue;
+      }
+      count++; bytes += cost; sources.add(patch.sourceKey);
+      slots.set(targetKey, (slots.get(targetKey) ?? 0) + 1);
+      this.nextContinuityExpiry = Math.min(this.nextContinuityExpiry, patch.expires);
+    }
+    this.continuitySamplingOrder = [...this.continuity.values()].sort((a, b) =>
+      (this.textures.get(a.sourceKey)?.id.level ?? 0) - (this.textures.get(b.sourceKey)?.id.level ?? 0));
+  }
+
+  private continuityTarget(id: TileId, targets: ReadonlyMap<string, SelectedTile>): SelectedTile | undefined {
+    for (let level = id.level; level >= Math.max(0, id.level - 2); level--) {
+      const target = targets.get(tileKey(ancestorAtLevel(id, level)));
+      if (target) return target;
+    }
+    return undefined;
+  }
+
+  private bindContinuity(tile: RenderTile): void {
+    const uniforms = tile.mesh.material.uniforms;
+    let slot = 0;
+    // Overlapping footprints can occur after another coarsening. Higher detail
+    // samples last, so a full parent patch never overwrites its sharper child.
+    for (const patch of this.continuitySamplingOrder) {
+      if (patch.id.level < tile.id.level || tileKey(ancestorAtLevel(patch.id, tile.id.level)) !== tileKey(tile.id)) continue;
+      const source = this.textures.get(patch.sourceKey);
+      if (!source?.texture || source.id.level <= (this.textures.get(tile.textureKey)?.id.level ?? -1)) continue;
+      const size = 2 ** (patch.id.level - tile.id.level);
+      const x = (patch.id.x - tile.id.x * size) / size, y = (patch.id.y - tile.id.y * size) / size;
+      const scale = 2 ** (source.id.level - tile.id.level);
+      uniforms[`coverageTexture${slot}`]!.value = source.texture;
+      (uniforms[`coverageRect${slot}`]!.value as THREE.Vector4).set(x, y, 1 / size, 1 / size);
+      (uniforms[`coverageUv${slot}`]!.value as THREE.Vector3).set(scale, tile.id.x * scale - source.id.x, tile.id.y * scale - source.id.y);
+      source.lastUsedFrame = this.frame;
+      this.displayedMaximumLevel = Math.max(this.displayedMaximumLevel ?? source.id.level, source.id.level);
+      if (++slot === 4) break;
+    }
+    uniforms.coverageCount!.value = slot;
+    for (let i = slot; i < 4; i++) uniforms[`coverageTexture${i}`]!.value = null;
   }
 
   /**
@@ -436,6 +553,19 @@ export class RasterTileLayer {
         },
         tileMercatorSpan: { value: mercatorSpan },
         tileTexture: { value: null },
+        coverageCount: { value: 0 },
+        coverageTexture0: { value: null },
+        coverageRect0: { value: new THREE.Vector4() },
+        coverageUv0: { value: new THREE.Vector3() },
+        coverageTexture1: { value: null },
+        coverageRect1: { value: new THREE.Vector4() },
+        coverageUv1: { value: new THREE.Vector3() },
+        coverageTexture2: { value: null },
+        coverageRect2: { value: new THREE.Vector4() },
+        coverageUv2: { value: new THREE.Vector3() },
+        coverageTexture3: { value: null },
+        coverageRect3: { value: new THREE.Vector4() },
+        coverageUv3: { value: new THREE.Vector3() },
         uvScale: { value: new THREE.Vector2(1, 1) },
         uvOffset: { value: new THREE.Vector2(0, 0) },
         hasTexture: { value: false },
@@ -456,6 +586,7 @@ export class RasterTileLayer {
         placeholder: { value: placeholderColor(tile.level) }
       },
       vertexShader: /* glsl */ `
+        varying vec2 v_tileUv;
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
         varying vec3 v_terrainNormal;
@@ -516,6 +647,7 @@ export class RasterTileLayer {
           // use v=1 at the visual top. Flip only V after applying the ancestor
           // sub-rectangle so exact tiles and fallback tiles share one convention.
           vec2 xyzUv = uvOffset + uv * uvScale;
+          v_tileUv = uv;
           v_uv = vec2(xyzUv.x, 1.0 - xyzUv.y);
           vec2 terrainUv = terrainUvOffset + uv * terrainUvScale;
           // Height arrays contain endpoint samples (257 samples / 256 cells).
@@ -589,6 +721,20 @@ export class RasterTileLayer {
         }
       `,
       fragmentShader: /* glsl */ `
+        varying vec2 v_tileUv;
+        uniform int coverageCount;
+        uniform sampler2D coverageTexture0;
+        uniform vec4 coverageRect0;
+        uniform vec3 coverageUv0;
+        uniform sampler2D coverageTexture1;
+        uniform vec4 coverageRect1;
+        uniform vec3 coverageUv1;
+        uniform sampler2D coverageTexture2;
+        uniform vec4 coverageRect2;
+        uniform vec3 coverageUv2;
+        uniform sampler2D coverageTexture3;
+        uniform vec4 coverageRect3;
+        uniform vec3 coverageUv3;
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
         varying vec3 v_terrainNormal;
@@ -599,10 +745,29 @@ export class RasterTileLayer {
         uniform bool hasTerrain;
         uniform vec3 placeholder;
         #include <logdepthbuf_pars_fragment>
+        bool insideCoverage(vec2 uv, vec4 rect) {
+          return all(greaterThanEqual(uv, rect.xy)) && all(lessThanEqual(uv, rect.xy + rect.zw));
+        }
         void main() {
           vec4 texel = hasTexture
             ? texture2D(tileTexture, v_uv)
             : vec4(placeholder, isOverlay ? 0.0 : 1.0);
+          if (coverageCount > 0 && insideCoverage(v_tileUv, coverageRect0)) {
+            vec2 q = v_tileUv * coverageUv0.x + coverageUv0.yz;
+            texel = texture2D(coverageTexture0, vec2(q.x, 1.0 - q.y));
+          }
+          if (coverageCount > 1 && insideCoverage(v_tileUv, coverageRect1)) {
+            vec2 q = v_tileUv * coverageUv1.x + coverageUv1.yz;
+            texel = texture2D(coverageTexture1, vec2(q.x, 1.0 - q.y));
+          }
+          if (coverageCount > 2 && insideCoverage(v_tileUv, coverageRect2)) {
+            vec2 q = v_tileUv * coverageUv2.x + coverageUv2.yz;
+            texel = texture2D(coverageTexture2, vec2(q.x, 1.0 - q.y));
+          }
+          if (coverageCount > 3 && insideCoverage(v_tileUv, coverageRect3)) {
+            vec2 q = v_tileUv * coverageUv3.x + coverageUv3.yz;
+            texel = texture2D(coverageTexture3, vec2(q.x, 1.0 - q.y));
+          }
           if (texel.a * layerOpacity < 0.002) discard;
           vec3 color = texel.rgb;
           float daylight = 0.86 + 0.14 * max(
@@ -644,7 +809,10 @@ export class RasterTileLayer {
     this.desiredMinimumLevel = null;
     this.desiredMaximumLevel = null;
     for (const record of this.textures.values()) {
-      if (record.state === 'queued' || record.state === 'error') record.priority = Number.POSITIVE_INFINITY;
+      if (record.state === 'queued' || record.state === 'error') {
+        record.priority = Number.POSITIVE_INFINITY;
+        record.requestClass = undefined;
+      }
     }
     const prioritized = [...selection].sort(
       (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
@@ -683,7 +851,7 @@ export class RasterTileLayer {
         this.visibleTextureKeys.add(tileKey(bridge));
         // Missing coverage is more urgent than sharpening an already covered
         // tile. Deduplication makes these coarse bridge requests inexpensive.
-        this.queueTexture(bridge, rank);
+        this.queueTexture(bridge, rank, 'coverage');
       }
       this.queueTexture(desired, detailPriority);
     }
@@ -694,11 +862,12 @@ export class RasterTileLayer {
     }
   }
 
-  private queueTexture(id: TileId, priority: number): void {
+  private queueTexture(id: TileId, priority: number, requestClass: 'coverage' | 'detail' = 'detail'): void {
     const key = tileKey(id);
     const existing = this.textures.get(key);
     if (existing) {
       existing.lastUsedFrame = this.frame;
+      if (requestClass === 'coverage' || !existing.requestClass) existing.requestClass = requestClass;
       if (existing.state === 'queued' || existing.state === 'error') existing.priority = Math.min(existing.priority, priority);
       return;
     }
@@ -707,6 +876,7 @@ export class RasterTileLayer {
       key,
       state: 'queued',
       priority,
+      requestClass,
       lastUsedFrame: this.frame,
       texture: null,
       byteSize: 0,
@@ -749,6 +919,8 @@ export class RasterTileLayer {
           this.maxTextureBytes + transitionBytes
       ) return;
       let next: TextureRecord | undefined;
+      let coverage: TextureRecord | undefined;
+      let detail: TextureRecord | undefined;
       const now = performance.now();
       for (const record of this.textures.values()) {
         if (
@@ -763,9 +935,15 @@ export class RasterTileLayer {
           });
         }
         if (record.state !== 'queued' || record.retryAt > now) continue;
-        if (!next || record.priority < next.priority) next = record;
+        if (record.requestClass === 'coverage') {
+          if (!coverage || record.priority < coverage.priority) coverage = record;
+        } else if (!detail || record.priority < detail.priority) detail = record;
       }
+      // At most two bridge starts ahead of a waiting detail request. Class-local
+      // urgency still favours the near foreground; neither class can starve.
+      next = coverage && (this.coverageRun < 2 || !detail) ? coverage : detail ?? coverage;
       if (!next) return;
+      this.coverageRun = next.requestClass === 'coverage' ? Math.min(2, this.coverageRun + 1) : 0;
       this.load(next);
     }
   }
@@ -905,6 +1083,7 @@ export class RasterTileLayer {
         (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
       }
       const terrain = this.terrain?.resolveTexture(tile.id);
+      this.bindContinuity(renderTile);
       // A missing regional root is unavailable coverage, not a zero-height DEM.
       renderTile.mesh.visible = this.terrain?.hasSurfaceCoverage?.(tile.id) !== false;
       // Coordinate keys are not resource identities: eviction/reload can
@@ -1036,6 +1215,7 @@ export class RasterTileLayer {
     const protectedKeys = new Set(
       [...this.renderTiles.values()].map((tile) => tile.textureKey).filter(Boolean)
     );
+    for (const patch of this.continuity.values()) protectedKeys.add(patch.sourceKey);
     const candidates = [...this.textures.values()]
       // Pending visible targets must not be evicted: without another selection
       // event they would never be queued again, leaving a permanent ancestor.
