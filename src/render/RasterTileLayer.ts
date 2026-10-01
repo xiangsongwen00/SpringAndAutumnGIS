@@ -75,6 +75,9 @@ export class RasterTileLayer {
   private readonly geometries = new Map<number, THREE.BufferGeometry>();
   private readonly baseSegments: number;
   private readonly renderTiles = new Map<string, RenderTile>();
+  /** Recently hidden exact tile meshes; no imagery/DEM textures retained. */
+  private readonly spareTiles = new Map<string, { tile: RenderTile; bytes: number }>();
+  private spareBytes = 0;
   private readonly textures = new Map<string, TextureRecord>();
   private readonly visibleTextureKeys = new Set<string>();
   private readonly desiredTextureKeys = new Set<string>();
@@ -153,7 +156,7 @@ export class RasterTileLayer {
     const next = THREE.MathUtils.clamp(opacity, 0, 1);
     if (next === this.layerOpacity) return;
     this.layerOpacity = next;
-    for (const renderTile of this.renderTiles.values()) {
+    for (const renderTile of [...this.renderTiles.values(), ...[...this.spareTiles.values()].map(entry => entry.tile)]) {
       renderTile.mesh.material.uniforms.layerOpacity!.value = next;
       renderTile.mesh.material.transparent = this.overlay || next < 1;
       renderTile.mesh.material.needsUpdate = true;
@@ -163,6 +166,7 @@ export class RasterTileLayer {
   setOrder(order: number): void {
     this.object3d.renderOrder = order;
     for (const renderTile of this.renderTiles.values()) renderTile.mesh.renderOrder = order;
+    for (const { tile } of this.spareTiles.values()) tile.mesh.renderOrder = order;
   }
 
   update(
@@ -218,6 +222,10 @@ export class RasterTileLayer {
     for (const renderTile of this.renderTiles.values()) {
       renderTile.mesh.material.dispose(); renderTile.mesh.geometry.dispose();
     }
+    for (const { tile } of this.spareTiles.values()) {
+      tile.mesh.material.dispose(); tile.mesh.geometry.dispose();
+    }
+    this.spareTiles.clear(); this.spareBytes = 0;
     for (const record of this.textures.values()) {
       this.cancelTileRecord(record);
       this.releaseTexture(record.texture);
@@ -273,6 +281,7 @@ export class RasterTileLayer {
     for (const renderTile of this.renderTiles.values()) {
       renderTile.mesh.material.needsUpdate = true;
     }
+    for (const { tile } of this.spareTiles.values()) tile.mesh.material.needsUpdate = true;
     this.materialsDirty = true;
     this.pumpQueue();
   }
@@ -282,13 +291,25 @@ export class RasterTileLayer {
     for (const [key, renderTile] of this.renderTiles) {
       if (selectedKeys.has(key)) continue;
       this.object3d.remove(renderTile.mesh);
-      renderTile.mesh.material.dispose();
-      renderTile.mesh.geometry.dispose();
+      const uniforms = renderTile.mesh.material.uniforms;
+      for (const name of ['tileTexture', 'terrainTexture', 'terrainParentTexture']) uniforms[name]!.value = null;
+      for (const name of ['hasTexture', 'hasTerrain', 'hasTerrainParent']) uniforms[name]!.value = false;
+      renderTile.textureKey = ''; renderTile.terrainKey = '';
+      const geometry = renderTile.mesh.geometry;
+      const bytes = Object.values(geometry.attributes).reduce((sum, attribute) => sum + attribute.array.byteLength, 0) +
+        (geometry.index?.array.byteLength ?? 0);
+      this.spareTiles.set(key, { tile: renderTile, bytes }); this.spareBytes += bytes;
       this.renderTiles.delete(key);
     }
     for (const tile of selection) {
       const key = tileKey(tile.id);
       if (this.renderTiles.has(key)) continue;
+      const retained = this.spareTiles.get(key);
+      if (retained) {
+        this.spareTiles.delete(key); this.spareBytes -= retained.bytes;
+        this.renderTiles.set(key, retained.tile); this.object3d.add(retained.tile.mesh);
+        continue;
+      }
       const material = this.createMaterial(tile.id);
       const geometry = this.geometryForLevel(tile.id.level).clone();
       const count = geometry.getAttribute('position').count;
@@ -303,6 +324,12 @@ export class RasterTileLayer {
       };
       this.renderTiles.set(key, { id: tile.id, mesh, textureKey: '', terrainKey: '' });
       this.object3d.add(mesh);
+    }
+    while (this.spareTiles.size > 128 || this.spareBytes > 16 * 1024 * 1024) {
+      const key = this.spareTiles.keys().next().value!;
+      const entry = this.spareTiles.get(key)!;
+      entry.tile.mesh.material.dispose(); entry.tile.mesh.geometry.dispose();
+      this.spareBytes -= entry.bytes; this.spareTiles.delete(key);
     }
   }
 
@@ -617,7 +644,7 @@ export class RasterTileLayer {
     this.desiredMinimumLevel = null;
     this.desiredMaximumLevel = null;
     for (const record of this.textures.values()) {
-      if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
+      if (record.state === 'queued' || record.state === 'error') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
       (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
@@ -645,7 +672,7 @@ export class RasterTileLayer {
       if (this.provider.hasTile && !this.provider.hasTile(desired)) continue;
       this.visibleTextureKeys.add(tileKey(desired));
       this.desiredTextureKeys.add(tileKey(desired));
-      const detailPriority = rank * 2 + 1;
+      const detailPriority = prioritized.length + rank;
       const ready = this.findReadyAncestor(tile.id);
       if (ready) {
         this.visibleTextureKeys.add(ready.key);
@@ -656,7 +683,7 @@ export class RasterTileLayer {
         this.visibleTextureKeys.add(tileKey(bridge));
         // Missing coverage is more urgent than sharpening an already covered
         // tile. Deduplication makes these coarse bridge requests inexpensive.
-        this.queueTexture(bridge, rank * 2);
+        this.queueTexture(bridge, rank);
       }
       this.queueTexture(desired, detailPriority);
     }
@@ -672,7 +699,7 @@ export class RasterTileLayer {
     const existing = this.textures.get(key);
     if (existing) {
       existing.lastUsedFrame = this.frame;
-      if (existing.state === 'queued') existing.priority = Math.min(existing.priority, priority);
+      if (existing.state === 'queued' || existing.state === 'error') existing.priority = Math.min(existing.priority, priority);
       return;
     }
     this.textures.set(key, {
@@ -698,11 +725,23 @@ export class RasterTileLayer {
 
   private pumpQueue(): void {
     if (this.suspended || this.disposed) return;
+    if (this.activeRequests >= this.maxConcurrentRequests) return;
     const estimatedBytes = this.provider.estimatedTextureBytes ?? estimateSquareTextureBytes(256);
     // A target texture must coexist briefly with its currently displayed
     // ancestor. Without this transition allowance a full cache protects the
     // ancestor forever and the view can remain stuck several levels too low.
     const transitionBytes = this.maxConcurrentRequests * estimatedBytes;
+    // Reclaim stale cached content before admission, rather than waiting for
+    // a later material update. Never evict displayed coverage or live targets.
+    const now = performance.now();
+    let waiting = 0;
+    for (const record of this.textures.values()) {
+      if (record.retryAt <= now && (record.state === 'queued' ||
+          record.state === 'error' && this.visibleTextureKeys.has(record.key))) waiting++;
+    }
+    if (!waiting) return;
+    const admitted = Math.min(waiting, this.maxConcurrentRequests - this.activeRequests);
+    this.evictTextures((this.activeRequests + admitted) * estimatedBytes);
     while (this.activeRequests < this.maxConcurrentRequests) {
       if (
         this.residentTextureBytes() +
@@ -866,7 +905,11 @@ export class RasterTileLayer {
         (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
       }
       const terrain = this.terrain?.resolveTexture(tile.id);
-      const terrainKey = terrain ? `${terrain.key}|${terrain.parentKey}` : '';
+      // Coordinate keys are not resource identities: eviction/reload can
+      // replace the DEM (or parent) at the same z/x/y. CPU edges already use
+      // the new immutable source; keep GPU interiors on that same source.
+      const terrainKey = terrain
+        ? `${terrain.key}|${terrain.texture.uuid}|${terrain.parentKey}|${terrain.parentTexture?.uuid ?? ''}` : '';
       if (terrainKey === renderTile.terrainKey) continue;
       renderTile.terrainKey = terrainKey;
       uniforms.terrainTexture!.value = terrain?.texture ?? null;
@@ -983,10 +1026,11 @@ export class RasterTileLayer {
     return undefined;
   }
 
-  private evictTextures(): void {
+  private evictTextures(reserveBytes = 0): void {
     if (this.suspended) return;
     const residentBytes = this.residentTextureBytes();
-    if (this.textures.size <= this.maxCachedTiles && residentBytes <= this.maxTextureBytes) return;
+    const byteLimit = Math.max(0, this.maxTextureBytes - reserveBytes);
+    if (this.textures.size <= this.maxCachedTiles && residentBytes <= byteLimit) return;
     const protectedKeys = new Set(
       [...this.renderTiles.values()].map((tile) => tile.textureKey).filter(Boolean)
     );
@@ -999,7 +1043,7 @@ export class RasterTileLayer {
     let remainingBytes = residentBytes;
     while (
       this.textures.size > this.maxCachedTiles ||
-      remainingBytes > this.maxTextureBytes
+      remainingBytes > byteLimit
     ) {
       const record = candidates.shift();
       if (!record) break;

@@ -230,12 +230,12 @@ try {
   check(await observedDispose, 'disposing provider must reject queued draw');
 
   // Compile/render the actual shared terrain shader, not only the tile pass.
-  const dem = new THREE.DataTexture(new Float32Array(9), 3, 3, THREE.RedFormat, THREE.FloatType);
+  let dem = new THREE.DataTexture(new Float32Array(9), 3, 3, THREE.RedFormat, THREE.FloatType);
   dem.needsUpdate = true;
   const terrain = { revision: 1, enabled: true, exaggeration: 1, resolveTexture: () => ({
     key: 'fixture', texture: dem, scale: 1, offsetX: 0, offsetY: 0, sourceLevel: 2,
     width: 3, height: 3, parentKey: '', parentTexture: null, parentScale: 1, parentOffsetX: 0, parentOffsetY: 0
-  }), sampleHeight: () => 0, sampleTileHeight: () => 0 };
+  }), sampleHeight: () => 0, sampleTileHeight: (): number => terrain.enabled ? dem.image.data[0] : 0 };
   const surface = new RasterTileLayer(Ellipsoid.WGS84,
     new UrlTemplateRasterProvider({ id: 'empty', urlTemplate: 'https://fixture/{z}/{x}/{y}', minLevel: 2, maxLevel: 2 }),
     { terrain });
@@ -263,6 +263,26 @@ try {
   });
   const surfaceScene = new THREE.Scene(); surfaceScene.add(surface.object3d);
   renderer.setRenderTarget(target); renderer.render(surfaceScene, camera);
+  // Same logical tile, new immutable DEM resource: both GPU interior and
+  // canonical boundary must move together, including after disposal/reload.
+  const oldDem = dem;
+  dem = new THREE.DataTexture(new Float32Array(9).fill(8000), 3, 3, THREE.RedFormat, THREE.FloatType);
+  dem.needsUpdate = true; terrain.revision++; oldDem.dispose();
+  (surface as unknown as { syncMaterials: (tiles: unknown[]) => void }).syncMaterials([
+    { id, rectangle, screenPixels: 128, viewCenterDistance: 0 }
+  ]);
+  surface.object3d.traverse(object => {
+    if (object instanceof THREE.Mesh) {
+      check((object.material as THREE.ShaderMaterial).uniforms.terrainTexture.value === dem,
+        'same coordinate DEM reload must bind the new GPU texture, not a disposed flat surface');
+      const high = object.geometry.getAttribute('terrainEdgeHigh'), low = object.geometry.getAttribute('terrainEdgeLow');
+      const point = new THREE.Vector3(high.getX(0) + low.getX(0), high.getY(0) + low.getY(0), high.getZ(0) + low.getZ(0));
+      const expected = Ellipsoid.WGS84.cartographicToCartesian({ longitude: rectangle.west,
+        latitude: rectangle.north, height: 8000.1 });
+      check(point.distanceTo(expected) < .01, 'new perimeter and GPU interior must both use the 8000m source');
+    }
+  });
+  renderer.render(surfaceScene, camera);
   terrain.enabled = false;
   surface.object3d.traverse((object) => {
     if (object instanceof THREE.Mesh) (object.material as THREE.ShaderMaterial).uniforms.hasTerrain.value = false;

@@ -34,6 +34,7 @@ export type TerrainRgbProviderOptions = {
   minLevel?: number;
   maxLevel?: number;
   attribution?: string;
+  /** Explicit flat height for 404/204 coverage gaps only. Omit to keep ancestor fallback; never applied to 401/403. */
   noDataHeight?: number;
 };
 
@@ -56,7 +57,7 @@ export class TerrainRgbProvider implements TerrainProvider {
   private readonly configuredScheme?: TerrainTileScheme;
   private readonly encoding: TerrainRgbEncoding;
   private readonly configuredMaxLevel: number;
-  private readonly noDataHeight: number;
+  private readonly noDataHeight?: number;
   private metadataPromise: Promise<Required<Pick<TileJson, 'tiles' | 'scheme'>> & TileJson> | null = null;
   private resolvedMaxLevel: number;
   private readonly disabledTemplates = new Set<string>();
@@ -75,7 +76,9 @@ export class TerrainRgbProvider implements TerrainProvider {
     this.tileJsonUrl = options.tileJsonUrl;
     this.configuredScheme = options.scheme;
     this.encoding = options.encoding ?? 'mapbox';
-    this.noDataHeight = options.noDataHeight ?? 0;
+    // Missing DEM is not evidence of sea level. Explicitly opt into a flat
+    // no-data surface only when the dataset's coverage contract allows it.
+    this.noDataHeight = options.noDataHeight;
   }
 
   get maxLevel(): number {
@@ -124,8 +127,9 @@ export class TerrainRgbProvider implements TerrainProvider {
         lastError = error;
       }
     }
-    if (sawNoData && !lastError) return createFlatTerrainTile(sourceTile, this.noDataHeight);
-    if (sawForbidden && !lastError) return createFlatTerrainTile(sourceTile, this.noDataHeight);
+    if (sawForbidden) throw lastError ?? new Error(`地形数据源 ${this.id} 无可用授权地址（401/403），不能以零高程替代。`);
+    if (sawNoData && !lastError && this.noDataHeight !== undefined)
+      return createFlatTerrainTile(sourceTile, this.noDataHeight);
     throw lastError ?? new Error(`地形瓦片 ${sourceTile.level}/${sourceTile.x}/${sourceTile.y} 没有可用数据。`);
   }
 

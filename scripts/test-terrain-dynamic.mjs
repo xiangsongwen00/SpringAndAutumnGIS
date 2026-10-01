@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Ellipsoid, FrameWorkBudget, GlobeGridRenderer, GlobeLodSelector, RasterTileLayer, TerrainTileLayer,
-  UrlTemplateRasterProvider, WebMercatorTilingScheme, terrainSurfaceEdges } from '../dist/spring-and-autumn-gis.es.js';
+  TerrainRgbProvider, UrlTemplateRasterProvider, WebMercatorTilingScheme, terrainSurfaceEdges } from '../dist/spring-and-autumn-gis.es.js';
 
 const budget = new FrameWorkBudget(4);
 budget.beginFrame(100); budget.spend(3);
@@ -10,6 +10,22 @@ budget.spend(2); assert.equal(budget.canStart, false);
 budget.beginFrame(116); assert.equal(budget.canStart, true);
 
 const scheme = new WebMercatorTilingScheme();
+// HTTP coverage/auth failures must not become successful zero-height DEMs.
+const nativeFetch = globalThis.fetch;
+try {
+  for (const status of [401, 403, 404, 204]) {
+    globalThis.fetch = async () => new Response(null, { status });
+    const missing = new TerrainRgbProvider({ id: `missing-${status}`, urlTemplates: ['fixture://{z}/{x}/{y}'] });
+    await assert.rejects(missing.loadTile({ level: 4, x: 4, y: 4 }));
+  }
+  globalThis.fetch = async () => new Response(null, { status: 404 });
+  const explicit = new TerrainRgbProvider({ urlTemplates: ['fixture://{z}/{x}/{y}'], noDataHeight: 123 });
+  const flat = await explicit.loadTile({ level: 4, x: 4, y: 4 });
+  assert.ok(flat.heights.every(value => value === 123)); flat.texture.dispose();
+  globalThis.fetch = async () => new Response(null, { status: 403 });
+  await assert.rejects(new TerrainRgbProvider({ urlTemplates: ['fixture://{z}/{x}/{y}'], noDataHeight: 123 })
+    .loadTile({ level: 4, x: 4, y: 4 }), /401\/403/);
+} finally { globalThis.fetch = nativeFetch; }
 const selected = (id) => ({ id, rectangle: scheme.rectangle(id), screenPixels: 128, viewCenterDistance: 0 });
 let uploads = 0, disposedTextures = 0;
 const terrain = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'pending', minLevel: 4, maxLevel: 4,
@@ -83,6 +99,22 @@ direct.update([selected({ level: 8, x: parent[0].id.x * 16, y: parent[0].id.y * 
 assert.deepEqual(requestedLevels, [8], 'ready coverage skips unnecessary middle DEM levels');
 await new Promise(resolve => setImmediate(resolve)); direct.dispose();
 
+const missingChild = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'missing-child', minLevel: 4, maxLevel: 5,
+  loadTile: async () => { throw new Error('DEM unavailable'); } });
+const backupId = { level: 4, x: 4, y: 4 }, backupTexture = demFixture(6000);
+function demFixture(value) { return new THREE.DataTexture(new Float32Array(9).fill(value), 3, 3, THREE.RedFormat, THREE.FloatType); }
+missingChild.records.set('4/4/4', { id: backupId, key: '4/4/4', state: 'ready', lastUsedFrame: 0, active: false,
+  data: { id: backupId, texture: backupTexture, heights: backupTexture.image.data,
+    width: 3, height: 3, minimumHeight: 6000, maximumHeight: 6000 } });
+missingChild.coverageReady = true; missingChild.hasInitialCoverage = true;
+const childSelection = [selected({ level: 5, x: 8, y: 8 })];
+missingChild.update(childSelection); await new Promise(resolve => setImmediate(resolve)); missingChild.update(childSelection);
+assert.equal(missingChild.stats.errors, 1);
+assert.equal(missingChild.resolveTexture(childSelection[0].id).texture, backupTexture);
+assert.equal(missingChild.sampleTileHeight(childSelection[0].id, .5, .5), 6000,
+  'missing/error child preserves the actual ancestor rather than publishing a flat tile');
+missingChild.dispose();
+
 // Cached bounds are validated by local height envelopes, not global revision.
 const camera = new THREE.PerspectiveCamera(50, 1.6, .02, 100000000);
 camera.position.copy(Ellipsoid.WGS84.cartographicToCartesian({ longitude: 106.49, latitude: 29.63, height: 12000 }));
@@ -152,6 +184,35 @@ revision++; surface.update(surfaceSelection);
 assert.equal(mask.version, version);
 surface.dispose();
 
+// Reloading a DEM under the same coordinate key must replace the GPU binding
+// as well as the CPU perimeter. Otherwise high new edges surround an old flat
+// interior, producing a persistent blade/cliff despite a fully loaded queue.
+const demTexture = height => new THREE.DataTexture(new Float32Array(9).fill(height), 3, 3, THREE.RedFormat, THREE.FloatType);
+let currentDem = demTexture(0), parentDem = demTexture(0), height = 0;
+const reloadTerrain = { get revision() { return revision; }, enabled: true, exaggeration: 1,
+  resolveTexture: () => ({ key: '8/100/100', texture: currentDem, sourceLevel: 8,
+    scale: 1, offsetX: 0, offsetY: 0, width: 3, height: 3,
+    parentKey: '7/50/50', parentTexture: parentDem, parentScale: .5, parentOffsetX: 0, parentOffsetY: 0 }),
+  tileHeightSampler: () => ({ key: currentDem.uuid, sample: () => height }), sampleHeight: () => height };
+const reloadSurface = new RasterTileLayer(Ellipsoid.WGS84, imagery, { terrain: reloadTerrain });
+reloadSurface.update(surfaceSelection.slice(0, 1));
+const reloadMesh = reloadSurface.object3d.children[0], originalDem = currentDem;
+currentDem = demTexture(8000); height = 8000; revision++;
+originalDem.dispose(); reloadSurface.update(surfaceSelection.slice(0, 1));
+assert.equal(reloadMesh.material.uniforms.terrainTexture.value, currentDem,
+  'same coordinate/new DEM texture must update the GPU interior');
+const oldParent = parentDem; parentDem = demTexture(7000); oldParent.dispose(); revision++;
+reloadSurface.update(surfaceSelection.slice(0, 1));
+assert.equal(reloadMesh.material.uniforms.terrainParentTexture.value, parentDem,
+  'same coordinate/new parent texture must update too');
+const u = reloadMesh.geometry.getAttribute('terrainEdgeHigh'), l = reloadMesh.geometry.getAttribute('terrainEdgeLow');
+const world = new THREE.Vector3(u.getX(0) + l.getX(0), u.getY(0) + l.getY(0), u.getZ(0) + l.getZ(0));
+const reloadRectangle = surfaceSelection[0].rectangle;
+const expectedWorld = Ellipsoid.WGS84.cartographicToCartesian({ longitude: reloadRectangle.west,
+  latitude: reloadRectangle.north, height: 8000.1 });
+assert.ok(world.distanceTo(expectedWorld) < .01, 'CPU perimeter uses the same new 8000m DEM as the GPU interior');
+reloadSurface.dispose(); currentDem.dispose(); parentDem.dispose();
+
 // Debug grid must reuse height/world points across topology changes and only
 // resample coordinates whose immutable terrain source changed.
 let gridSamples = 0, gridKey = 'a';
@@ -163,12 +224,48 @@ assert.ok(gridSamples > 0);
 gridSamples = 0;
 grid.update(surfaceSelection);
 assert.ok(gridSamples > 0, 'new coordinates need initial samples');
+const initialChunks = new Map(grid.tileChunks);
+const expectedGrid = new GlobeGridRenderer(Ellipsoid.WGS84, { terrain: gridTerrain });
+expectedGrid.update(surfaceSelection);
+for (const name of ['position', 'color', 'sag_originHigh', 'sag_originLow']) {
+  const count = grid.object3d.geometry.drawRange.count * 3;
+  assert.deepEqual(grid.object3d.geometry.getAttribute(name).array.slice(0, count),
+    expectedGrid.object3d.geometry.getAttribute(name).array.slice(0, count), 'cached grid equals fresh geometry');
+}
+expectedGrid.dispose();
 gridSamples = 0;
 grid.update([surfaceSelection[0]]);
 assert.equal(gridSamples, 0, 'known coordinates survive selection changes');
 revision++; grid.update(surfaceSelection);
 assert.equal(gridSamples, 0, 'unrelated revision does not resample known grid heights');
+for (const [key, chunk] of initialChunks) assert.equal(grid.tileChunks.get(key), chunk,
+  'unchanged tile chunks survive selection and unrelated DEM updates');
 gridKey = 'b'; revision++; grid.update([surfaceSelection[0]]);
 assert.ok(gridSamples > 0, 'changed local height source must invalidate its coordinates');
 grid.dispose();
+assert.equal(grid.tileChunks.size, 0); assert.equal(grid.chunkBytes, 0);
+
+// Indexed inclusive endpoints, mixed subdivisions, order independence and the
+// antimeridian must retain the canonical coarse ECEF chord.
+const indexedTiles = [
+  { id: { level: 2, x: 3, y: 1 }, segments: 8, height: () => 100 },
+  { id: { level: 3, x: 0, y: 2 }, segments: 16, height: () => 400 },
+  { id: { level: 3, x: 0, y: 3 }, segments: 8, height: () => 800 },
+  { id: { level: 4, x: 1, y: 4 }, segments: 16, height: () => 1200 }
+];
+const indexed = terrainSurfaceEdges(indexedTiles);
+for (const ordering of [indexedTiles.toReversed(), [indexedTiles[2], indexedTiles[0], indexedTiles[3], indexedTiles[1]]]) {
+  const reordered = terrainSurfaceEdges(ordering);
+  for (const tile of indexedTiles) for (const [index, point] of indexed.get(tile))
+    assert.ok(point.distanceTo(reordered.get(tile).get(index)) < 1e-8);
+}
+for (const tile of indexedTiles.slice(1, 3)) for (let step = 0; step <= tile.segments; step++) {
+  const coarse = indexedTiles[0], y = (tile.id.y + step / tile.segments) / 2 ** tile.id.level;
+  const sample = (y * 2 ** coarse.id.level - coarse.id.y) * coarse.segments;
+  const lower = Math.min(coarse.segments, Math.floor(sample));
+  const a = indexed.get(coarse).get(lower * (coarse.segments + 1) + coarse.segments);
+  const b = indexed.get(coarse).get(Math.min(coarse.segments, lower + 1) * (coarse.segments + 1) + coarse.segments);
+  assert.ok(indexed.get(tile).get(step * (tile.segments + 1)).distanceTo(a.clone().lerp(b, sample - lower)) < 1e-7,
+    'indexed fine edge follows the canonical coarse chord across the dateline');
+}
 console.log('Dynamic terrain checks passed (bounded publication, coverage continuity, local bounds, immutable edge caching).');

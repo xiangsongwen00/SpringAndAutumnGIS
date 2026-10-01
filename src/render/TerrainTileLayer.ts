@@ -596,9 +596,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
       const binding = this.resolveTexture(tile.id);
       if (binding && binding.key.split('/')[0] !== String(tile.id.level)) this.fallbackCount += 1;
       const nextKey = binding?.key ?? '';
-      if (nextKey === renderTile.terrainKey) continue;
-      renderTile.terrainKey = nextKey;
       const uniforms = renderTile.mesh.material.uniforms;
+      // Preserve the coordinate key for cache protection, but do not treat it
+      // as proof that the actual uploaded DEM texture is unchanged.
+      if (nextKey === renderTile.terrainKey &&
+          uniforms.terrainTexture!.value === (binding?.texture ?? null)) continue;
+      renderTile.terrainKey = nextKey;
       uniforms.terrainTexture!.value = binding?.texture ?? null;
       uniforms.hasTerrain!.value = binding !== undefined;
       (uniforms.terrainUvScale!.value as THREE.Vector2).setScalar(binding?.scale ?? 1);

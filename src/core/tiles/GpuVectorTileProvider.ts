@@ -94,7 +94,9 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
     // cache. 512px targets need ~467MiB and can stall ancestor replacement.
     this.tileSize = options.tileSize ?? 256;
     this.sourceOverride = options.source;
-    this.maxDrawsPerFrame = Math.max(1, Math.floor(options.maxDrawsPerFrame ?? 1));
+    // Small prepared tiles may finish together. Time/chunk/byte quotas still
+    // bound the work; a one-tile cap imposes an unnecessary multi-second tail.
+    this.maxDrawsPerFrame = Math.max(1, Math.floor(options.maxDrawsPerFrame ?? 4));
     this.drawBudgetMs = Math.max(1, options.drawBudgetMs ?? 4);
     this.workBudget = options.workBudget;
     this.maxUploadBytesPerFrame = Math.max(1024, options.maxUploadBytesPerFrame ?? 512 * 1024);

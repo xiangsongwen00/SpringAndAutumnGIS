@@ -10,6 +10,9 @@ export type GlobeGridRendererOptions = {
   heightOffset?: number;
   terrain?: TerrainHeightSource;
 };
+type HeightProbe = { longitude: number; latitude: number; version: string };
+type GridChunk = { revision: number; probes: Map<string, HeightProbe>; bytes: number;
+  positions: Float32Array; colors: Float32Array; originsHigh: Float32Array; originsLow: Float32Array };
 
 /** Converts an LOD leaf set into one draw call of coloured latitude/longitude lines. */
 export class GlobeGridRenderer {
@@ -34,6 +37,9 @@ export class GlobeGridRenderer {
   private tilesReference: readonly SelectedTile[] | null = null;
   private readonly heightProbes = new Map<string, { longitude: number; latitude: number; version: string }>();
   private readonly heightPoints = new Map<string, { revision: number; version: string; world: THREE.Vector3 }>();
+  private readonly tileChunks = new Map<string, GridChunk>();
+  private chunkBytes = 0;
+  private activeProbes: Map<string, HeightProbe> | null = null;
 
   constructor(ellipsoid: Ellipsoid, options: GlobeGridRendererOptions = {}) {
     this.ellipsoid = ellipsoid;
@@ -125,14 +131,35 @@ export class GlobeGridRenderer {
     this.renderedTerrainRevision = terrainRevision;
     this.heightProbes.clear();
 
-    const positions: number[] = [];
-    const colors: number[] = [];
-    const originsHigh: number[] = [];
-    const originsLow: number[] = [];
+    const chunks: GridChunk[] = [];
     for (const tile of tiles) {
-      this.appendTile(tile, positions, colors, originsHigh, originsLow);
+      const key = tileKey(tile.id);
+      let chunk = this.tileChunks.get(key);
+      if (chunk && chunk.revision !== terrainRevision && this.terrain &&
+          (!this.terrain.heightVersionAt || ![...chunk.probes.values()].every(probe =>
+            this.terrain!.heightVersionAt!(probe.longitude, probe.latitude) === probe.version))) {
+        this.chunkBytes -= chunk.bytes; this.tileChunks.delete(key); chunk = undefined;
+      }
+      if (!chunk) {
+        const positions: number[] = [], colors: number[] = [], originsHigh: number[] = [], originsLow: number[] = [];
+        const probes = new Map<string, HeightProbe>();
+        this.activeProbes = probes;
+        try { this.appendTile(tile, positions, colors, originsHigh, originsLow); }
+        finally { this.activeProbes = null; }
+        chunk = { revision: terrainRevision, probes, positions: new Float32Array(positions), colors: new Float32Array(colors),
+          originsHigh: new Float32Array(originsHigh), originsLow: new Float32Array(originsLow), bytes: positions.length * 16 };
+        this.chunkBytes += chunk.bytes;
+      }
+      chunk.revision = terrainRevision;
+      this.tileChunks.delete(key); this.tileChunks.set(key, chunk);
+      for (const [pointKey, probe] of chunk.probes) this.heightProbes.set(pointKey, probe);
+      chunks.push(chunk);
+      while (this.tileChunks.size > 512 || this.chunkBytes > 8 * 1024 * 1024) {
+        const oldest = this.tileChunks.keys().next().value!;
+        this.chunkBytes -= this.tileChunks.get(oldest)!.bytes; this.tileChunks.delete(oldest);
+      }
     }
-    this.updateAttributes(positions, colors, originsHigh, originsLow);
+    this.updateAttributes(chunks);
     return true;
   }
 
@@ -145,6 +172,7 @@ export class GlobeGridRenderer {
   dispose(): void {
     this.heightProbes.clear();
     this.heightPoints.clear();
+    this.tileChunks.clear(); this.chunkBytes = 0;
     this.geometry.dispose();
     const material = this.object3d.material;
     if (Array.isArray(material)) {
@@ -154,13 +182,8 @@ export class GlobeGridRenderer {
     }
   }
 
-  private updateAttributes(
-    positions: readonly number[],
-    colors: readonly number[],
-    originsHigh: readonly number[],
-    originsLow: readonly number[]
-  ): void {
-    const vertexCount = Math.floor(positions.length / 3);
+  private updateAttributes(chunks: readonly GridChunk[]): void {
+    const vertexCount = chunks.reduce((sum, chunk) => sum + chunk.positions.length / 3, 0);
     if (vertexCount > this.vertexCapacity) {
       this.vertexCapacity = nextPowerOfTwo(Math.max(1, vertexCount));
       // Replacing attributes without disposing the geometry leaves their old
@@ -184,10 +207,14 @@ export class GlobeGridRenderer {
         new THREE.BufferAttribute(new Float32Array(this.vertexCapacity * 3), 3)
       );
     }
-    copyAttribute(this.geometry.getAttribute('position'), positions);
-    copyAttribute(this.geometry.getAttribute('color'), colors);
-    copyAttribute(this.geometry.getAttribute('sag_originHigh'), originsHigh);
-    copyAttribute(this.geometry.getAttribute('sag_originLow'), originsLow);
+    for (const [name, property] of [['position', 'positions'], ['color', 'colors'],
+      ['sag_originHigh', 'originsHigh'], ['sag_originLow', 'originsLow']] as const) {
+      const attribute = this.geometry.getAttribute(name) as THREE.BufferAttribute;
+      const array = attribute.array as Float32Array;
+      let offset = 0;
+      for (const chunk of chunks) { array.set(chunk[property], offset); offset += chunk[property].length; }
+      attribute.clearUpdateRanges(); attribute.addUpdateRange(0, offset); attribute.needsUpdate = true;
+    }
     this.geometry.setDrawRange(0, vertexCount);
   }
 
@@ -289,7 +316,10 @@ export class GlobeGridRenderer {
         this.heightPoints.set(key, point);
       } else point.revision = revision;
     }
-    if (this.terrain?.heightVersionAt) this.heightProbes.set(key, { longitude, latitude, version: point.version });
+    if (this.terrain?.heightVersionAt) {
+      const probe = { longitude, latitude, version: point.version };
+      this.heightProbes.set(key, probe); this.activeProbes?.set(key, probe);
+    }
     this.vertexWorld.copy(point.world);
     positions.push(
       this.vertexWorld.x - this.tileOrigin.x,
@@ -304,19 +334,6 @@ export class GlobeGridRenderer {
 
 function nextPowerOfTwo(value: number): number {
   return 2 ** Math.ceil(Math.log2(value));
-}
-
-function copyAttribute(
-  attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-  values: readonly number[]
-): void {
-  if (!(attribute instanceof THREE.BufferAttribute)) {
-    throw new Error('经纬网只支持非交错 BufferAttribute。');
-  }
-  (attribute.array as Float32Array).set(values);
-  attribute.clearUpdateRanges();
-  attribute.addUpdateRange(0, values.length);
-  attribute.needsUpdate = true;
 }
 
 function splitVector3(value: THREE.Vector3, high: THREE.Vector3, low: THREE.Vector3): void {

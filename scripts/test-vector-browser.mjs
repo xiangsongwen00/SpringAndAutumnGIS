@@ -135,6 +135,9 @@ try {
       console.log(`Zoom sweep: ${JSON.stringify(report.result?.result?.value)}`);
     }
     if (process.env.VECTOR_MOTION_SWEEP === '1') {
+      if (process.env.VECTOR_CPU_PROFILE === '1') {
+        await command('Profiler.enable', {}); await command('Profiler.start', {});
+      }
       const box = (await evaluate('(()=>{const r=document.querySelector("canvas").getBoundingClientRect();return {x:r.x+r.width*.45,y:r.y+r.height*.65};})()')).result.result.value;
       const dispatch = (params) => new Promise((resolve) => {
         const id = ++nextId; pending.set(id, resolve);
@@ -155,6 +158,17 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 350));
       }
       const motion = await evaluate('(()=>{window.__motionSampling=false;window.__motionObserver.disconnect();const a=window.__motionFrames.sort((x,y)=>x-y);return {frames:a.length,medianMs:a[Math.floor(a.length*.5)],p95Ms:a[Math.floor(a.length*.95)],p99Ms:a[Math.floor(a.length*.99)],maximumMs:a.at(-1),longTasks:window.__motionLongTasks.length,longTaskMaxMs:Math.max(0,...window.__motionLongTasks)};})()');
+      if (process.env.VECTOR_CPU_PROFILE === '1') {
+        const { profile } = (await command('Profiler.stop', {})).result;
+        const costs = new Map();
+        for (let i = 0; i < (profile.samples?.length ?? 0); i++) {
+          const id = profile.samples[i]; costs.set(id, (costs.get(id) ?? 0) + (profile.timeDeltas[i] ?? 0) / 1000);
+        }
+        console.log(`CPU hotspots (profiling overhead, not acceptance FPS): ${JSON.stringify(profile.nodes
+          .map(node => ({ function: node.callFrame.functionName, url: node.callFrame.url,
+            line: node.callFrame.lineNumber + 1, selfMs: costs.get(node.id) ?? 0 }))
+          .sort((a, b) => b.selfMs - a.selfMs).slice(0, 20))}`);
+      }
       const stoppedAt = Date.now();
       let recoveredAt = 0;
       let fpsRecoveredAt = null;

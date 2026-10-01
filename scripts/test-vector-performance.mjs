@@ -40,6 +40,11 @@ assert.ok(vector.estimatedTextureBytes * 350 < 192 * 1024 * 1024,
   'default vector targets must fit the maximum visible leaf working set');
 vector.dispose();
 
+const throughput = new GpuVectorTileProvider({ id: 'throughput', renderer: {},
+  style: { version: 8, sources: {}, layers: [] } });
+assert.equal(throughput.maxDrawsPerFrame, 4, 'small tiles can finish together within unchanged time/chunk/byte quotas');
+throughput.dispose();
+
 // Exercise an entire 350-leaf target queue without a GPU or external service.
 const provider = new UrlTemplateRasterProvider({ id: 'targets', tileSize: 256,
   urlTemplate: 'fixture://{z}/{x}/{y}', viewLevelOffset: null, maxLevel: 8 });
@@ -76,5 +81,41 @@ const edgeVersion = mesh.geometry.getAttribute('terrainEdgeMask').version;
 layer.update(selection.map((tile) => ({ ...tile, screenPixels: 130 })));
 assert.equal(mesh.geometry.getAttribute('terrainEdgeMask').version, edgeVersion,
   'same topology with a fresh selection array must not rebuild/upload boundaries');
+const pooledMesh = layer.object3d.children[0];
+const firstId = selection[0].id;
+layer.update(selection.slice(1));
+const spare = layer.spareTiles.get(`${firstId.level}/${firstId.x}/${firstId.y}`).tile;
+assert.equal(spare.mesh, pooledMesh);
+for (const name of ['tileTexture', 'terrainTexture', 'terrainParentTexture'])
+  assert.equal(spare.mesh.material.uniforms[name].value, null, 'spares must not pin disposed textures');
+layer.setOpacity(.7); layer.setOrder(5);
+layer.handleContextLost(); layer.handleContextRestored();
+layer.update(selection);
+assert.equal(layer.renderTiles.get(`${firstId.level}/${firstId.x}/${firstId.y}`).mesh, pooledMesh,
+  'exact tile mesh/GPU attributes survive a short hide-and-return');
+assert.equal(pooledMesh.material.uniforms.layerOpacity.value, .7);
+assert.equal(pooledMesh.renderOrder, 5);
+assert.ok(pooledMesh.material.uniforms.tileTexture.value, 'cached mesh receives current imagery binding');
+layer.update([]);
+assert.ok(layer.spareTiles.size <= 128 && layer.spareBytes <= 16 * 1024 * 1024);
 layer.dispose();
+assert.equal(layer.spareTiles.size, 0); assert.equal(layer.spareBytes, 0);
 console.log('Vector surface performance regressions passed (350-target cache, stable edge uploads, camera clamp).');
+
+const admission = new RasterTileLayer(ellipsoid, provider, { maxConcurrentRequests: 2,
+  maxTextureBytes: 1024 * 1024 });
+admission.suspended = true;
+admission.update(selection.slice(0, 3));
+const visible = [...admission.desiredTextureKeys][0];
+const protectedTexture = new THREE.Texture({ width: 256, height: 256 });
+Object.assign(admission.textures.get(visible), { state: 'ready', texture: protectedTexture, byteSize: 300000 });
+const stale = { id: { level: 8, x: 1, y: 1 }, key: '8/1/1', state: 'ready', texture: new THREE.Texture(),
+  byteSize: admission.maxTextureBytes, lastUsedFrame: 0, active: false };
+admission.textures.set(stale.key, stale);
+admission.suspended = false;
+admission.pumpQueue();
+assert.equal(admission.textures.has(stale.key), false, 'stale cache cannot block current detail admission');
+assert.equal(admission.textures.get(visible).texture, protectedTexture, 'current desired coverage survives pressure');
+assert.equal(admission.activeRequests, 2);
+await new Promise(resolve => setImmediate(resolve));
+admission.dispose();
