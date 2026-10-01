@@ -95,10 +95,13 @@ export type { MvtVectorLayerOverrides } from './core/layers/DataSourceRegistry';
 export { ArcGisVectorRasterProvider } from './core/tiles/ArcGisVectorRasterProvider';
 export type { ArcGisVectorRasterProviderOptions } from './core/tiles/ArcGisVectorRasterProvider';
 export { MvtRasterProvider } from './core/tiles/MvtRasterProvider';
+export { GpuVectorTileProvider } from './core/tiles/GpuVectorTileProvider';
+export type { GpuVectorTileProviderOptions } from './core/tiles/GpuVectorTileProvider';
 export type { MvtRasterProviderOptions } from './core/tiles/MvtRasterProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';
 export type { VectorStyleTileProviderOptions } from './core/tiles/VectorStyleTileProvider';
 export { MvtTileSource } from './vector/source/MvtTileSource';
+export { analyzeVectorSurfaceStyle } from './vector/style/VectorSurfaceCapabilities';
 export type { MvtTileSourceOptions } from './vector/source/MvtTileSource';
 export { MvtDecoder } from './vector/decoder/MvtDecoder';
 export { ArcGisStyleAdapter } from './vector/style/ArcGisStyleAdapter';
@@ -155,6 +158,10 @@ export { RasterTileLayer } from './render/RasterTileLayer';
 export { GeoJsonLayer } from './render/GeoJsonLayer';
 export type { GeoJsonLayerOptions } from './render/GeoJsonLayer';
 export { MvtVectorLayer, geographicDegreesToShaderRadians } from './render/MvtVectorLayer';
+export { VectorStyleRuntime } from './vector/style/VectorStyleRuntime';
+export type { EvaluatedBucket, VectorStyleIssue } from './vector/style/VectorStyleRuntime';
+export { buildFillGeometry, buildLineStrokeGeometry } from './vector/bucket/VectorGeometryBuilder';
+export { bindVectorTerrain, vectorTerrainUniforms } from './vector/terrain/VectorTerrainBinding';
 export type { MvtVectorLayerOptions, MvtVectorLayerStats } from './render/MvtVectorLayer';
 export type { RasterTileLayerOptions, RasterTileLayerStats } from './render/RasterTileLayer';
 export { TerrainTileLayer } from './render/TerrainTileLayer';
@@ -169,6 +176,7 @@ export { GlobeEngine } from './engine/GlobeEngine';
 export type {
   GlobeEngineOptions,
   GlobeEngineStats,
+  GlobeFramePerformance,
   GlobeNavigationOptions
 } from './engine/GlobeEngine';
 export { GlobeCameraController } from './engine/GlobeCameraController';

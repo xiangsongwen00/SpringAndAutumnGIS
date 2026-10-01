@@ -6,6 +6,8 @@ import {
   GeoJsonLayer,
   LayerCollection,
   MvtRasterProvider,
+  GpuVectorTileProvider,
+  type MvtVectorLayer,
   TerrainRgbProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
@@ -97,10 +99,11 @@ activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, initialLevelOffset);
 layers.setVisible(activeBaseLayer.id, true);
 baseLayerSelect.value = activeBaseLayer.id;
 let baseProvider: RasterTileProvider;
+let nativeBase: GpuVectorTileProvider | null = null;
 try {
   layers.setRuntime(activeBaseLayer.id, { phase: 'loading', pending: 1 });
   baseProvider = await registry.createRasterProviderAsync(
-    activeBaseLayer.sourceId,
+    activeBaseLayer.kind === 'vector' ? 'google-satellite' : activeBaseLayer.sourceId,
     { levelOffset: activeBaseLayer.levelOffset }
   );
   await diagnoseMvtStyle(baseProvider, `底图 ${activeBaseLayer.id}`);
@@ -182,7 +185,15 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `${stats.imagery.fallbacks} 回退 · ${stats.imagery.errors} 失败` +
       (stats.imagery.lastError ? ` · ${stats.imagery.lastError}` : '')
     : '影像未启用';
-  const nativeMvt = [...stats.vectorLayers.values()][0];
+  if (nativeBase) {
+    const report = nativeBase.capabilityReport;
+    imageryValue.textContent += ` · GPU 地表绘制 · 注记待接入${report
+      ? ` · 样式 ${report.supportedLayers}支持/${report.degradedLayers}降级/${report.unsupportedLayers}跳过` : ''}`;
+    imageryValue.textContent += ` · PBF≤${nativeBase.dataMaxLevel}级/绘制≤${nativeBase.maxLevel}级`;
+    const draw = nativeBase.drawStats;
+    imageryValue.textContent += ` · 制图${draw.queued}排队/${draw.lastMs.toFixed(1)}ms/峰值${draw.maxMs.toFixed(1)}ms`;
+  }
+  const nativeMvt = [...stats.vectorLayers.entries()].find(([id]) => id !== 'native-base')?.[1];
   if (nativeMvt) {
     imageryValue.textContent +=
       ` ｜ 业务 MVT ${nativeMvt.sourceLevel}级 · ${nativeMvt.ready} 就绪 · ` +
@@ -192,6 +203,11 @@ const renderStats = (stats: GlobeEngineStats): void => {
   terrainValue.textContent = stats.terrain
     ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.stitchedEdges} 接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
+  const timing = stats.performance;
+  terrainValue.textContent += ` · CPU ms LOD ${timing.lodMs.toFixed(1)}/地形 ${timing.terrainMs.toFixed(1)}` +
+    `/地表 ${timing.surfaceMs.toFixed(1)}/要素 ${timing.featureMs.toFixed(1)}/提交 ${timing.renderSubmitMs.toFixed(1)}` +
+    ` · ${timing.drawCalls} draws/${(timing.triangles / 1000).toFixed(0)}k 三角形`;
+  if (stats.terrain) terrainValue.textContent += ` · 接边末次/峰值 ${stats.terrain.stitchLastMs.toFixed(1)}/${stats.terrain.stitchMaxMs.toFixed(1)} ms`;
 };
 
 const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_URL) ??
@@ -265,6 +281,24 @@ const engine = new GlobeEngine({
 });
 
 applyActiveLayerUi();
+if (activeBaseLayer.kind === 'vector') {
+  try {
+    nativeBase = await createNativeBase(activeBaseLayer);
+    baseProvider = nativeBase;
+    engine.setImageryProvider(nativeBase);
+  } catch (error) {
+    const failedLayer = activeBaseLayer;
+    layers.setRuntime(failedLayer.id, { phase: 'error', pending: 0, failed: 1,
+      lastError: error instanceof Error ? error.message : String(error) });
+    const fallback = baseLayers.find((layer) => layer.sourceId === 'google-satellite');
+    if (!fallback) throw error;
+    layers.setVisible(fallback.id, true);
+    activeBaseLayer = layers.get(fallback.id)!;
+    layers.setRuntime(activeBaseLayer.id, { phase: 'ready', pending: 0, ready: 1 });
+    applyActiveLayerUi();
+    console.error(`[图层 ${failedLayer.id}] 初始加载失败，保留影像底图`, error);
+  }
+}
 engine.start();
 void enableQueryBusinessLayers();
 
@@ -280,12 +314,18 @@ baseLayerSelect.addEventListener('change', async () => {
   }
   const previous = activeBaseLayer;
   layers.setRuntime(next.id, { phase: 'loading', pending: 1, failed: 0, lastError: null });
-  let provider: RasterTileProvider;
+  let provider: RasterTileProvider = baseProvider;
+  let nextNative: GpuVectorTileProvider | null = null;
   try {
-    provider = await registry.createRasterProviderAsync(next.sourceId, {
-      levelOffset: next.levelOffset
-    });
-    await diagnoseMvtStyle(provider, `底图 ${next.id}`);
+    if (next.kind === 'vector') {
+      nextNative = await createNativeBase(next);
+      provider = nextNative;
+    } else {
+      provider = await registry.createRasterProviderAsync(next.sourceId, {
+        levelOffset: next.levelOffset
+      });
+      await diagnoseMvtStyle(provider, `底图 ${next.id}`);
+    }
   } catch (error) {
     if (revision !== layerSwitchRevision) return;
     layers.setRuntime(next.id, {
@@ -296,11 +336,14 @@ baseLayerSelect.addEventListener('change', async () => {
     console.error(`[图层 ${next.id}] 加载失败`, error);
     return;
   }
-  if (revision !== layerSwitchRevision) return;
+  if (revision !== layerSwitchRevision) { nextNative?.dispose(); return; }
+  const previousNative = nativeBase;
+  nativeBase = nextNative;
   layers.setVisible(next.id, true);
   activeBaseLayer = layers.get(next.id)!;
   baseProvider = provider;
   engine.setImageryProvider(baseProvider);
+  previousNative?.dispose();
   layers.setRuntime(next.id, { phase: 'ready', pending: 0, ready: 1, failed: 0 });
   annotationToggle.checked = false;
   removeAnnotationLayer();
@@ -312,6 +355,7 @@ levelOffsetInput.addEventListener('input', () => {
   const offset = Number(levelOffsetInput.value);
   if (!Number.isFinite(offset)) return;
   activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, offset);
+  nativeBase?.setViewLevelOffset(offset);
   baseProvider.setViewLevelOffset?.(offset);
   if (annotationLayerId) {
     const annotationLayer = engine.getImageryLayer('annotation');
@@ -717,6 +761,25 @@ function removeAnnotationLayer(): void {
   engine.removeImageryLayer('annotation');
   if (annotationLayerId) layers.setVisible(annotationLayerId, false);
   annotationLayerId = null;
+}
+
+async function createNativeBase(layer: LayerState): Promise<GpuVectorTileProvider> {
+  const source = registry.get(layer.sourceId)!;
+  const vector = new GpuVectorTileProvider({
+    id: source.id,
+    styleUrl: source.styleUrl,
+    sourceId: source.sourceId,
+    levelOffset: layer.levelOffset,
+    renderer: engine.renderer,
+    minLevel: source.minLevel,
+    maxLevel: source.maxLevel,
+    source: {
+      ...(source.urlTemplate ? { tiles: [source.urlTemplate] } : {}),
+      ...(source.scheme ? { scheme: source.scheme } : {})
+    }
+  });
+  try { await vector.initialize(); return vector; }
+  catch (error) { vector.dispose(); throw error; }
 }
 
 function setLevelOffsetUi(offset: number): void {

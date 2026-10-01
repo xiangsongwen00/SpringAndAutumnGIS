@@ -36,6 +36,8 @@ export type TerrainTileLayerStats = Readonly<{
   resourceBytes: number;
   stitchedEdges: number;
   coverageReady: boolean;
+  stitchLastMs: number;
+  stitchMaxMs: number;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -106,6 +108,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private lastSelection: readonly SelectedTile[] | null = null;
   private materialsDirty = true;
   private stitchedEdges = 0;
+  private stitchLastMs = 0;
+  private stitchMaxMs = 0;
   private coverageReady = false;
 
   constructor(
@@ -146,7 +150,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
       fallbacks: this.fallbackCount,
       resourceBytes: this.residentResourceBytes(),
       stitchedEdges: this.stitchedEdges,
-      coverageReady: this.coverageReady
+      coverageReady: this.coverageReady,
+      stitchLastMs: this.stitchLastMs,
+      stitchMaxMs: this.stitchMaxMs
     };
   }
 
@@ -528,6 +534,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   private stitchLoadedTerrain(loaded: TerrainRecord): void {
     if (!loaded.data) return;
+    const startedAt = performance.now();
     const tileByData = new Map<StitchableTerrainTile, TerrainRecord>();
     const readyTiles: StitchableTerrainTile[] = [];
     let loadedTile: StitchableTerrainTile | undefined;
@@ -551,6 +558,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
         maximumHeight: bounds.maximumHeight
       };
     }
+    this.stitchLastMs = performance.now() - startedAt;
+    this.stitchMaxMs = Math.max(this.stitchMaxMs, this.stitchLastMs);
   }
 
   private createMaterial(tile: TileId): THREE.ShaderMaterial {

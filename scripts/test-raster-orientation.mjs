@@ -21,3 +21,8 @@ assert.match(
 );
 
 console.log('Raster orientation checks passed.');
+
+const fragment = source.slice(source.indexOf('fragmentShader:'));
+assert.doesNotMatch(fragment, /texture2D\(terrainTexture/, 'relief gradients must not fetch DEM per screen fragment');
+assert.match(source, /v_terrainNormal\s*=\s*normalize/, 'terrain relief must use interpolated vertex normals');
+console.log('Terrain relief shader workload checks passed (vertex gradients, unchanged surface displacement).');

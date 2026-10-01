@@ -29,11 +29,16 @@ import {
   type GlobeFlyToOptions
 } from './GlobeCameraController';
 
+export type GlobeFramePerformance = Readonly<{
+  lodMs: number; terrainMs: number; surfaceMs: number; featureMs: number;
+  renderSubmitMs: number; drawCalls: number; triangles: number;
+}>;
 export type GlobeEngineStats = GlobeLodStats & Readonly<{
   cameraLevel: number;
   imagery: RasterTileLayerStats | null;
   terrain: TerrainTileLayerStats | null;
   vectorLayers: ReadonlyMap<string, MvtVectorLayerStats>;
+  performance: GlobeFramePerformance;
 }>;
 
 export type GlobeNavigationOptions = {
@@ -79,6 +84,8 @@ export type GlobeEngineOptions = {
 
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
+  private framePerformance: GlobeFramePerformance = { lodMs: 0, terrainMs: 0, surfaceMs: 0,
+    featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0 };
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(50, 1, 0.02, 100_000_000);
   readonly renderer: THREE.WebGLRenderer;
@@ -308,6 +315,7 @@ export class GlobeEngine {
         viewportHeight !== this.lodSelectionViewportHeight ||
         requestedMinimumLevelOverride !== this.lodSelectionMinimumLevel ||
         terrainRefreshDue;
+      const lodStartedAt = performance.now();
       if (selectionChanged) {
         let selection = this.lod.select(
           this.camera,
@@ -339,13 +347,16 @@ export class GlobeEngine {
         this.lodCameraQuaternion.copy(this.camera.quaternion);
       }
       const selection = this.lodSelection!;
+      const terrainStartedAt = performance.now();
       const terrainStats = this.terrain?.update(selection.tiles, this.camera.position) ?? null;
+      const surfaceStartedAt = performance.now();
       let imageryStats: RasterTileLayerStats | null = null;
       for (const layer of this.imageryLayers.values()) {
         if (!layer.visible) continue;
         const stats = layer.update(selection.tiles, this.camera.position);
         if (layer === this.imagery) imageryStats = stats;
       }
+      const featureStartedAt = performance.now();
       for (const layer of this.featureLayers.values()) {
         if (layer.object3d.visible) layer.update(this.camera.position, now);
       }
@@ -355,8 +366,15 @@ export class GlobeEngine {
         }
       }
       this.grid.update(selection.tiles, this.camera.position);
-      this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
+      const renderStartedAt = performance.now();
       this.renderer.render(this.scene, this.camera);
+      this.framePerformance = {
+        lodMs: terrainStartedAt - lodStartedAt, terrainMs: surfaceStartedAt - terrainStartedAt,
+        surfaceMs: featureStartedAt - surfaceStartedAt, featureMs: renderStartedAt - featureStartedAt,
+        renderSubmitMs: performance.now() - renderStartedAt,
+        drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles
+      };
+      this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
     };
     this.frameHandle = requestAnimationFrame(renderFrame);
   }
@@ -600,10 +618,10 @@ export class GlobeEngine {
     const vectorSignature = [...vectorLayers]
       .map(([id, value]) => `${id}:${value.sourceLevel},${value.ready},${value.loading},${value.queued},${value.errors},${value.visible}`)
       .join(';');
-    const signature = `${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${vectorSignature}|${roundedCameraLevel}`;
+    const signature = `${Math.floor(performance.now() / 500)}|${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${vectorSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;
     this.lastStatsSignature = signature;
-    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers });
+    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers, performance: this.framePerformance });
   }
 }
 

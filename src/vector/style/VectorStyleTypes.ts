@@ -27,11 +27,14 @@ export type VectorSource = {
 
 export type MapStyle = {
   version: number;
+  sprite?: string;
+  glyphs?: string;
   sources: Record<string, VectorSource>;
   layers: StyleLayer[];
 };
 
 export type DecodedFeature = {
+  id?: number;
   type: VectorTileFeature['type'];
   properties: Record<string, number | string | boolean>;
   geometry: ReturnType<VectorTileFeature['loadGeometry']>;

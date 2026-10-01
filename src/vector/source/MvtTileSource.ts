@@ -15,12 +15,16 @@ export class MvtTileSource {
 
   private templates: readonly string[];
   private readonly tileJsonUrl?: string;
-  private readonly scheme: 'xyz' | 'tms';
+  private scheme: 'xyz' | 'tms';
+  private readonly explicitScheme?: 'xyz' | 'tms';
   private readonly subdomains: readonly string[];
   private readonly fetcher: typeof fetch;
   private metadataPromise: Promise<readonly string[]> | null = null;
 
   constructor(options: MvtTileSourceOptions) {
+    if (options.source.scheme !== undefined && options.source.scheme !== 'xyz' && options.source.scheme !== 'tms') {
+      throw new Error(`矢量数据源 ${options.id} 的 scheme 必须为 xyz 或 tms。`);
+    }
     const templates = options.source.tiles ?? [];
     if (templates.length === 0 && !options.source.url) {
       throw new Error(`矢量数据源 ${options.id} 没有 tiles 模板或 TileJSON URL。`);
@@ -29,6 +33,7 @@ export class MvtTileSource {
     this.templates = templates;
     this.tileJsonUrl = options.source.url;
     this.scheme = options.source.scheme ?? 'xyz';
+    this.explicitScheme = options.source.scheme;
     this.subdomains = options.source.subdomains ?? [];
     this.fetcher = options.fetcher ?? fetch;
     this.minLevel = Math.max(0, Math.round(options.source.minzoom ?? 0));
@@ -67,7 +72,13 @@ export class MvtTileSource {
     if (!response.ok) {
       throw new Error(`矢量 TileJSON 加载失败：${response.status} ${sanitizeUrl(this.tileJsonUrl)}`);
     }
-    const tileJson = await response.json() as { tiles?: string[] };
+    const tileJson = await response.json() as { tiles?: string[]; scheme?: string };
+    if (!this.explicitScheme && tileJson.scheme !== undefined) {
+      if (tileJson.scheme !== 'xyz' && tileJson.scheme !== 'tms') {
+        throw new Error(`矢量 TileJSON ${this.id} 的 scheme 无效：${tileJson.scheme}`);
+      }
+      this.scheme = tileJson.scheme;
+    }
     const templates = (tileJson.tiles ?? []).map((template) =>
       resolveMetadataUrl(template, this.tileJsonUrl!)
     );

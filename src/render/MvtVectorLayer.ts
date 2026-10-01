@@ -2,9 +2,16 @@ import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
-import { MvtDecoder } from '../vector/decoder/MvtDecoder';
+import { VectorDecodeService } from '../vector/worker/VectorDecodeService';
 import { MvtTileSource } from '../vector/source/MvtTileSource';
 import { MapStyleLoader } from '../vector/style/MapStyleLoader';
+import { VectorStyleRuntime } from '../vector/style/VectorStyleRuntime';
+import { bindVectorTerrain, vectorTerrainShader, vectorTerrainUniforms } from '../vector/terrain/VectorTerrainBinding';
+import {
+  ancestorAtLevel, buildBackgroundGeometry, buildFillGeometry, buildLineGeometry,
+  buildPointGeometry, firstPoint, webMercatorTileBounds, type GeometryBuilder
+} from '../vector/bucket/VectorGeometryBuilder';
+export { geographicDegreesToShaderRadians } from '../vector/bucket/VectorGeometryBuilder';
 import type {
   DecodedFeature,
   MapStyle,
@@ -36,6 +43,9 @@ export type MvtVectorLayerOptions = Readonly<{
   terrainSampleBudget?: number;
   maxLabelsPerTile?: number;
   maxVisibleLabels?: number;
+  /** Surface backgrounds are enabled for base maps, disabled for overlays. */
+  role?: 'base' | 'overlay';
+  symbols?: boolean;
   fetcher?: typeof fetch;
 }>;
 
@@ -60,12 +70,7 @@ type TileRecord = {
   group: THREE.Group | null;
   controller: AbortController | null;
   error: string | null;
-  drapes: DrapeState[];
   labels: LabelState[];
-};
-type DrapeState = {
-  coordinates: Float64Array;
-  heights: THREE.BufferAttribute;
 };
 type LabelState = {
   longitude: number;
@@ -74,13 +79,6 @@ type LabelState = {
   pixelWidth: number;
   pixelHeight: number;
 };
-type GeometryBuilder = {
-  coordinates: number[];
-  positions: number[];
-  heights: number[];
-  indices: number[];
-};
-
 /** Native GPU rendering path for tiled MVT fill/line/circle geometry and 3D labels. */
 export class MvtVectorLayer {
   readonly object3d = new THREE.Group();
@@ -89,14 +87,15 @@ export class MvtVectorLayer {
   private readonly ellipsoid: Ellipsoid;
   private readonly styleLoader: MapStyleLoader;
   private readonly directSource?: VectorSource;
-  private readonly decoder = new MvtDecoder();
+  private readonly decoder = new VectorDecodeService();
   private readonly terrain?: TerrainHeightSource;
   private readonly minLevel: number;
   private readonly maxLevel: number;
-  private readonly levelOffset: number;
+  private levelOffset: number;
+  private readonly role: 'base' | 'overlay';
+  private readonly symbols: boolean;
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
-  private readonly terrainSampleBudget: number;
   private readonly maxLabelsPerTile: number;
   private readonly maxVisibleLabels: number;
   private readonly heightOffset: number;
@@ -106,6 +105,7 @@ export class MvtVectorLayer {
   private readonly records = new Map<string, TileRecord>();
   private readonly queue: TileRecord[] = [];
   private style: MapStyle | null = null;
+  private styleRuntime: VectorStyleRuntime | null = null;
   private sourceId = '';
   private source: MvtTileSource | null = null;
   private sourceLayers = new Set<string>();
@@ -114,10 +114,6 @@ export class MvtVectorLayer {
   private currentSourceLevel = 0;
   private layerOpacity: number;
   private observedTerrainRevision = -1;
-  private terrainTargetRevision = Number.NaN;
-  private terrainDrapes: DrapeState[] = [];
-  private terrainDrapeIndex = 0;
-  private terrainVertexIndex = 0;
   private readonly labelNormal = new THREE.Vector3();
   private readonly labelToCamera = new THREE.Vector3();
   private disposed = false;
@@ -128,12 +124,13 @@ export class MvtVectorLayer {
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
     this.levelOffset = THREE.MathUtils.clamp(options.levelOffset ?? -1.7, -8, 2);
+    this.role = options.role ?? 'overlay';
+    this.symbols = options.symbols ?? this.role === 'overlay';
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 6));
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 256));
-    this.terrainSampleBudget = Math.max(128, Math.round(options.terrainSampleBudget ?? 4096));
     this.maxLabelsPerTile = Math.max(0, Math.round(options.maxLabelsPerTile ?? 12));
     this.maxVisibleLabels = Math.max(0, Math.round(options.maxVisibleLabels ?? 48));
-    this.heightOffset = Math.max(0, options.heightOffset ?? 8);
+    this.heightOffset = Math.max(0, options.heightOffset ?? (this.role === 'base' ? 0.1 : 3));
     this.order = options.order ?? 300;
     this.bounds = options.bounds;
     this.terrain = options.terrain;
@@ -164,6 +161,8 @@ export class MvtVectorLayer {
     const style = await this.styleLoader.load();
     const selected = this.styleLoader.selectVectorSource(style);
     this.style = style;
+    this.styleRuntime = new VectorStyleRuntime(style);
+    if (this.styleRuntime.issues.length) console.warn(`[MVT ${this.id}] 样式编译诊断`, this.styleRuntime.issues);
     this.sourceId = selected.id;
     this.sourceLayers = new Set(this.styleLoader.sourceLayerNames(style, selected.id));
     this.source = new MvtTileSource({
@@ -224,7 +223,7 @@ export class MvtVectorLayer {
       if (!record) {
         record = {
           id, key, state: 'queued', priority, lastUsedFrame: this.frame,
-          group: null, controller: null, error: null, drapes: [], labels: []
+          group: null, controller: null, error: null, labels: []
         };
         this.records.set(key, record);
         this.queue.push(record);
@@ -251,10 +250,20 @@ export class MvtVectorLayer {
     }
     for (const record of this.records.values()) {
       if (record.group) record.group.visible = visible.has(record.key);
+      if (record.group?.visible) record.group.traverse((object) => {
+        const material = (object as THREE.Mesh).material;
+        if (material instanceof THREE.ShaderMaterial) bindVectorTerrain(material, record.id, this.terrain);
+      });
     }
     this.queue.sort((a, b) => a.priority - b.priority);
     this.pumpQueue();
-    this.refreshTerrain();
+    // Geometry samples the shared DEM on the GPU. Only symbol anchors need CPU height queries.
+    if (this.terrain?.revision !== this.observedTerrainRevision) {
+      for (const record of this.records.values()) for (const label of record.labels) {
+        this.positionLabel(label.sprite, label.longitude, label.latitude);
+      }
+      this.observedTerrainRevision = this.terrain?.revision ?? -1;
+    }
     this.updateLabels(camera, viewportWidth, viewportHeight);
     this.evict();
   }
@@ -276,9 +285,16 @@ export class MvtVectorLayer {
     }
   }
 
+  setViewLevelOffset(offset: number): void {
+    if (Number.isFinite(offset)) this.levelOffset = THREE.MathUtils.clamp(offset, -8, 2);
+  }
+
+  get styleIssues() { return this.styleRuntime?.issues ?? []; }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.decoder.dispose();
     for (const record of this.records.values()) this.disposeRecord(record);
     this.records.clear();
     this.queue.length = 0;
@@ -305,16 +321,15 @@ export class MvtVectorLayer {
     try {
       const bytes = await this.source!.load(record.id, record.controller?.signal);
       if (this.disposed || record.controller?.signal.aborted) return;
-      const decoded = this.decoder.decode(bytes, this.sourceLayers);
+      const decoded = await this.decoder.decode(bytes, this.sourceLayers);
+      if (this.disposed || record.controller?.signal.aborted) return;
       const built = this.buildTile(record.id, decoded);
       record.group = built.group;
-      record.drapes = built.drapes;
       record.labels = built.labels;
       record.group.visible = false;
       this.object3d.add(record.group);
       record.state = 'ready';
       record.error = null;
-      this.terrainTargetRevision = Number.NaN;
     } catch (error) {
       if (record.controller?.signal.aborted) return;
       record.state = 'error';
@@ -326,15 +341,23 @@ export class MvtVectorLayer {
   private buildTile(id: TileId, decoded: ReadonlyMap<string, readonly DecodedFeature[]>) {
     const group = new THREE.Group();
     group.renderOrder = this.order;
-    const drapes: DrapeState[] = [];
     const labels: LabelState[] = [];
     const labelTexts = new Set<string>();
-    for (const layer of this.style!.layers) {
-      if (!styleLayerVisible(layer, id.level, this.sourceId)) continue;
-      const sourceLayer = layer['source-layer'];
-      if (!sourceLayer) continue;
-      const features = decoded.get(sourceLayer);
-      if (!features || features.length === 0) continue;
+    const types = new Set(['background', 'fill', 'line', 'circle']);
+    if (this.symbols) types.add('symbol');
+    for (const bucket of this.styleRuntime!.buckets(decoded, this.sourceId, id.level, types)) {
+      const { layer, features, order } = bucket;
+      const renderOrder = this.order + order * 0.001;
+      if (layer.type === 'background' && this.role === 'base') {
+        const state = this.createGeometry(buildBackgroundGeometry(id));
+        const mesh = new THREE.Mesh(state.geometry, this.createMaterial(
+          colorStyle(layer.paint?.['background-color'], '#a7d6fe'),
+          numberStyle(layer.paint?.['background-opacity'], 1), 'fill'
+        ));
+        configureObject(mesh, renderOrder);
+        group.add(mesh);
+      }
+      if (features.length === 0) continue;
       if (layer.type === 'fill') {
         const built = buildFillGeometry(id, features);
         if (built.indices.length === 0) continue;
@@ -344,9 +367,8 @@ export class MvtVectorLayer {
           colorStyle(layer.paint?.['fill-color'], '#42b8d8'), opacity, 'fill'
         );
         const mesh = new THREE.Mesh(state.geometry, material);
-        configureObject(mesh, this.order);
+        configureObject(mesh, renderOrder);
         group.add(mesh);
-        drapes.push(state.drape);
         const outline = layer.paint?.['fill-outline-color'];
         if (outline !== undefined) {
           const outlineState = this.createGeometry(buildLineGeometry(id, features));
@@ -354,9 +376,8 @@ export class MvtVectorLayer {
             colorStyle(outline, '#1b5f73'), Math.min(1, opacity + 0.25), 'line'
           );
           const outlineLines = new THREE.LineSegments(outlineState.geometry, outlineMaterial);
-          configureObject(outlineLines, this.order + 1);
+          configureObject(outlineLines, renderOrder + 0.0001);
           group.add(outlineLines);
-          drapes.push(outlineState.drape);
         }
       } else if (layer.type === 'line') {
         const built = buildLineGeometry(id, features);
@@ -367,9 +388,8 @@ export class MvtVectorLayer {
           colorStyle(layer.paint?.['line-color'], '#1b5f73'), opacity, 'line'
         );
         const lines = new THREE.LineSegments(state.geometry, material);
-        configureObject(lines, this.order + 1);
+        configureObject(lines, renderOrder);
         group.add(lines);
-        drapes.push(state.drape);
       } else if (layer.type === 'circle') {
         const built = buildPointGeometry(id, features);
         if (built.positions.length === 0) continue;
@@ -380,10 +400,9 @@ export class MvtVectorLayer {
           numberStyle(layer.paint?.['circle-radius'], 4) * 2
         );
         const points = new THREE.Points(state.geometry, material);
-        configureObject(points, this.order + 2);
+        configureObject(points, renderOrder);
         group.add(points);
-        drapes.push(state.drape);
-      } else if (layer.type === 'symbol') {
+      } else if (layer.type === 'symbol' && this.symbols) {
         for (const feature of features) {
           if (labels.length >= this.maxLabelsPerTile) break;
           const text = resolveText(layer.layout?.['text-field'], feature.properties);
@@ -396,20 +415,16 @@ export class MvtVectorLayer {
         }
       }
     }
-    return { group, drapes, labels };
+    return { group, labels };
   }
 
   private createGeometry(builder: GeometryBuilder) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(builder.positions, 3));
-    const heights = new THREE.Float32BufferAttribute(builder.heights, 1);
-    geometry.setAttribute('terrainHeight', heights);
+    geometry.setAttribute('terrainUv', new THREE.Float32BufferAttribute(builder.uvs, 2));
     if (builder.indices.length > 0) geometry.setIndex(builder.indices);
     geometry.computeBoundingSphere();
-    return {
-      geometry,
-      drape: { coordinates: new Float64Array(builder.coordinates), heights }
-    };
+    return { geometry };
   }
 
   private createMaterial(
@@ -420,6 +435,7 @@ export class MvtVectorLayer {
   ): THREE.ShaderMaterial {
     const material = new THREE.ShaderMaterial({
       uniforms: {
+        ...vectorTerrainUniforms(),
         sag_ellipsoidRadii: { value: new THREE.Vector2(this.ellipsoid.equatorialRadius, this.ellipsoid.polarRadius) },
         sag_heightOffset: { value: this.heightOffset },
         sag_cameraHigh: { value: new THREE.Vector3() },
@@ -429,13 +445,15 @@ export class MvtVectorLayer {
         pointSize: { value: pointSize }
       },
       vertexShader: /* glsl */ `
-        attribute float terrainHeight;
         uniform float pointSize;
         #include <common>
         #include <logdepthbuf_pars_vertex>
         ${globeCoordinateShader}
+        ${vectorTerrainShader}
+        varying vec2 v_tileUv;
         void main() {
-          gl_Position = sag_projectGeodetic(position.xy, terrainHeight);
+          v_tileUv = terrainUv;
+          gl_Position = sag_projectGeodetic(position.xy, vectorElevation());
           gl_PointSize = pointSize;
           #include <logdepthbuf_vertex>
         }
@@ -443,8 +461,10 @@ export class MvtVectorLayer {
       fragmentShader: /* glsl */ `
         uniform vec3 color;
         uniform float opacity;
+        varying vec2 v_tileUv;
         #include <logdepthbuf_pars_fragment>
         void main() {
+          if (v_tileUv.x < 0.0 || v_tileUv.x > 1.0 || v_tileUv.y < 0.0 || v_tileUv.y > 1.0) discard;
           ${primitive === 'point' ? 'if (distance(gl_PointCoord, vec2(0.5)) > 0.5) discard;' : ''}
           gl_FragColor = vec4(color, opacity);
           #include <logdepthbuf_fragment>
@@ -516,53 +536,6 @@ export class MvtVectorLayer {
     );
   }
 
-  private refreshTerrain(): void {
-    const revision = this.terrain?.revision ?? -1;
-    if (revision !== this.terrainTargetRevision) {
-      this.terrainTargetRevision = revision;
-      this.terrainDrapes = [...this.records.values()]
-        .filter((record) => record.state === 'ready')
-        .flatMap((record) => record.drapes);
-      this.terrainDrapeIndex = 0;
-      this.terrainVertexIndex = 0;
-      for (const record of this.records.values()) {
-        if (record.state !== 'ready') continue;
-        for (const label of record.labels) {
-          this.positionLabel(label.sprite, label.longitude, label.latitude);
-        }
-      }
-    }
-    if (revision === this.observedTerrainRevision) return;
-    let remaining = this.terrainSampleBudget;
-    while (remaining > 0 && this.terrainDrapeIndex < this.terrainDrapes.length) {
-      const state = this.terrainDrapes[this.terrainDrapeIndex]!;
-      const values = state.heights.array as Float32Array;
-      const start = this.terrainVertexIndex;
-      const end = Math.min(values.length, start + remaining);
-      for (let index = start; index < end; index += 1) {
-        values[index] = this.terrain?.enabled
-          ? this.terrain.sampleHeight(
-              state.coordinates[index * 2]!, state.coordinates[index * 2 + 1]!
-            ) ?? 0
-          : 0;
-      }
-      if (end > start) {
-        state.heights.clearUpdateRanges();
-        state.heights.addUpdateRange(start, end - start);
-        state.heights.needsUpdate = true;
-      }
-      remaining -= end - start;
-      this.terrainVertexIndex = end;
-      if (end >= values.length) {
-        this.terrainDrapeIndex += 1;
-        this.terrainVertexIndex = 0;
-      }
-    }
-    if (this.terrainDrapeIndex >= this.terrainDrapes.length) {
-      this.observedTerrainRevision = revision;
-      this.terrainDrapes = [];
-    }
-  }
 
   private updateLabels(
     camera: THREE.PerspectiveCamera,
@@ -665,143 +638,6 @@ export class MvtVectorLayer {
   }
 }
 
-function buildFillGeometry(id: TileId, features: readonly DecodedFeature[]): GeometryBuilder {
-  const builder = createBuilder();
-  for (const feature of features) {
-    if (feature.type !== 3) continue;
-    for (const polygon of classifyRings(feature.geometry)) {
-      const contour = polygon[0];
-      if (!contour || contour.length < 3) continue;
-      const rings = polygon.map((ring) => ring.map((point) => new THREE.Vector2(point.x, point.y)));
-      const faces = THREE.ShapeUtils.triangulateShape(rings[0]!, rings.slice(1));
-      const offsets: number[] = [];
-      for (const ring of polygon) {
-        offsets.push(builder.positions.length / 3);
-        for (const point of ring) appendTilePoint(builder, id, point.x, point.y, feature.extent);
-      }
-      const flattened: number[] = [];
-      polygon.forEach((ring, ringIndex) => {
-        const start = offsets[ringIndex]!;
-        for (let index = 0; index < ring.length; index += 1) flattened.push(start + index);
-      });
-      for (const face of faces) {
-        const [a, b, c] = face;
-        if (a === undefined || b === undefined || c === undefined) continue;
-        builder.indices.push(flattened[a]!, flattened[b]!, flattened[c]!);
-      }
-    }
-  }
-  return builder;
-}
-
-function buildLineGeometry(id: TileId, features: readonly DecodedFeature[]): GeometryBuilder {
-  const builder = createBuilder();
-  for (const feature of features) {
-    if (feature.type !== 2 && feature.type !== 3) continue;
-    for (const line of feature.geometry) {
-      for (let index = 1; index < line.length; index += 1) {
-        const previous = line[index - 1]!;
-        const current = line[index]!;
-        appendTilePoint(builder, id, previous.x, previous.y, feature.extent);
-        appendTilePoint(builder, id, current.x, current.y, feature.extent);
-      }
-    }
-  }
-  return builder;
-}
-
-function buildPointGeometry(id: TileId, features: readonly DecodedFeature[]): GeometryBuilder {
-  const builder = createBuilder();
-  for (const feature of features) {
-    if (feature.type !== 1) continue;
-    for (const line of feature.geometry) {
-      for (const point of line) appendTilePoint(builder, id, point.x, point.y, feature.extent);
-    }
-  }
-  return builder;
-}
-
-function firstPoint(id: TileId, feature: DecodedFeature): readonly [number, number] | null {
-  const point = feature.geometry[0]?.[0];
-  return point ? tilePointToGeographic(id, point.x, point.y, feature.extent) : null;
-}
-
-function appendTilePoint(builder: GeometryBuilder, id: TileId, x: number, y: number, extent: number): void {
-  const [longitude, latitude] = tilePointToGeographic(id, x, y, extent);
-  // Terrain sampling and labels consume degrees; the native globe shader's
-  // geodetic position contract is radians.
-  builder.coordinates.push(longitude, latitude);
-  const [shaderLongitude, shaderLatitude] = geographicDegreesToShaderRadians(
-    longitude,
-    latitude
-  );
-  builder.positions.push(shaderLongitude, shaderLatitude, 0);
-  builder.heights.push(0);
-}
-
-/** Convert public/terrain degree coordinates to the native globe shader contract. */
-export function geographicDegreesToShaderRadians(
-  longitude: number,
-  latitude: number
-): readonly [number, number] {
-  return [THREE.MathUtils.degToRad(longitude), THREE.MathUtils.degToRad(latitude)];
-}
-
-function tilePointToGeographic(
-  id: TileId, x: number, y: number, extent: number
-): readonly [number, number] {
-  const size = 2 ** id.level;
-  const u = (id.x + x / extent) / size;
-  const v = (id.y + y / extent) / size;
-  const longitude = u * 360 - 180;
-  const latitude = Math.atan(Math.sinh(Math.PI * (1 - 2 * v))) * 180 / Math.PI;
-  return [longitude, latitude];
-}
-
-function webMercatorTileBounds(id: TileId): readonly [number, number, number, number] {
-  const size = 2 ** id.level;
-  const west = id.x / size * 360 - 180;
-  const east = (id.x + 1) / size * 360 - 180;
-  const north = Math.atan(Math.sinh(Math.PI - id.y / size * Math.PI * 2)) * 180 / Math.PI;
-  const south = Math.atan(Math.sinh(Math.PI - (id.y + 1) / size * Math.PI * 2)) * 180 / Math.PI;
-  return [west, south, east, north];
-}
-
-function classifyRings(geometry: DecodedFeature['geometry']) {
-  const polygons: Array<Array<DecodedFeature['geometry'][number]>> = [];
-  let current: Array<DecodedFeature['geometry'][number]> | null = null;
-  let outerSign = 0;
-  for (const ring of geometry) {
-    const area = signedArea(ring);
-    if (area === 0) continue;
-    const sign = Math.sign(area);
-    if (outerSign === 0) outerSign = sign;
-    if (sign === outerSign || !current) {
-      current = [ring];
-      polygons.push(current);
-    } else current.push(ring);
-  }
-  return polygons;
-}
-
-function signedArea(ring: DecodedFeature['geometry'][number]): number {
-  let sum = 0;
-  for (let index = 0; index < ring.length; index += 1) {
-    const current = ring[index]!;
-    const next = ring[(index + 1) % ring.length]!;
-    sum += current.x * next.y - next.x * current.y;
-  }
-  return sum * 0.5;
-}
-
-function createBuilder(): GeometryBuilder {
-  return { coordinates: [], positions: [], heights: [], indices: [] };
-}
-
-function ancestorAtLevel(id: TileId, level: number): TileId {
-  const shift = Math.max(0, id.level - level);
-  return { level, x: Math.floor(id.x / 2 ** shift), y: Math.floor(id.y / 2 ** shift) };
-}
 
 function styleLayerVisible(layer: StyleLayer, zoom: number, sourceId: string): boolean {
   return layer.layout?.visibility !== 'none' &&

@@ -19,6 +19,7 @@ export class MvtDecoder {
       for (let index = 0; index < layer.length; index += 1) {
         const feature = layer.feature(index);
         features.push({
+          id: feature.id,
           type: feature.type,
           properties: feature.properties,
           geometry: feature.loadGeometry(),

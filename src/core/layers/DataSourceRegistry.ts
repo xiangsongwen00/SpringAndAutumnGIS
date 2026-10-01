@@ -72,6 +72,8 @@ export type MvtVectorLayerOverrides = Readonly<{
   terrain?: TerrainHeightSource;
   maxLabelsPerTile?: number;
   maxVisibleLabels?: number;
+  role?: 'base' | 'overlay';
+  symbols?: boolean;
 }>;
 
 export type DataSourceAvailability = Readonly<{
@@ -285,6 +287,8 @@ export class DataSourceRegistry {
       terrain: overrides.terrain,
       maxLabelsPerTile: overrides.maxLabelsPerTile,
       maxVisibleLabels: overrides.maxVisibleLabels,
+      role: overrides.role,
+      symbols: overrides.symbols,
       fetcher: this.fetcher
     });
   }

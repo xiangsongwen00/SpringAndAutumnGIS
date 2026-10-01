@@ -409,7 +409,7 @@ export class RasterTileLayer {
       vertexShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
-        varying vec2 v_terrainUv;
+        varying vec3 v_terrainNormal;
         attribute float skirt;
         uniform vec3 sag_originHigh;
         uniform vec3 sag_originLow;
@@ -436,6 +436,8 @@ export class RasterTileLayer {
         uniform bool hasTerrainParent;
         uniform float terrainExaggeration;
         uniform float terrainSkirtDepth;
+        uniform vec2 terrainMetersPerTexel;
+        uniform bool isOverlay;
         #include <common>
         #include <logdepthbuf_pars_vertex>
         ${globeCoordinateShader}
@@ -470,7 +472,20 @@ export class RasterTileLayer {
           // offset and can reopen a geometrically stitched edge.
           vec2 terrainSampleUv = 0.5 * terrainTexelSize +
             terrainUv * (vec2(1.0) - terrainTexelSize);
-          v_terrainUv = terrainSampleUv;
+          // Relief gradients belong to the mesh vertices, not every screen
+          // fragment. Keep the authoritative displacement/edge samples intact.
+          v_terrainNormal = vec3(0.0, 0.0, 1.0);
+          if (hasTerrain && !isOverlay) {
+            float westHeight = texture2D(terrainTexture, terrainSampleUv - vec2(terrainTexelSize.x, 0.0)).r;
+            float eastHeight = texture2D(terrainTexture, terrainSampleUv + vec2(terrainTexelSize.x, 0.0)).r;
+            float northHeight = texture2D(terrainTexture, terrainSampleUv - vec2(0.0, terrainTexelSize.y)).r;
+            float southHeight = texture2D(terrainTexture, terrainSampleUv + vec2(0.0, terrainTexelSize.y)).r;
+            float slopeEast = (eastHeight - westHeight) * terrainExaggeration /
+              max(1.0, 2.0 * terrainMetersPerTexel.x);
+            float slopeNorth = (northHeight - southHeight) * terrainExaggeration /
+              max(1.0, 2.0 * terrainMetersPerTexel.y);
+            v_terrainNormal = normalize(vec3(-slopeEast, -slopeNorth, 1.0));
+          }
           float fineHeight = hasTerrain
             ? texture2D(terrainTexture, terrainSampleUv).r * terrainExaggeration
             : 0.0;
@@ -521,16 +536,12 @@ export class RasterTileLayer {
       fragmentShader: /* glsl */ `
         varying vec2 v_uv;
         varying vec3 v_globeNormal;
-        varying vec2 v_terrainUv;
+        varying vec3 v_terrainNormal;
         uniform sampler2D tileTexture;
-        uniform sampler2D terrainTexture;
         uniform bool hasTexture;
         uniform float layerOpacity;
         uniform bool isOverlay;
         uniform bool hasTerrain;
-        uniform float terrainExaggeration;
-        uniform vec2 terrainTexelSize;
-        uniform vec2 terrainMetersPerTexel;
         uniform vec3 placeholder;
         #include <logdepthbuf_pars_fragment>
         void main() {
@@ -544,15 +555,7 @@ export class RasterTileLayer {
             0.0
           );
           if (hasTerrain && !isOverlay) {
-            float westHeight = texture2D(terrainTexture, v_terrainUv - vec2(terrainTexelSize.x, 0.0)).r;
-            float eastHeight = texture2D(terrainTexture, v_terrainUv + vec2(terrainTexelSize.x, 0.0)).r;
-            float northHeight = texture2D(terrainTexture, v_terrainUv - vec2(0.0, terrainTexelSize.y)).r;
-            float southHeight = texture2D(terrainTexture, v_terrainUv + vec2(0.0, terrainTexelSize.y)).r;
-            float slopeEast = (eastHeight - westHeight) * terrainExaggeration /
-              max(1.0, 2.0 * terrainMetersPerTexel.x);
-            float slopeNorth = (northHeight - southHeight) * terrainExaggeration /
-              max(1.0, 2.0 * terrainMetersPerTexel.y);
-            vec3 terrainNormal = normalize(vec3(-slopeEast, -slopeNorth, 1.0));
+            vec3 terrainNormal = normalize(v_terrainNormal);
             float relief = 0.78 + 0.30 * max(
               dot(terrainNormal, normalize(vec3(-0.45, 0.55, 0.78))),
               0.0
