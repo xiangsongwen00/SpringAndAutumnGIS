@@ -35,7 +35,8 @@ type LocalTokenConfig = Readonly<{
 
 const layerCatalog = layerCatalogJson as unknown as LayerCatalogConfig;
 // Opt-in bounded samples for the dynamic browser audit, absent in normal use.
-const auditWindow = window as Window & { __terrainFrameAudit?: GlobeFramePerformance[]; __motionSampling?: boolean };
+const auditWindow = window as Window & { __terrainFrameAudit?: GlobeFramePerformance[]; __coldFrameAudit?: GlobeFramePerformance[];
+  __motionSampling?: boolean; __coldSampling?: boolean };
 const localTokens = await loadTokenConfig();
 const container = requiredElement<HTMLElement>('#globe');
 const selectedValue = requiredElement<HTMLElement>('#selected-value');
@@ -197,6 +198,8 @@ const renderStats = (stats: GlobeEngineStats): void => {
     const draw = nativeBase.drawStats;
     imageryValue.textContent += ` · 制图${draw.queued}排队/${draw.lastMs.toFixed(1)}ms/峰值${draw.maxMs.toFixed(1)}ms`;
     imageryValue.textContent += ` · 近1s制图${draw.recentCount}张/${draw.recentMs.toFixed(1)}ms`;
+    imageryValue.textContent += ` · ${draw.worker ? 'Worker' : '兼容主线程'}构建${draw.building}队列/${draw.buildMs.toFixed(1)}ms` +
+      ` · 分批${draw.recentSteps}步/上传${(draw.uploadBytes / 1024).toFixed(0)}KiB`;
   }
   const baseSymbolStats = stats.vectorLayers.get('native-base-symbols');
   if (baseSymbolStats) imageryValue.textContent += ` · 底图点注记 ${baseSymbolStats.visibleLabels}/${baseSymbolStats.allocatedLabels}（显示/缓存）· placement ${baseSymbolStats.placementMs.toFixed(1)}ms`;
@@ -288,8 +291,8 @@ const engine = new GlobeEngine({
   onStats: renderStats,
   onFramePerformance: new URLSearchParams(window.location.search).get('performanceAudit') === '1'
     ? (timing) => {
-      if (!auditWindow.__motionSampling) return;
-      const samples = auditWindow.__terrainFrameAudit ??= [];
+      if (!auditWindow.__motionSampling && !auditWindow.__coldSampling) return;
+      const samples = auditWindow.__motionSampling ? auditWindow.__terrainFrameAudit ??= [] : auditWindow.__coldFrameAudit ??= [];
       if (samples.length >= 1000) samples.shift();
       samples.push(timing);
     } : undefined

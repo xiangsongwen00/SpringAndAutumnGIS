@@ -5,7 +5,9 @@ import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { VectorDecodeService } from '../vector/worker/VectorDecodeService';
 import { MvtTileSource } from '../vector/source/MvtTileSource';
 import { MapStyleLoader } from '../vector/style/MapStyleLoader';
-import { VectorStyleRuntime } from '../vector/style/VectorStyleRuntime';
+import { VectorStyleRuntime, type VectorStyleIssue } from '../vector/style/VectorStyleRuntime';
+import { VectorNativeService } from '../vector/worker/VectorNativeService';
+import type { NativeBucket, NativeGeometry } from '../vector/worker/VectorNativeBuild';
 import { bindVectorTerrain, vectorTerrainShader, vectorTerrainUniforms } from '../vector/terrain/VectorTerrainBinding';
 import {
   ancestorAtLevel, buildBackgroundGeometry, buildFillGeometry, buildLineGeometry,
@@ -122,6 +124,8 @@ export class MvtVectorLayer {
   private readonly queue: TileRecord[] = [];
   private style: MapStyle | null = null;
   private styleRuntime: VectorStyleRuntime | null = null;
+  private readonly nativeBuilder = new VectorNativeService();
+  private nativeIssues: VectorStyleIssue[] = [];
   private sourceId = '';
   private source: MvtTileSource | null = null;
   private sourceLayers = new Set<string>();
@@ -179,8 +183,10 @@ export class MvtVectorLayer {
     const style = await this.styleLoader.load();
     const selected = this.styleLoader.selectVectorSource(style);
     this.style = style;
-    this.styleRuntime = new VectorStyleRuntime(style);
-    if (this.styleRuntime.issues.length) console.warn(`[MVT ${this.id}] 样式编译诊断`, this.styleRuntime.issues);
+    const types = new Set(this.symbolsOnly ? [] : ['background', 'fill', 'line', 'circle']);
+    if (this.symbols) types.add('symbol');
+    this.nativeIssues = await this.nativeBuilder.initialize(style, types);
+    if (this.nativeIssues.length) console.warn(`[MVT ${this.id}] 样式编译诊断`, this.nativeIssues);
     this.sourceId = selected.id;
     this.sourceLayers = new Set(this.styleLoader.sourceLayerNames(style, selected.id));
     const source = new MvtTileSource({
@@ -337,12 +343,13 @@ export class MvtVectorLayer {
     if (Number.isFinite(offset)) this.levelOffset = THREE.MathUtils.clamp(offset, -8, 2);
   }
 
-  get styleIssues() { return this.styleRuntime?.issues ?? []; }
+  get styleIssues() { return this.styleRuntime?.issues ?? this.nativeIssues; }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.decoder?.dispose();
+    this.nativeBuilder.dispose();
     for (const record of this.records.values()) this.disposeRecord(record);
     this.records.clear();
     this.queue.length = 0;
@@ -375,9 +382,10 @@ export class MvtVectorLayer {
         decoded = await this.decoder!.decode(bytes, this.sourceLayers);
       }
       if (this.disposed || record.controller?.signal.aborted || this.records.get(record.key) !== record) return;
+      const prepared = await this.nativeBuilder.build(decoded, record.id, this.sourceId, record.controller?.signal);
       if (this.symbolsOnly) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       if (this.disposed || record.controller?.signal.aborted || this.records.get(record.key) !== record) return;
-      const built = this.buildTile(record.id, decoded);
+      const built = this.buildTile(record.id, decoded, prepared);
       record.group = built.group;
       record.labels = built.labels;
       record.group.visible = false;
@@ -393,7 +401,7 @@ export class MvtVectorLayer {
     }
   }
 
-  private buildTile(id: TileId, decoded: ReadonlyMap<string, readonly DecodedFeature[]>) {
+  private buildTile(id: TileId, decoded: ReadonlyMap<string, readonly DecodedFeature[]>, prepared?: NativeBucket[]) {
     const group = new THREE.Group();
     group.renderOrder = this.order;
     const labels: LabelState[] = [];
@@ -401,7 +409,10 @@ export class MvtVectorLayer {
     const allocatedLabels = [...this.records.values()].reduce((sum, record) => sum + record.labels.length, 0);
     const types = new Set(this.symbolsOnly ? [] : ['background', 'fill', 'line', 'circle']);
     if (this.symbols) types.add('symbol');
-    const buckets = this.styleRuntime!.buckets(decoded, this.sourceId, id.level, types);
+    // Compatibility/test callers can still build synchronously. Normal loads
+    // receive worker-evaluated buckets and typed geometry, never triangulate here.
+    const buckets: NativeBucket[] = prepared ?? (this.styleRuntime ??= new VectorStyleRuntime(this.style!, types))
+      .buckets(decoded, this.sourceId, id.level, types);
     // Higher style layers get placement priority, rather than spending the
     // per-tile budget on low-order park labels before city/admin text.
     if (this.symbolsOnly) buckets.sort((a, b) => b.order - a.order);
@@ -409,7 +420,7 @@ export class MvtVectorLayer {
       const { layer, features, order } = bucket;
       const renderOrder = this.order + order * 0.001;
       if (layer.type === 'background' && this.role === 'base') {
-        const state = this.createGeometry(buildBackgroundGeometry(id));
+        const state = this.createGeometry(bucket.geometry ?? buildBackgroundGeometry(id));
         const mesh = new THREE.Mesh(state.geometry, this.createMaterial(
           colorStyle(layer.paint?.['background-color'], '#a7d6fe'),
           numberStyle(layer.paint?.['background-opacity'], 1), 'fill'
@@ -419,7 +430,7 @@ export class MvtVectorLayer {
       }
       if (features.length === 0) continue;
       if (layer.type === 'fill') {
-        const built = buildFillGeometry(id, features);
+        const built = bucket.geometry ?? buildFillGeometry(id, features);
         if (built.indices.length === 0) continue;
         const state = this.createGeometry(built);
         const opacity = numberStyle(layer.paint?.['fill-opacity'], 1);
@@ -431,7 +442,7 @@ export class MvtVectorLayer {
         group.add(mesh);
         const outline = layer.paint?.['fill-outline-color'];
         if (outline !== undefined) {
-          const outlineState = this.createGeometry(buildLineGeometry(id, features));
+          const outlineState = this.createGeometry(bucket.outline ?? buildLineGeometry(id, features));
           const outlineMaterial = this.createMaterial(
             colorStyle(outline, '#1b5f73'), Math.min(1, opacity + 0.25), 'line'
           );
@@ -440,7 +451,7 @@ export class MvtVectorLayer {
           group.add(outlineLines);
         }
       } else if (layer.type === 'line') {
-        const built = buildLineGeometry(id, features);
+        const built = bucket.geometry ?? buildLineGeometry(id, features);
         if (built.positions.length === 0) continue;
         const state = this.createGeometry(built);
         const opacity = numberStyle(layer.paint?.['line-opacity'], 1);
@@ -451,7 +462,7 @@ export class MvtVectorLayer {
         configureObject(lines, renderOrder);
         group.add(lines);
       } else if (layer.type === 'circle') {
-        const built = buildPointGeometry(id, features);
+        const built = bucket.geometry ?? buildPointGeometry(id, features);
         if (built.positions.length === 0) continue;
         const state = this.createGeometry(built);
         const opacity = numberStyle(layer.paint?.['circle-opacity'], 1);
@@ -484,12 +495,16 @@ export class MvtVectorLayer {
     return { group, labels };
   }
 
-  private createGeometry(builder: GeometryBuilder) {
+  private createGeometry(builder: GeometryBuilder | NativeGeometry) {
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(builder.positions, 3));
-    geometry.setAttribute('terrainUv', new THREE.Float32BufferAttribute(builder.uvs, 2));
-    if (builder.indices.length > 0) geometry.setIndex(builder.indices);
-    geometry.computeBoundingSphere();
+    geometry.setAttribute('position', builder.positions instanceof Float32Array ? new THREE.BufferAttribute(builder.positions, 3)
+      : new THREE.Float32BufferAttribute(builder.positions, 3));
+    geometry.setAttribute('terrainUv', builder.uvs instanceof Float32Array ? new THREE.BufferAttribute(builder.uvs, 2)
+      : new THREE.Float32BufferAttribute(builder.uvs, 2));
+    if (builder.indices.length > 0) geometry.setIndex(builder.indices instanceof Uint32Array
+      ? new THREE.BufferAttribute(builder.indices, 1) : builder.indices);
+    // Objects explicitly disable Three's flat-coordinate frustum culling;
+    // a sphere over lon/lat radians is neither needed nor a world bound.
     return { geometry };
   }
 

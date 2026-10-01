@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { TileId } from '../tiling/GeographicTilingScheme';
+import { terrainDecodeService } from './TerrainDecodeService';
 
 export type TerrainTileScheme = 'xyz' | 'tms';
 export type TerrainRgbEncoding = 'mapbox' | 'terrarium';
@@ -116,7 +117,9 @@ export class TerrainRgbProvider implements TerrainProvider {
           continue;
         }
         if (!response.ok) throw new Error(`地形请求失败：${response.status} ${url}`);
-        return await decodeTerrainImage(sourceTile, await response.blob(), this.encoding);
+        const field = await terrainDecodeService.decode(await response.blob(), this.encoding, signal);
+        signal?.throwIfAborted();
+        return createTerrainTile(sourceTile, field.width, field.height, field.heights, field.minimumHeight, field.maximumHeight);
       } catch (error) {
         lastError = error;
       }
@@ -198,45 +201,6 @@ function resolveTerrainUrl(template: string, tile: TileId, scheme: TerrainTileSc
     .split('{y}').join(String(y));
 }
 
-async function decodeTerrainImage(
-  id: TileId,
-  blob: Blob,
-  encoding: TerrainRgbEncoding
-): Promise<TerrainTileData> {
-  const bitmap = await createImageBitmap(blob);
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) {
-    bitmap.close();
-    throw new Error('当前浏览器无法读取 Terrain-RGB 像素。');
-  }
-  context.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-  const heights = new Float32Array(canvas.width * canvas.height);
-  let minimumHeight = Number.POSITIVE_INFINITY;
-  let maximumHeight = Number.NEGATIVE_INFINITY;
-  for (let pixel = 0, index = 0; pixel < pixels.length; pixel += 4, index += 1) {
-    const red = pixels[pixel] ?? 0;
-    const green = pixels[pixel + 1] ?? 0;
-    const blue = pixels[pixel + 2] ?? 0;
-    const height = decodeTerrainRgbHeight(red, green, blue, encoding);
-    heights[index] = height;
-    minimumHeight = Math.min(minimumHeight, height);
-    maximumHeight = Math.max(maximumHeight, height);
-  }
-  const normalized = normalizeDyadicHeightGrid(heights, canvas.width, canvas.height);
-  return createTerrainTile(
-    id,
-    normalized.width,
-    normalized.height,
-    normalized.heights,
-    minimumHeight,
-    maximumHeight
-  );
-}
 
 function createFlatTerrainTile(id: TileId, height: number): TerrainTileData {
   return createTerrainTile(id, 1, 1, new Float32Array([height]), height, height);
@@ -261,49 +225,4 @@ function createTerrainTile(
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return { id, width, height, heights, minimumHeight, maximumHeight, texture };
-}
-
-/**
- * A 256-sample edge has 255 intervals and cannot nest exactly under quadtree
- * subdivision. 257 samples produce 256 dyadic cells, so parent/child edge
- * vertices coincide at every level transition.
- */
-function normalizeDyadicHeightGrid(
-  source: Float32Array,
-  sourceWidth: number,
-  sourceHeight: number
-): { width: number; height: number; heights: Float32Array } {
-  // The rendered regular grid needs 256 dyadic cells, not one vertex per
-  // source image pixel. Keeping a 512px Terrain-RGB source as 513x513 makes a
-  // tile four times heavier while providing detail the current mesh cannot
-  // consume. A fixed 257x257 endpoint grid also guarantees parent/child
-  // coincidence and makes resource budgeting independent of provider size.
-  const width = sourceWidth > 1 ? 257 : 1;
-  const height = sourceHeight > 1 ? 257 : 1;
-  if (width === sourceWidth && height === sourceHeight) {
-    return { width, height, heights: source };
-  }
-  const heights = new Float32Array(width * height);
-  for (let y = 0; y < height; y += 1) {
-    const sourceY = height <= 1 ? 0 : (y / (height - 1)) * (sourceHeight - 1);
-    const y0 = Math.floor(sourceY);
-    const y1 = Math.min(sourceHeight - 1, y0 + 1);
-    const ty = sourceY - y0;
-    for (let x = 0; x < width; x += 1) {
-      const sourceX = width <= 1 ? 0 : (x / (width - 1)) * (sourceWidth - 1);
-      const x0 = Math.floor(sourceX);
-      const x1 = Math.min(sourceWidth - 1, x0 + 1);
-      const tx = sourceX - x0;
-      const northWest = source[y0 * sourceWidth + x0] ?? 0;
-      const northEast = source[y0 * sourceWidth + x1] ?? northWest;
-      const southWest = source[y1 * sourceWidth + x0] ?? northWest;
-      const southEast = source[y1 * sourceWidth + x1] ?? southWest;
-      heights[y * width + x] = THREE.MathUtils.lerp(
-        THREE.MathUtils.lerp(northWest, northEast, tx),
-        THREE.MathUtils.lerp(southWest, southEast, tx),
-        ty
-      );
-    }
-  }
-  return { width, height, heights };
 }

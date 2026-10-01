@@ -7,6 +7,7 @@ import { join } from 'node:path';
 // Run with a Vite dev server. No virtual-time budget: it can expire before
 // actual Worker messages arrive, incorrectly leaving a regression RUNNING.
 const url = process.env.VECTOR_TEST_URL ?? 'http://127.0.0.1:5173/test/vector-orientation.html';
+const initialUrl = process.env.VECTOR_COLD_START === '1' ? 'about:blank' : url;
 const chrome = process.env.CHROME_PATH ?? (process.platform === 'win32'
   ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : 'google-chrome');
 const profile = await mkdtemp(join(tmpdir(), 'sag-vector-browser-'));
@@ -15,7 +16,7 @@ const gpuArguments = process.env.VECTOR_GPU_MODE === 'hardware' ? [] :
 const processHandle = spawn(chrome, ['--headless', '--no-first-run', '--disable-extensions',
   `--window-size=${process.env.VECTOR_WINDOW_SIZE ?? '1280,800'}`,
   '--disable-background-networking', '--disable-gpu-sandbox', ...gpuArguments, '--remote-debugging-port=0',
-  `--user-data-dir=${profile}`, url], { windowsHide: true, stdio: 'ignore' });
+  `--user-data-dir=${profile}`, initialUrl], { windowsHide: true, stdio: 'ignore' });
 let launchError;
 processHandle.on('error', (error) => { launchError = error; });
 const deadline = Date.now() + 60000;
@@ -34,7 +35,7 @@ try {
   let page;
   while (!page && Date.now() < deadline) {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    page = targets.find((target) => target.type === 'page' && target.url === url);
+    page = targets.find((target) => target.type === 'page' && target.url === initialUrl);
     if (!page) await pause();
   }
   assert.ok(page, 'Regression page did not open');
@@ -49,6 +50,22 @@ try {
     pending.set(id, resolve);
     socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
   });
+  const command = (method, params) => new Promise((resolve) => {
+    const id = ++nextId; pending.set(id, resolve);
+    socket.send(JSON.stringify({ id, method, params }));
+  });
+  if (process.env.VECTOR_COLD_START === '1') {
+    await command('Page.enable', {});
+    await command('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.__coldAudit={frames:[],longTasks:[],firstTextureMs:null};
+      window.__coldSampling=true;
+      new PerformanceObserver(list=>{if(window.__coldSampling)window.__coldAudit.longTasks.push(...list.getEntries().map(e=>({startMs:e.startTime,durationMs:e.duration})));}).observe({type:'longtask',buffered:true});
+      let previous;function sample(now){if(previous!==undefined&&window.__coldAudit.frames.length<10000)window.__coldAudit.frames.push(now-previous);previous=now;
+      if(window.__coldAudit.firstTextureMs===null&&Number(document.querySelector('#imagery-value')?.textContent.match(/纹理\\s+(\\d+)\\s+就绪/)?.[1])>0)window.__coldAudit.firstTextureMs=now;
+      if(window.__coldSampling)requestAnimationFrame(sample);}requestAnimationFrame(sample);
+    ` });
+    await command('Page.navigate', { url });
+  }
   if (process.env.VECTOR_APP_AUDIT === '1') {
     let appState;
     let settledAt = 0;
@@ -72,6 +89,11 @@ try {
       await pause();
     } while (Date.now() < deadline);
     console.log(JSON.stringify(appState));
+    if (process.env.VECTOR_COLD_START === '1') {
+      const startup = await evaluate('(()=>{window.__coldSampling=false;const s=window.__coldAudit;const a=s.frames.sort((x,y)=>x-y);return {firstTextureMs:s.firstTextureMs,observedSettledMs:performance.now(),frames:a.length,p95Ms:a[Math.floor(a.length*.95)],p99Ms:a[Math.floor(a.length*.99)],longTasks:s.longTasks.length,longTaskMaxMs:Math.max(0,...s.longTasks.map(t=>t.durationMs)),largestLongTasks:s.longTasks.sort((x,y)=>y.durationMs-x.durationMs).slice(0,5),phases:Object.fromEntries(["lodMs","terrainMs","surfaceMs","featureMs","renderSubmitMs"].map(key=>{const p=(window.__coldFrameAudit??[]).map(s=>s[key]).sort((x,y)=>x-y);return [key,{p95:p[Math.floor(p.length*.95)]??null,max:p.at(-1)??null}]})),resourceEntries:performance.getEntriesByType("resource").length};})()');
+      assert.ok(startup.result?.result?.value, JSON.stringify(startup));
+      console.log(`Cold start: ${JSON.stringify(startup.result?.result?.value)}`);
+    }
     if (process.env.VECTOR_REQUIRE_LABELS !== '0') {
       assert.ok(Number(appState?.imagery?.match(/底图点注记\s+(\d+)\//)?.[1]) > 0, 'Real Esri point labels did not become visible');
     } else assert.ok(Number(appState?.selected) > 0, 'Real terrain scene did not become visible');

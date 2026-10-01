@@ -14,8 +14,9 @@ export class VectorStyleRuntime {
   private readonly compiled = new Map<string, (zoom: number, feature?: DecodedFeature) => unknown>();
   private readonly filters = new Map<string, ReturnType<typeof featureFilter>>();
 
-  constructor(style: MapStyle) {
-    this.layers = derefLayers(style.layers as LayerSpecification[]) as StyleLayer[];
+  constructor(style: MapStyle, types?: ReadonlySet<string>) {
+    this.layers = (derefLayers(style.layers as LayerSpecification[]) as StyleLayer[])
+      .filter(layer => !types || types.has(layer.type));
     const reference = latest as unknown as Record<string, Record<string, StylePropertySpecification>>;
     for (const layer of this.layers) {
       try {

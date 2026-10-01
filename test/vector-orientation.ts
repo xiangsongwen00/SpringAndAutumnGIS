@@ -7,6 +7,13 @@ import { UrlTemplateRasterProvider } from '../src/core/tiles/RasterTileProvider'
 import { Ellipsoid } from '../src/core/geo/Ellipsoid';
 import { WebMercatorTilingScheme } from '../src/core/tiling/WebMercatorTilingScheme';
 import { MvtVectorLayer } from '../src/render/MvtVectorLayer';
+import { TerrainDecodeService } from '../src/core/terrain/TerrainDecodeService';
+import { convertTerrainPixels } from '../src/core/terrain/TerrainHeightConversion';
+import { VectorSurfaceService } from '../src/vector/worker/VectorSurfaceService';
+import { VectorNativeService } from '../src/vector/worker/VectorNativeService';
+import type { SurfacePlan } from '../src/vector/worker/VectorSurfaceBuild';
+import type { DecodedVectorTile } from '../src/vector/style/VectorStyleTypes';
+import { SerialWorkerClient } from '../src/core/workers/SerialWorkerClient';
 
 // Actual PBF -> worker -> style -> GPU -> surface sampling. North red, south green.
 const result = document.querySelector('#result')!;
@@ -53,6 +60,30 @@ const geometry = new THREE.PlaneGeometry(2, 2);
 scene.add(new THREE.Mesh(geometry, material));
 const pixels = new Uint8Array(128 * 128 * 4);
 try {
+  // Deterministic queue lifecycle: cancelled work must never clone a queued
+  // payload, publish a stale active result, or restart a worker storm.
+  const posted: Array<{ id: number }> = [];
+  let terminated = false;
+  const fake = { onmessage: null as ((event: MessageEvent) => void) | null,
+    onerror: null, onmessageerror: null,
+    postMessage: (message: { id: number }) => posted.push(message),
+    terminate: () => { terminated = true; } };
+  const rpc = new SerialWorkerClient(() => fake as unknown as Worker, 2);
+  const activeAbort = new AbortController(), queuedAbort = new AbortController();
+  let cloned = false;
+  const active = rpc.request({ job: 'active' }, activeAbort.signal).then(() => false, () => true);
+  const queued = rpc.request(() => { cloned = true; return { job: 'queued' }; }, queuedAbort.signal).then(() => false, () => true);
+  check(await rpc.request({ job: 'overflow' }).then(() => false, () => true), 'worker queue must apply bounded backpressure');
+  queuedAbort.abort(); activeAbort.abort();
+  check(await active && await queued && !cloned && posted.length === 1 && rpc.pending === 1,
+    'queued abort removes un-cloned payload; active abort waits for physical completion');
+  const next = rpc.request<number>({ job: 'next' });
+  fake.onmessage!({ data: { id: posted[0]!.id, result: 'stale' } } as MessageEvent);
+  check(posted.length === 2 && !terminated && !cloned, 'ignore stale result without respawning worker');
+  fake.onmessage!({ data: { id: posted[1]!.id, result: 42 } } as MessageEvent);
+  check(await next === 42 && rpc.pending === 0, 'pump next valid worker request');
+  const disposed = rpc.request({ job: 'dispose' }).then(() => false, () => true);
+  rpc.dispose(); check(await disposed && terminated && rpc.pending === 0, 'worker dispose rejects and releases outstanding requests');
   for (const pixelRatio of [1, 1.25, 2]) {
   renderer.setPixelRatio(pixelRatio);
   for (const [declaredScheme, overrideScheme] of [
@@ -328,8 +359,78 @@ try {
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   check(pressureLabels.object3d.children.length === 0, 'stale decoded result must not attach an untracked group');
   pressureLabels.dispose();
+  // Real DEM worker image decode/endpoint normalization, not a mocked callback.
+  const demCanvas = document.createElement('canvas'); demCanvas.width = 17; demCanvas.height = 13;
+  const demContext = demCanvas.getContext('2d')!, image = demContext.createImageData(17, 13);
+  for (let y = 0; y < 13; y++) for (let x = 0; x < 17; x++) {
+    const value = 100000 + y * 10000 + x * 100, p = (y * 17 + x) * 4;
+    image.data[p] = value >> 16; image.data[p + 1] = value >> 8 & 255; image.data[p + 2] = value & 255; image.data[p + 3] = 255;
+  }
+  demContext.putImageData(image, 0, 0);
+  const demBlob = await new Promise<Blob>(resolve => demCanvas.toBlob(blob => resolve(blob!)));
+  const terrainService = new TerrainDecodeService();
+  for (const encoding of ['mapbox', 'terrarium'] as const) {
+    const workerField = await terrainService.decode(demBlob, encoding);
+    const reference = await convertTerrainPixels(image.data, 17, 13, encoding);
+    check(terrainService.stats.worker, 'DEM conversion must actually use Worker');
+    check(workerField.width === 257 && workerField.height === 257, 'DEM endpoint dimensions');
+    check(workerField.minimumHeight === reference.minimumHeight && workerField.maximumHeight === reference.maximumHeight, 'DEM conservative bounds');
+    check(workerField.heights.every((value, index) => value === reference.heights[index]), 'DEM Worker/fallback exact XYZ pixel parity');
+    const oldSource = Float32Array.from({ length: 17 * 13 }, (_, index) => {
+      const p = index * 4, r = image.data[p]!, g = image.data[p + 1]!, b = image.data[p + 2]!;
+      return encoding === 'terrarium' ? r * 256 + g + b / 256 - 32768 : -10000 + (r * 65536 + g * 256 + b) * .1;
+    });
+    check(workerField.heights.every((value, index) => {
+      const sx = index % 257 / 256 * 16, sy = Math.floor(index / 257) / 256 * 12;
+      const x = Math.floor(sx), y = Math.floor(sy), nextX = Math.min(x + 1, 16), nextY = Math.min(y + 1, 12);
+      return value === Math.fround(THREE.MathUtils.lerp(
+        THREE.MathUtils.lerp(oldSource[y * 17 + x]!, oldSource[y * 17 + nextX]!, sx - x),
+        THREE.MathUtils.lerp(oldSource[nextY * 17 + x]!, oldSource[nextY * 17 + nextX]!, sx - x), sy - y));
+    }), 'DEM Worker must preserve legacy interpolation operation order and Float32 rounding');
+  }
+  terrainService.dispose();
+
+  const chunkStyle: MapStyle = { version: 8, sources: { fixture: { type: 'vector', tiles: ['https://fixture/{z}/{x}/{y}'] } },
+    layers: [{ id: 'many', type: 'fill', source: 'fixture', 'source-layer': 'many', paint: { 'fill-color': '#ff0000', 'fill-opacity': .5 } }] };
+  const many: DecodedVectorTile = new Map([['many', Array.from({ length: 2000 }, (_, index) => ({
+    id: index, type: 3 as const, properties: {}, extent: 4096,
+    geometry: [[{ x: 0, y: 0 }, { x: 4096, y: 0 }, { x: 4096, y: 4096 }, { x: 0, y: 4096 }, { x: 0, y: 0 }]]
+  }))]]) as unknown as DecodedVectorTile;
+  const service = new VectorSurfaceService(); await service.initialize(chunkStyle);
+  const plan = await service.build({ sourceId: 'fixture', sourceTile: { level: 2, x: 0, y: 0 }, zoom: 2,
+    offset: { x: 0, y: 0 }, scale: 1, tileSize: 128, decoded: many }, 'many');
+  check(service.stats.worker, 'surface style/geometry must actually use Worker');
+  check(plan.chunks.length > 1 && plan.chunks.every(chunk => chunk.bytes <= 96 * 1024 && chunk.indices.length % 3 === 0),
+    'huge single bucket must split into bounded complete primitives');
+  const nativeService = new VectorNativeService(); await nativeService.initialize(chunkStyle, new Set(['fill']));
+  const nativeBuckets = await nativeService.build(new Map([['many', many.get('many')!.slice(0, 1)]]), { level: 2, x: 0, y: 0 }, 'fixture');
+  check(nativeBuckets[0]?.geometry?.positions instanceof Float32Array && nativeBuckets[0].geometry.indices.length > 0,
+    'native/business geometry must return transferable shader-ready arrays');
+  nativeService.dispose(); service.dispose();
+
+  const sliced = new GpuVectorTileProvider({ id: 'sliced', renderer, tileSize: 128, style: chunkStyle,
+    maxDrawChunksPerFrame: 1, fetcher: async () => new Response(bytes.slice()) });
+  await sliced.initialize();
+  const internal = sliced as unknown as { enqueueDraw: (plan: SurfacePlan, offset: THREE.Vector2, scale: number, signal?: AbortSignal) => Promise<THREE.Texture>;
+    drawQueue: Array<{ target: THREE.WebGLRenderTarget | null }> };
+  let published = false;
+  const beforePartialTarget = renderer.getRenderTarget();
+  const slicedTexture = internal.enqueueDraw(plan, new THREE.Vector2(), 1).then(texture => { published = true; return texture; });
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  check(!published && internal.drawQueue[0]?.target !== null, 'partial RenderTarget must not publish after first frame');
+  check(renderer.getRenderTarget() === beforePartialTarget, 'partial surface pass must restore renderer target between frames');
+  const completeTexture = await slicedTexture; completeTexture.dispose();
+  const abortDraw = new AbortController();
+  const partial = internal.enqueueDraw(plan, new THREE.Vector2(), 1, abortDraw.signal);
+  const cancelledPartial = partial.then(() => false, () => true);
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  let partialDisposed = false;
+  internal.drawQueue[0]!.target!.addEventListener('dispose', () => { partialDisposed = true; });
+  abortDraw.abort();
+  check(await cancelledPartial && partialDisposed && sliced.drawStats.queued === 0, 'cancel partial target and release queue/resources');
+  sliced.dispose();
   check(failures.length === 0, failures.join('\n'));
-  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + bounded independent point labels, no shader errors';
+  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + DEM/native/surface Workers, chunk publication/cancellation, point labels; no shader errors';
   result.setAttribute('data-status', 'passed');
 } catch (error) {
   result.textContent = `FAIL: ${error instanceof Error ? error.stack : error}`;
