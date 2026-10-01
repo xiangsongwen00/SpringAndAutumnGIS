@@ -291,6 +291,31 @@ try {
   const labelScene = new THREE.Scene(); labelScene.add(labels.object3d);
   renderer.setRenderTarget(target); renderer.render(labelScene, labelCamera);
   labels.dispose();
+  // Queue pressure must not start a permanent recreate/decode cycle, nor
+  // attach a stale async result to the scene after its record is removed.
+  let finishPending!: (tile: Map<string, never[]>) => void;
+  let firstLoad = true;
+  const pressureLabels = new MvtVectorLayer(Ellipsoid.WGS84, { id: 'label-pressure', style: labelStyle,
+    symbolsOnly: true, symbols: true, levelOffset: 0, maxCachedTiles: 16, maxConcurrentRequests: 1,
+    decodedTileLoader: async () => {
+      if (!firstLoad) return new Map();
+      firstLoad = false;
+      return new Promise<Map<string, never[]>>((resolve) => { finishPending = resolve; });
+    } });
+  await pressureLabels.initialize();
+  const pressureSelection = Array.from({ length: 40 }, (_, index) => {
+    const id = { level: 8, x: 100 + index, y: 100 };
+    return { id, rectangle: new WebMercatorTilingScheme().rectangle(id), screenPixels: 128, viewCenterDistance: 0 };
+  });
+  pressureLabels.update(pressureSelection, 8, labelCamera, 128, 128);
+  const pressureRecords = (pressureLabels as unknown as { records: Map<string, unknown> }).records;
+  check(pressureRecords.size === 40, 'label cache pressure must retain all desired queued records');
+  const staleKey = pressureRecords.keys().next().value!;
+  pressureRecords.delete(staleKey);
+  finishPending(new Map());
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  check(pressureLabels.object3d.children.length === 0, 'stale decoded result must not attach an untracked group');
+  pressureLabels.dispose();
   check(failures.length === 0, failures.join('\n'));
   result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + bounded independent point labels, no shader errors';
   result.setAttribute('data-status', 'passed');

@@ -370,9 +370,9 @@ export class MvtVectorLayer {
         if (this.disposed || record.controller?.signal.aborted) return;
         decoded = await this.decoder!.decode(bytes, this.sourceLayers);
       }
-      if (this.disposed || record.controller?.signal.aborted) return;
+      if (this.disposed || record.controller?.signal.aborted || this.records.get(record.key) !== record) return;
       if (this.symbolsOnly) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      if (this.disposed || record.controller?.signal.aborted) return;
+      if (this.disposed || record.controller?.signal.aborted || this.records.get(record.key) !== record) return;
       const built = this.buildTile(record.id, decoded);
       record.group = built.group;
       record.labels = built.labels;
@@ -665,7 +665,12 @@ export class MvtVectorLayer {
   private evict(): void {
     if (this.records.size <= this.maxCachedTiles) return;
     const candidates = [...this.records.values()]
-      .filter((record) => record.state !== 'loading' && !record.group?.visible)
+      // Cache pressure must not remove desired queued records. Their queue
+      // entries would otherwise outlive the map and add untracked groups when
+      // asynchronous decoding finishes. Visible working-set size is bounded
+      // by the LOD budget; maxCachedTiles trims only inactive history.
+      .filter((record) => record.state !== 'loading' && record.state !== 'queued' &&
+        record.lastUsedFrame !== this.frame && !record.group?.visible)
       .sort((a, b) => a.lastUsedFrame - b.lastUsedFrame);
     while (this.records.size > this.maxCachedTiles) {
       const record = candidates.shift();

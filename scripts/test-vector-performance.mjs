@@ -45,12 +45,20 @@ const provider = new UrlTemplateRasterProvider({ id: 'targets', tileSize: 256,
   urlTemplate: 'fixture://{z}/{x}/{y}', viewLevelOffset: null, maxLevel: 8 });
 provider.loadTexture = async () => new THREE.Texture({ width: 256, height: 256 });
 const layer = new RasterTileLayer(ellipsoid, provider);
+assert.equal(layer.segmentsForLevel(2), 64, 'globe overview must not use a 256x256 grid per leaf');
+assert.equal(layer.segmentsForLevel(19), 16, 'high-zoom surface grid density is unchanged');
 const scheme = new WebMercatorTilingScheme();
 const selection = Array.from({ length: 350 }, (_, index) => {
   const id = { level: 8, x: 100 + index % 25, y: 100 + Math.floor(index / 25) };
   return { id, rectangle: scheme.rectangle(id), screenPixels: 128, viewCenterDistance: 0 };
 });
 layer.update(selection);
+const pendingKeys = [...layer.textures.values()].filter((record) => record.state === 'queued').map((record) => record.key);
+layer.maxCachedTiles = 16;
+layer.evictTextures();
+assert.ok(pendingKeys.every((key) => layer.textures.has(key)),
+  'cache pressure must not silently delete desired queued requests');
+layer.maxCachedTiles = 512;
 for (let tick = 0; tick < 100; tick++) {
   await new Promise((resolve) => setImmediate(resolve));
   layer.update(selection);
