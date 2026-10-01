@@ -11,6 +11,7 @@ import {
   TerrainRgbProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
+  type GlobeFramePerformance,
   type LayerDefinition,
   type LayerState,
   type RasterTileProvider
@@ -33,6 +34,8 @@ type LocalTokenConfig = Readonly<{
 }>;
 
 const layerCatalog = layerCatalogJson as unknown as LayerCatalogConfig;
+// Opt-in bounded samples for the dynamic browser audit, absent in normal use.
+const auditWindow = window as Window & { __terrainFrameAudit?: GlobeFramePerformance[]; __motionSampling?: boolean };
 const localTokens = await loadTokenConfig();
 const container = requiredElement<HTMLElement>('#globe');
 const selectedValue = requiredElement<HTMLElement>('#selected-value');
@@ -205,7 +208,7 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `${nativeMvt.visibleLabels}/${nativeMvt.allocatedLabels} 注记 · ${nativeMvt.errors} 失败`;
   }
   terrainValue.textContent = stats.terrain
-    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · 原始DEM/地表接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
+    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${stats.terrain.queued} 排队 · ${stats.terrain.pending} 待提交 · ${stats.terrain.committed} 提交/${stats.terrain.commitMs.toFixed(1)}ms · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · 原始DEM/地表接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
   const timing = stats.performance;
   terrainValue.textContent += ` · CPU ms LOD ${timing.lodMs.toFixed(1)}/地形 ${timing.terrainMs.toFixed(1)}` +
@@ -282,7 +285,14 @@ const engine = new GlobeEngine({
     dampingFactor: 0.1,
     minAltitude: 0.25
   },
-  onStats: renderStats
+  onStats: renderStats,
+  onFramePerformance: new URLSearchParams(window.location.search).get('performanceAudit') === '1'
+    ? (timing) => {
+      if (!auditWindow.__motionSampling) return;
+      const samples = auditWindow.__terrainFrameAudit ??= [];
+      if (samples.length >= 1000) samples.shift();
+      samples.push(timing);
+    } : undefined
 });
 
 applyActiveLayerUi();
@@ -794,6 +804,7 @@ async function createNativeBase(layer: LayerState): Promise<GpuVectorTileProvide
     sourceId: source.sourceId,
     levelOffset: layer.levelOffset,
     renderer: engine.renderer,
+    workBudget: engine.backgroundWorkBudget,
     minLevel: source.minLevel,
     maxLevel: source.maxLevel,
     source: {

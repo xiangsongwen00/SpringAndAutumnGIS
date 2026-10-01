@@ -96,6 +96,7 @@ export { ArcGisVectorRasterProvider } from './core/tiles/ArcGisVectorRasterProvi
 export type { ArcGisVectorRasterProviderOptions } from './core/tiles/ArcGisVectorRasterProvider';
 export { MvtRasterProvider } from './core/tiles/MvtRasterProvider';
 export { GpuVectorTileProvider } from './core/tiles/GpuVectorTileProvider';
+export { FrameWorkBudget } from './core/tiles/FrameWorkBudget';
 export type { GpuVectorTileProviderOptions } from './core/tiles/GpuVectorTileProvider';
 export type { MvtRasterProviderOptions } from './core/tiles/MvtRasterProvider';
 export { VectorStyleTileProvider } from './core/tiles/VectorStyleTileProvider';

@@ -100,6 +100,7 @@ export class RasterTileLayer {
   private edgeSelection: readonly SelectedTile[] | null = null;
   private edgeRevision = -1;
   private edgeTileSignature = '';
+  private readonly retainedEdgePoints = new Map<string, THREE.Vector3>();
   private materialsDirty = true;
   private observedTerrainRevision = -1;
   private observedProviderRevision = -1;
@@ -225,6 +226,7 @@ export class RasterTileLayer {
     this.textures.clear();
     for (const geometry of this.geometries.values()) geometry.dispose();
     this.geometries.clear();
+    this.retainedEdgePoints.clear();
     this.object3d.clear();
   }
 
@@ -908,15 +910,19 @@ export class RasterTileLayer {
     this.edgeSelection = selection;
     // A camera movement changes request priorities, not necessarily topology.
     // Compare tile IDs before resampling/uploading every boundary attribute.
-    const signature = selection.map(({ id }) => tileKey(id)).join('|');
-    if (signature === this.edgeTileSignature && this.edgeRevision === revision) return;
-    this.edgeTileSignature = signature; this.edgeRevision = revision;
-    const tiles = selection.map(({ id }) => ({ id,
-      segments: this.segmentsForLevel(id.level),
-      height: (u: number, v: number) => this.terrain?.sampleTileHeight?.(id, u, v) ?? 0 }));
+    const tiles = selection.map(({ id }) => {
+      const snapshot = this.terrain?.tileHeightSampler?.(id);
+      return { id, segments: this.segmentsForLevel(id.level),
+        heightKey: snapshot?.key ?? (this.terrain?.enabled ? String(revision) : 'flat'),
+        height: snapshot?.sample ?? ((u: number, v: number) => this.terrain?.sampleTileHeight?.(id, u, v) ?? 0) };
+    });
+    const signature = tiles.map((tile) => `${tileKey(tile.id)}:${tile.heightKey}`).join('|');
+    this.edgeRevision = revision;
+    if (signature === this.edgeTileSignature) return;
+    this.edgeTileSignature = signature;
     // The reference ellipsoid also needs shared coarse/fine ECEF chords.
     // Disabling DEM must not disable topology/precision reconciliation.
-    const boundaries = terrainSurfaceEdges(tiles, this.surfaceOffset);
+    const boundaries = terrainSurfaceEdges(tiles, this.surfaceOffset, this.retainedEdgePoints);
     for (const tile of tiles) {
       const renderTile = this.renderTiles.get(tileKey(tile.id));
       if (!renderTile) continue;
@@ -924,13 +930,17 @@ export class RasterTileLayer {
       const mask = geometry.getAttribute('terrainEdgeMask') as THREE.BufferAttribute;
       const high = geometry.getAttribute('terrainEdgeHigh') as THREE.BufferAttribute;
       const low = geometry.getAttribute('terrainEdgeLow') as THREE.BufferAttribute;
-      (mask.array as Float32Array).fill(0);
+      let changed = false;
       const boundary = boundaries?.get(tile);
       if (boundary) {
         const uv = geometry.getAttribute('uv');
         const write = (index: number, point: THREE.Vector3) => {
           const x = Math.fround(point.x), y = Math.fround(point.y), z = Math.fround(point.z);
-          high.setXYZ(index, x, y, z); low.setXYZ(index, point.x - x, point.y - y, point.z - z);
+          const lx = Math.fround(point.x - x), ly = Math.fround(point.y - y), lz = Math.fround(point.z - z);
+          if (mask.getX(index) === 1 && high.getX(index) === x && high.getY(index) === y && high.getZ(index) === z &&
+              low.getX(index) === lx && low.getY(index) === ly && low.getZ(index) === lz) return;
+          changed = true;
+          high.setXYZ(index, x, y, z); low.setXYZ(index, lx, ly, lz);
           mask.setX(index, 1);
         };
         // Interior vertices cannot have an edge override. Visit the perimeter
@@ -943,7 +953,7 @@ export class RasterTileLayer {
           if (point) write(index, point);
         }
       }
-      mask.needsUpdate = true; high.needsUpdate = true; low.needsUpdate = true;
+      if (changed) { mask.needsUpdate = true; high.needsUpdate = true; low.needsUpdate = true; }
     }
   }
 

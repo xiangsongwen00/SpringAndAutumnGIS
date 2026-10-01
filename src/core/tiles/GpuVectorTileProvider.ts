@@ -10,6 +10,7 @@ import type { VectorSource } from '../../vector/style/VectorStyleTypes';
 import { analyzeVectorSurfaceStyle } from '../../vector/style/VectorSurfaceCapabilities';
 import type { MapStyleCapabilityReport } from '../../vector/style/MapStyleLoader';
 import { RequestScheduler } from './RequestScheduler';
+import type { FrameWorkBudget } from './FrameWorkBudget';
 import type { DecodedVectorTile } from '../../vector/style/VectorStyleTypes';
 
 export type GpuVectorTileProviderOptions = MapStyleLoaderOptions & {
@@ -21,6 +22,7 @@ export type GpuVectorTileProviderOptions = MapStyleLoaderOptions & {
   drawBudgetMs?: number;
   /** Catalog overrides; scheme changes request rows only, never MVT geometry. */
   source?: Partial<VectorSource>;
+  workBudget?: FrameWorkBudget;
 };
 
 /** GPU cartographic surface pass; textures drape on the shared terrain mesh.
@@ -38,6 +40,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   private readonly decodedTiles = new RequestScheduler<DecodedVectorTile>({ maxCacheBytes: 32 * 1024 * 1024 });
   private readonly maxDrawsPerFrame: number;
   private readonly drawBudgetMs: number;
+  private readonly workBudget?: FrameWorkBudget;
   private drawFrame: number | null = null;
   private readonly drawQueue: Array<{ run: () => THREE.Texture; resolve: (texture: THREE.Texture) => void;
     reject: (error: unknown) => void; signal?: AbortSignal; abort: () => void }> = [];
@@ -73,6 +76,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
     this.sourceOverride = options.source;
     this.maxDrawsPerFrame = Math.max(1, Math.floor(options.maxDrawsPerFrame ?? 1));
     this.drawBudgetMs = Math.max(1, options.drawBudgetMs ?? 4);
+    this.workBudget = options.workBudget;
     this.configuredDataMaxLevel = options.maxLevel;
     this._dataMaxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? options.source?.maxzoom ?? 22));
   }
@@ -280,17 +284,20 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
 
   private scheduleDrawFrame(): void {
     if (this.drawFrame !== null || this.disposed || !this.drawQueue.length) return;
-    this.drawFrame = requestAnimationFrame(() => {
+    this.drawFrame = requestAnimationFrame((timestamp) => {
       this.drawFrame = null;
+      this.workBudget?.beginFrame(timestamp);
       const startedAt = performance.now();
       let count = 0;
       while (this.drawQueue.length && count < this.maxDrawsPerFrame) {
+        if (this.workBudget && !this.workBudget.canStart) break;
         const job = this.drawQueue.shift()!;
         job.signal?.removeEventListener('abort', job.abort);
         if (job.signal?.aborted) { job.reject(job.signal.reason); continue; }
         const drawStartedAt = performance.now();
         try { job.resolve(job.run()); } catch (error) { job.reject(error); }
         this.lastDrawMs = performance.now() - drawStartedAt;
+        this.workBudget?.spend(this.lastDrawMs);
         this.maxDrawMs = Math.max(this.maxDrawMs, this.lastDrawMs);
         this.recentDraws.push({ at: performance.now(), ms: this.lastDrawMs });
         while (this.recentDraws.length > 120) this.recentDraws.shift();

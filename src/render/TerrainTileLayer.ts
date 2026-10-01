@@ -11,6 +11,7 @@ import {
 } from '../core/terrain/TerrainProvider';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
+import type { FrameWorkBudget } from '../core/tiles/FrameWorkBudget';
 import {
   stitchTerrainNeighborhood,
   type StitchableTerrainTile
@@ -25,6 +26,13 @@ export type TerrainTileLayerOptions = {
   exaggeration?: number;
   /** Draw a standalone coloured terrain mesh for diagnostics. */
   showDebugSurface?: boolean;
+  /** Bounded DEM publication/upload per update. Defaults: 2 tiles, 2ms, 1MiB. */
+  maxCommitsPerFrame?: number;
+  commitBudgetMs?: number;
+  maxUploadBytesPerFrame?: number;
+  /** Engine supplies renderer.initTexture so uploads happen inside the budget. */
+  prepareTexture?: (texture: THREE.DataTexture) => void;
+  workBudget?: FrameWorkBudget;
 };
 
 export type TerrainTileLayerStats = Readonly<{
@@ -38,6 +46,9 @@ export type TerrainTileLayerStats = Readonly<{
   coverageReady: boolean;
   stitchLastMs: number;
   stitchMaxMs: number;
+  pending: number;
+  committed: number;
+  commitMs: number;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -64,9 +75,13 @@ export interface TerrainHeightSource extends SurfaceDisplacementBoundsSource {
   sampleHeight(longitude: number, latitude: number): number | null;
   /** CPU equivalent of resolveTexture + shader UV sampling, including exaggeration. */
   sampleTileHeight?(id: TileId, u: number, v: number): number | null;
+  /** Resolve an immutable ancestor once for all boundary samples. */
+  tileHeightSampler?(id: TileId): { key: string; sample: (u: number, v: number) => number };
+  /** Token of the actual height source used by sampleHeight at an anchor. */
+  heightVersionAt?(longitude: number, latitude: number): string;
 }
 
-type TerrainState = 'queued' | 'loading' | 'ready' | 'error';
+type TerrainState = 'queued' | 'loading' | 'pending' | 'ready' | 'error';
 type TerrainRecord = {
   id: TileId;
   key: string;
@@ -116,6 +131,14 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private stitchLastMs = 0;
   private stitchMaxMs = 0;
   private coverageReady = false;
+  private hasInitialCoverage = false;
+  private readonly maxCommitsPerFrame: number;
+  private readonly commitBudgetMs: number;
+  private readonly maxUploadBytesPerFrame: number;
+  private readonly prepareTexture?: (texture: THREE.DataTexture) => void;
+  private committed = 0;
+  private commitMs = 0;
+  private readonly workBudget?: FrameWorkBudget;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -133,6 +156,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
     );
     this.exaggeration = Math.max(0, options.exaggeration ?? 1);
     this.showDebugSurface = options.showDebugSurface ?? false;
+    this.maxCommitsPerFrame = Math.max(1, Math.round(options.maxCommitsPerFrame ?? 2));
+    this.commitBudgetMs = Math.max(.1, options.commitBudgetMs ?? 2);
+    this.maxUploadBytesPerFrame = Math.max(4, options.maxUploadBytesPerFrame ?? 1024 * 1024);
+    this.prepareTexture = options.prepareTexture;
+    this.workBudget = options.workBudget;
     this.object3d.renderOrder = 0;
   }
 
@@ -145,7 +173,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   get stats(): TerrainTileLayerStats {
-    const counts = { ready: 0, loading: 0, queued: 0, errors: 0 };
+    const counts = { ready: 0, loading: 0, pending: 0, queued: 0, errors: 0 };
     for (const record of this.records.values()) {
       if (record.state === 'error') counts.errors += 1;
       else counts[record.state] += 1;
@@ -157,7 +185,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       stitchedEdges: this.stitchedEdges,
       coverageReady: this.coverageReady,
       stitchLastMs: this.stitchLastMs,
-      stitchMaxMs: this.stitchMaxMs
+      stitchMaxMs: this.stitchMaxMs,
+      committed: this.committed, commitMs: this.commitMs
     };
   }
 
@@ -175,6 +204,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (this.showDebugSurface) this.syncRenderTiles(selection);
       this.queueVisibleTiles(selection);
     }
+    this.commitPending();
+    if (this.committed) this.queueVisibleTiles(selection);
     if (selectionChanged || this.materialsDirty) this.refreshCoverage(selection);
     this.pumpQueue();
     if (this.showDebugSurface && (selectionChanged || this.materialsDirty)) {
@@ -188,7 +219,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   resolveTexture(id: TileId): TerrainTextureBinding | undefined {
-    if (!this._enabled || !this.coverageReady) return undefined;
+    if (!this._enabled || (!this.coverageReady && !this.hasInitialCoverage)) return undefined;
     const record = this.findReadyAncestor(id);
     if (!record?.data) return undefined;
     const levels = id.level - record.id.level;
@@ -218,13 +249,38 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   sampleTileHeight(id: TileId, u: number, v: number): number | null {
-    if (!this._enabled || !this.coverageReady) return null;
+    if (!this._enabled || (!this.coverageReady && !this.hasInitialCoverage)) return null;
     const record = this.findReadyAncestor(id);
     if (!record?.data) return null;
     const size = 2 ** (id.level - record.id.level);
     return sampleTerrainTile(record.data,
       (id.x - record.id.x * size + u) / size,
       (id.y - record.id.y * size + v) / size) * this.exaggeration;
+  }
+
+  tileHeightSampler(id: TileId): { key: string; sample: (u: number, v: number) => number } {
+    const record = this._enabled && (this.coverageReady || this.hasInitialCoverage) ? this.findReadyAncestor(id) : undefined;
+    const data = record?.data;
+    if (!record || !data) return { key: 'flat', sample: () => 0 };
+    const size = 2 ** (id.level - record.id.level);
+    const x = id.x - record.id.x * size, y = id.y - record.id.y * size;
+    return { key: `${record.key}/${data.texture.uuid}/${this.exaggeration}`,
+      sample: (u, v) => sampleTerrainTile(data, (x + u) / size, (y + v) / size) * this.exaggeration };
+  }
+
+  heightVersionAt(longitude: number, latitude: number): string {
+    if (!this._enabled) return 'flat';
+    const latitudeRadians = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(latitude,
+      -WEB_MERCATOR_MAX_LATITUDE, WEB_MERCATOR_MAX_LATITUDE));
+    const u = ((((longitude + 180) / 360) % 1) + 1) % 1;
+    const v = (1 - Math.asinh(Math.tan(latitudeRadians)) / Math.PI) * .5;
+    for (let level = this.provider.maxLevel; level >= this.provider.minLevel; level--) {
+      const size = 2 ** level;
+      const record = this.records.get(tileKey({ level, x: Math.min(size - 1, Math.floor(u * size)),
+        y: Math.min(size - 1, Math.max(0, Math.floor(v * size))) }));
+      if (record?.state === 'ready' && record.data) return `${record.key}/${record.data.texture.uuid}/${this.exaggeration}`;
+    }
+    return 'flat';
   }
 
   sampleHeight(longitude: number, latitude: number): number | null {
@@ -295,8 +351,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
     this.materialsDirty = true;
     this.coverageReady = !enabled;
     if (!enabled) {
-      for (const record of this.records.values()) {
-        if (record.state === 'loading' || record.state === 'queued') this.cancelRequest(record);
+      for (const [key, record] of this.records) {
+        if (record.state !== 'ready') {
+          this.cancelRequest(record); this.releaseTexture(record.data?.texture);
+          this.records.delete(key);
+        }
       }
     }
     this._revision += 1;
@@ -356,7 +415,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private queueVisibleTiles(selection: readonly SelectedTile[]): void {
     this.visibleKeys.clear();
     for (const record of this.records.values()) {
-      if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
+      if (record.state === 'queued' || record.state === 'pending') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
       (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
@@ -371,7 +430,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
       // Establish a complete low-detail surface before requesting the target
       // DEM. Absolute level is the primary priority so a wide viewport cannot
       // start isolated high mountains while neighbouring parents are missing.
-      for (let level = coarseLevel; level <= maximumLevel; level += 1) {
+      const ready = this.findReadyAncestor(selected.id);
+      // Once an ancestor covers this patch, request the target directly.
+      // Loading every intervening DEM adds decode/upload/revision work while
+      // contributing no missing coverage. Retain the currently bound parent.
+      for (let level = ready ? maximumLevel : coarseLevel; level <= maximumLevel; level += 1) {
         const requested = ancestorAtLevel(selected.id, level);
         this.visibleKeys.add(tileKey(requested));
         this.queueTile(
@@ -379,14 +442,16 @@ export class TerrainTileLayer implements TerrainHeightSource {
           (level - this.provider.minLevel) * prioritized.length + rank
         );
       }
-      const ready = this.findReadyAncestor(selected.id);
       if (ready) {
         this.visibleKeys.add(ready.key);
+        const parent = this.findReadyAncestor(selected.id, ready.id.level - 1);
+        if (parent) this.visibleKeys.add(parent.key);
       }
     }
     for (const [key, record] of this.records) {
       if (this.visibleKeys.has(key) || record.state === 'ready') continue;
       this.cancelRequest(record);
+      this.releaseTexture(record.data?.texture);
       this.records.delete(key);
     }
   }
@@ -397,6 +462,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (maximumLevel < this.provider.minLevel) return true;
       return this.findReadyAncestor(selected.id) !== undefined;
     });
+    // Establish a complete coarse surface once. Afterwards one newly exposed
+    // patch must not disable DEM for all other ready patches, then turn the
+    // whole viewport back on when that patch loads (global geometry churn).
+    if (selection.length && this.coverageReady) this.hasInitialCoverage = true;
   }
 
   private queueTile(id: TileId, priority: number): void {
@@ -404,7 +473,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     const existing = this.records.get(key);
     if (existing) {
       existing.lastUsedFrame = this.frame;
-      if (existing.state === 'queued') existing.priority = Math.min(existing.priority, priority);
+      if (existing.state === 'queued' || existing.state === 'pending') existing.priority = Math.min(existing.priority, priority);
       return;
     }
     this.records.set(key, {
@@ -423,6 +492,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (!this.enabled || this.suspended || this.disposed) return;
     while (this.activeRequests < this.maxConcurrentRequests) {
       if (this.residentResourceBytes() >= this.maxResourceBytes) return;
+      // Bound completed-but-unpublished work as well as network concurrency.
+      let pending = 0;
+      for (const record of this.records.values()) if (record.state === 'pending') pending++;
+      if (pending + this.activeRequests >= this.maxConcurrentRequests) return;
       let next: TerrainRecord | undefined;
       for (const record of this.records.values()) {
         if (record.state !== 'queued') continue;
@@ -446,22 +519,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
           this.releaseTexture(data.texture);
         } else {
           record.data = data;
-          record.state = 'ready';
+          // Never publish individual asynchronous arrivals between frames.
+          // update() uploads/publishes a bounded batch before all consumers.
+          record.state = 'pending';
           record.lastUsedFrame = this.frame;
-          // Raw DEM is authoritative and immutable. Surface ECEF constraints
-          // reconcile rendered seams; incremental averaging of every cached
-          // neighbour previously changed old mountains on unrelated arrivals.
-          this.knownHeightRanges.set(record.key, { minimumHeight: data.minimumHeight * this.exaggeration - 2,
-            maximumHeight: data.maximumHeight * this.exaggeration + 2 });
-          if (this.knownHeightRanges.size > 32768) {
-            for (const key of this.knownHeightRanges.keys()) {
-              if (!this.visibleKeys.has(key) && this.records.get(key)?.state !== 'ready') {
-                this.knownHeightRanges.delete(key); break;
-              }
-            }
-          }
-          this._revision += 1;
-          this.materialsDirty = true;
         }
         this.pumpQueue();
       },
@@ -472,6 +533,47 @@ export class TerrainTileLayer implements TerrainHeightSource {
         this.pumpQueue();
       }
     );
+  }
+
+  private commitPending(): void {
+    this.committed = 0; this.commitMs = 0;
+    if (this.suspended) return;
+    const started = performance.now();
+    let bytes = 0;
+    const pending = [...this.records.values()].filter((record) => record.state === 'pending')
+      .sort((a, b) => a.priority - b.priority);
+    for (const record of pending) {
+      if (this.workBudget && !this.workBudget.canStart) break;
+      const taskStarted = performance.now();
+      const data = record.data!;
+      const uploadBytes = data.width * data.height * 4;
+      // Permit one oversized tile to make progress; never start a second
+      // upload after exceeding either soft time or byte budget.
+      if (this.committed && (this.committed >= this.maxCommitsPerFrame ||
+          performance.now() - started >= this.commitBudgetMs || bytes + uploadBytes > this.maxUploadBytesPerFrame)) break;
+      try {
+        this.prepareTexture?.(data.texture);
+      } catch (error) {
+        this.workBudget?.spend(performance.now() - taskStarted);
+        this.releaseTexture(data.texture); record.data = null; record.state = 'error';
+        console.warn(`[Terrain ${this.provider.id}] DEM upload failed`, error);
+        break;
+      }
+      record.state = 'ready';
+      this.knownHeightRanges.set(record.key, { minimumHeight: data.minimumHeight * this.exaggeration - 2,
+        maximumHeight: data.maximumHeight * this.exaggeration + 2 });
+      if (this.knownHeightRanges.size > 32768) {
+        for (const key of this.knownHeightRanges.keys()) {
+          if (!this.visibleKeys.has(key) && this.records.get(key)?.state !== 'ready') {
+            this.knownHeightRanges.delete(key); break;
+          }
+        }
+      }
+      bytes += uploadBytes; this.committed++;
+      this.workBudget?.spend(performance.now() - taskStarted);
+    }
+    if (this.committed) { this._revision++; this.materialsDirty = true; }
+    this.commitMs = performance.now() - started;
   }
 
   private cancelRequest(record: TerrainRecord): void {

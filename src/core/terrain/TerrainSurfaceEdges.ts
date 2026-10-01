@@ -7,6 +7,8 @@ export type TerrainSurfaceTile = {
   segments: number;
   /** Same resolved DEM/ancestor and exaggeration as the vertex shader. */
   height: (u: number, v: number) => number;
+  /** Immutable binding/content token; omit to disable cross-frame caching. */
+  heightKey?: string;
 };
 type Edge = { tile: TerrainSurfaceTile; axis: 'x' | 'y'; fixed: number; start: number; end: number };
 
@@ -14,7 +16,8 @@ type Edge = { tile: TerrainSurfaceTile; axis: 'x' | 'y'; fixed: number; start: n
  * Fine T-junctions lie on the coarse edge's straight segment. Shared corners
  * use one canonical authority, including mixed-LOD and ancestor fallback.
  */
-export function terrainSurfaceEdges(tiles: readonly TerrainSurfaceTile[], heightOffset = 0):
+export function terrainSurfaceEdges(tiles: readonly TerrainSurfaceTile[], heightOffset = 0,
+  persistentPoints?: Map<string, THREE.Vector3>):
   Map<TerrainSurfaceTile, Map<number, THREE.Vector3>> {
   const vertical = new Map<number, Edge[]>(), horizontal = new Map<number, Edge[]>();
   const put = (map: Map<number, Edge[]>, key: number, edge: Edge) => {
@@ -58,6 +61,10 @@ export function terrainSurfaceEdges(tiles: readonly TerrainSurfaceTile[], height
       const second = authority.axis === 'x' ? point(authority.fixed, b) : point(b, authority.fixed);
       result = first.clone().lerp(second, fraction);
     } else {
+      const token = authority.tile.heightKey === undefined ? undefined :
+        `${authority.tile.id.level}/${authority.tile.id.x}/${authority.tile.id.y}/${authority.tile.segments}/${authority.tile.heightKey}/${heightOffset}/${key}`;
+      const retained = token === undefined ? undefined : persistentPoints?.get(token);
+      if (retained) { pointCache.set(key, retained); return retained; }
       const size = 2 ** authority.tile.id.level;
       const localX = authority.tile.id.x === size - 1 && wrappedX === 0 ? 1 : wrappedX;
       const u = Math.min(1, Math.max(0, localX * size - authority.tile.id.x));
@@ -65,6 +72,10 @@ export function terrainSurfaceEdges(tiles: readonly TerrainSurfaceTile[], height
       result = Ellipsoid.WGS84.cartographicToCartesian({ longitude: wrappedX * 360 - 180,
         latitude: Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI,
         height: authority.tile.height(u, v) + heightOffset });
+      if (token !== undefined && persistentPoints) {
+        if (persistentPoints.size >= 65536) persistentPoints.delete(persistentPoints.keys().next().value!);
+        persistentPoints.set(token, result);
+      }
     }
     pointCache.set(key, result);
     return result;

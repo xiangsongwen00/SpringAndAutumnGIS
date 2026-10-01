@@ -24,6 +24,7 @@ import {
 import { GeoJsonLayer } from '../render/GeoJsonLayer';
 import { MvtVectorLayer, type MvtVectorLayerStats } from '../render/MvtVectorLayer';
 import { GpuFrameTimer } from '../render/GpuFrameTimer';
+import { FrameWorkBudget } from '../core/tiles/FrameWorkBudget';
 import {
   GlobeCameraController,
   type GlobeCameraViewState,
@@ -83,10 +84,13 @@ export type GlobeEngineOptions = {
   };
   navigation?: GlobeNavigationOptions;
   onStats?: (stats: GlobeEngineStats) => void;
+  /** Optional lightweight profiler; runs each frame, unlike throttled UI stats. */
+  onFramePerformance?: (timing: GlobeFramePerformance) => void;
 };
 
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
+  readonly backgroundWorkBudget = new FrameWorkBudget(4);
   private framePerformance: GlobeFramePerformance = { lodMs: 0, terrainMs: 0, surfaceMs: 0,
     featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0, gpuMs: null, lodSelections: 0 };
   private readonly gpuTimer: GpuFrameTimer;
@@ -106,6 +110,7 @@ export class GlobeEngine {
 
   private readonly container: HTMLElement;
   private readonly onStats?: (stats: GlobeEngineStats) => void;
+  private readonly onFramePerformance?: (timing: GlobeFramePerformance) => void;
   private frameHandle: number | null = null;
   private lastStatsSignature = '';
   private viewportWidth = 0;
@@ -156,6 +161,7 @@ export class GlobeEngine {
       Math.round(options.maxDrawingBufferPixels ?? 8_000_000)
     );
     this.onStats = options.onStats;
+    this.onFramePerformance = options.onFramePerformance;
     this.navigation = {
       rotateSpeed: Math.max(0.01, options.navigation?.rotateSpeed ?? 0.4),
       minRotateSpeed: Math.max(0.00000001, options.navigation?.minRotateSpeed ?? 0.000001),
@@ -181,7 +187,11 @@ export class GlobeEngine {
     });
     this.terrain = options.terrain === false || options.terrain === undefined
       ? null
-      : new TerrainTileLayer(this.ellipsoid, options.terrain, options.terrainLayer);
+      : new TerrainTileLayer(this.ellipsoid, options.terrain, {
+        ...options.terrainLayer,
+        workBudget: options.terrainLayer?.workBudget ?? this.backgroundWorkBudget,
+        prepareTexture: options.terrainLayer?.prepareTexture ?? ((texture) => this.renderer.initTexture(texture))
+      });
     this.lod.setSurfaceDisplacementSource(this.terrain ?? undefined);
     this.grid = new GlobeGridRenderer(this.ellipsoid, {
       ...options.grid,
@@ -274,9 +284,10 @@ export class GlobeEngine {
 
   start(): void {
     if (this.frameHandle !== null) return;
-    const renderFrame = () => {
+    const renderFrame = (timestamp: number) => {
       this.frameHandle = requestAnimationFrame(renderFrame);
       if (this.contextLost) return;
+      this.backgroundWorkBudget.beginFrame(timestamp);
       this.resize();
       this.updateNavigationSensitivity();
       this.controls.update();
@@ -364,6 +375,7 @@ export class GlobeEngine {
         drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles,
         gpuMs: this.gpuTimer.valueMs, lodSelections: this.lodSelections
       };
+      this.onFramePerformance?.(this.framePerformance);
       this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
     };
     this.frameHandle = requestAnimationFrame(renderFrame);
@@ -601,7 +613,7 @@ export class GlobeEngine {
       : 'none';
     const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
     const terrainSignature = terrain
-      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges},${terrain.coverageReady}`
+      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.pending},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges},${terrain.coverageReady}`
       : 'none';
     const vectorLayers = new Map(
       [...this.vectorLayers].map(([id, layer]) => [id, layer.stats] as const)

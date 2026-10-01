@@ -83,6 +83,7 @@ type LabelState = {
   sprite: THREE.Sprite;
   pixelWidth: number;
   pixelHeight: number;
+  heightKey?: string;
 };
 /** Native GPU rendering path for tiled MVT fill/line/circle geometry and 3D labels. */
 export class MvtVectorLayer {
@@ -292,10 +293,13 @@ export class MvtVectorLayer {
     // Geometry samples the shared DEM on the GPU. Only symbol anchors need CPU height queries.
     if (terrainRevision !== this.observedTerrainRevision) {
       for (const record of this.records.values()) for (const label of record.labels) {
+        const heightKey = this.terrain?.heightVersionAt?.(label.longitude, label.latitude) ?? String(terrainRevision);
+        if (heightKey === label.heightKey) continue;
         this.positionLabel(label.sprite, label.longitude, label.latitude);
+        label.heightKey = heightKey;
+        this.placementDirty = true;
       }
       this.observedTerrainRevision = terrainRevision;
-      this.placementDirty = true;
     }
     const placementViewport = `${viewportWidth}/${viewportHeight}/${this.currentSourceLevel}`;
     if (this.placementDirty || cameraPoseChanged || placementViewport !== this.placementViewport ||
@@ -585,7 +589,8 @@ export class MvtVectorLayer {
     sprite.renderOrder = this.order + 10;
     sprite.frustumCulled = false;
     this.positionLabel(sprite, longitude, latitude);
-    return { longitude, latitude, sprite, pixelWidth: canvas.width, pixelHeight: canvas.height };
+    return { longitude, latitude, sprite, pixelWidth: canvas.width, pixelHeight: canvas.height,
+      heightKey: this.terrain?.heightVersionAt?.(longitude, latitude) ?? String(this.terrain?.revision ?? -1) };
   }
 
   private positionLabel(sprite: THREE.Sprite, longitude: number, latitude: number): void {

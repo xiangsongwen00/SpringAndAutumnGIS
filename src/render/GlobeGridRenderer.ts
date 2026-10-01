@@ -32,6 +32,8 @@ export class GlobeGridRenderer {
   private terrainRefreshAt = 0;
   private vertexCapacity = 0;
   private tilesReference: readonly SelectedTile[] | null = null;
+  private readonly heightProbes = new Map<string, { longitude: number; latitude: number; version: string }>();
+  private readonly heightPoints = new Map<string, { revision: number; version: string; world: THREE.Vector3 }>();
 
   constructor(ellipsoid: Ellipsoid, options: GlobeGridRendererOptions = {}) {
     this.ellipsoid = ellipsoid;
@@ -101,6 +103,15 @@ export class GlobeGridRenderer {
       ? tiles.map((tile) => tileKey(tile.id)).join('|')
       : this.tileSignature;
     const tilesChanged = nextTileSignature !== this.tileSignature;
+    // Global terrain notifications may concern a different continent. Keep
+    // the diagnostic grid when none of its actual sampled anchors changed.
+    if (!tilesChanged && this.terrain?.heightVersionAt &&
+        [...this.heightProbes.values()].every((probe) =>
+          this.terrain!.heightVersionAt!(probe.longitude, probe.latitude) === probe.version)) {
+      this.tilesReference = tiles;
+      this.renderedTerrainRevision = terrainRevision;
+      return false;
+    }
     if (
       !tilesChanged &&
       terrainRevision !== this.renderedTerrainRevision &&
@@ -112,6 +123,7 @@ export class GlobeGridRenderer {
     this.tilesReference = tiles;
     this.tileSignature = nextTileSignature;
     this.renderedTerrainRevision = terrainRevision;
+    this.heightProbes.clear();
 
     const positions: number[] = [];
     const colors: number[] = [];
@@ -131,6 +143,8 @@ export class GlobeGridRenderer {
   }
 
   dispose(): void {
+    this.heightProbes.clear();
+    this.heightPoints.clear();
     this.geometry.dispose();
     const material = this.object3d.material;
     if (Array.isArray(material)) {
@@ -260,11 +274,23 @@ export class GlobeGridRenderer {
     originsHigh: number[],
     originsLow: number[]
   ): void {
-    const terrainHeight = this.terrain?.sampleHeight(longitude, latitude) ?? 0;
-    this.ellipsoid.cartographicToCartesian(
-      { longitude, latitude, height: terrainHeight + this.heightOffset },
-      this.vertexWorld
-    );
+    const key = `${longitude}/${latitude}`;
+    const revision = this.terrain?.revision ?? -1;
+    let point = this.heightPoints.get(key);
+    if (!point || point.revision !== revision) {
+      const version = this.terrain?.heightVersionAt?.(longitude, latitude) ?? String(revision);
+      if (!point || point.version !== version) {
+        const terrainHeight = this.terrain?.sampleHeight(longitude, latitude) ?? 0;
+        point = { revision, version, world: this.ellipsoid.cartographicToCartesian(
+          { longitude, latitude, height: terrainHeight + this.heightOffset }) };
+        if (!this.heightPoints.has(key) && this.heightPoints.size >= 32768) {
+          this.heightPoints.delete(this.heightPoints.keys().next().value!);
+        }
+        this.heightPoints.set(key, point);
+      } else point.revision = revision;
+    }
+    if (this.terrain?.heightVersionAt) this.heightProbes.set(key, { longitude, latitude, version: point.version });
+    this.vertexWorld.copy(point.world);
     positions.push(
       this.vertexWorld.x - this.tileOrigin.x,
       this.vertexWorld.y - this.tileOrigin.y,

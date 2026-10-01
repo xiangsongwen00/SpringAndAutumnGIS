@@ -249,7 +249,10 @@ try {
   const labelStyle: MapStyle = { version: 8, sources: { fixture: { type: 'vector', tiles: ['https://fixture/{z}/{x}/{y}'] } },
     layers: [{ id: 'labels', type: 'symbol', source: 'fixture', 'source-layer': 'labels',
       layout: { 'text-field': ['get', 'name'], 'text-size': 12 }, paint: { 'text-color': '#000000' } }] };
-  const labels = new MvtVectorLayer(Ellipsoid.WGS84, { id: 'label-test', style: labelStyle,
+  const labelTerrain = { revision: 1, enabled: true, exaggeration: 1, heightKey: 'local-a',
+    maximumHeight: () => 0, resolveTexture: () => undefined, sampleHeight: () => 0,
+    heightVersionAt: () => labelTerrain.heightKey };
+  const labels = new MvtVectorLayer(Ellipsoid.WGS84, { id: 'label-test', style: labelStyle, terrain: labelTerrain,
     symbolsOnly: true, symbols: true, levelOffset: 0, maxLabelsPerTile: 8, maxVisibleLabels: 1, maxAllocatedLabels: 8,
     decodedTileLoader: async () => new Map([['labels', [{ type: 1, extent: 4096, properties: { name: '注记测试' },
       geometry: [[{ x: 2048, y: 2048 }]] }]]]) });
@@ -285,6 +288,15 @@ try {
   labelsInternal.hasTile = (id) => { repeatedTileChecks++; return originalHasTile(id); };
   labels.update(labelSelection, 6, labelCamera, 128, 128);
   check(repeatedTileChecks === 0, 'stationary labels must reuse visibility mapping instead of scanning tiles');
+  let heightUpdates = 0;
+  const labelPositions = labels as unknown as { positionLabel: (...args: unknown[]) => void };
+  const originalPositionLabel = labelPositions.positionLabel.bind(labels);
+  labelPositions.positionLabel = (...args) => { heightUpdates++; originalPositionLabel(...args); };
+  labelTerrain.revision++; labels.update(labelSelection, 6, labelCamera, 128, 128);
+  check(heightUpdates === 0, 'unrelated DEM revision must not resample label anchor heights');
+  labelTerrain.heightKey = 'local-b'; labelTerrain.revision++;
+  labels.update(labelSelection, 6, labelCamera, 128, 128);
+  check(heightUpdates === 1, 'changed actual DEM binding must reposition the affected label');
   let surfaceGeometry = false;
   labels.object3d.traverse((object) => { if (object instanceof THREE.Mesh) surfaceGeometry = true; });
   check(!surfaceGeometry, 'label pass must not duplicate surface geometry');

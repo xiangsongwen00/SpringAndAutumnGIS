@@ -80,7 +80,7 @@ export class GlobeLodSelector {
   private readonly horizonPaddingRadians: number;
   private readonly minimumHorizonDetailFactor: number;
   private readonly previousSplits = new Set<string>();
-  private readonly boundsCache = new Map<string, { sphere: THREE.Sphere; box?: {
+  private readonly boundsCache = new Map<string, { sphere: THREE.Sphere; minimumHeight: number; maximumHeight: number; box?: {
     center: THREE.Vector3; axes: THREE.Vector3[]; halfSize: THREE.Vector3
   } }>();
   private readonly boundsDelta = new THREE.Vector3();
@@ -168,7 +168,8 @@ export class GlobeLodSelector {
     const displacementRevision = this.surfaceDisplacementSource?.revision ?? -1;
     if (displacementRevision !== this.surfaceDisplacementRevision) {
       this.surfaceDisplacementRevision = displacementRevision;
-      this.boundsCache.clear();
+      // Each cached world bound validates its own conservative height range.
+      // An unrelated DEM arrival is not a reason to discard every tile.
     }
     camera.updateMatrixWorld();
     camera.getWorldPosition(this.cameraPosition);
@@ -198,10 +199,8 @@ export class GlobeLodSelector {
     if (!this.projectionView.equals(this.viewBoundsMatrix)) {
       this.viewBoundsMatrix.copy(this.projectionView);
       this.viewHeightRanges.clear();
-      // Flat ellipsoid bounds are world-space and independent of the camera.
-      // Keep them during navigation instead of repeating all 25-point bounds
-      // samples for every tile on each camera movement.
-      if (this.maximumSurfaceDisplacement > 0) this.boundsCache.clear();
+      // World-space bounds remain valid across camera motion. A changed
+      // per-view height envelope is checked locally in isInsideFrustum.
     }
     this.frustum.setFromProjectionMatrix(this.projectionView);
     this.updateViewSurfaceSamples(camera);
@@ -507,7 +506,10 @@ export class GlobeLodSelector {
   ): boolean {
     const key = tileKey(id);
     const cached = this.boundsCache.get(key);
-    if (cached) return this.frustum.intersectsSphere(cached.sphere) && (!cached.box || this.boxInsideFrustum(cached.box));
+    if (cached && cached.minimumHeight === surfaceDisplacement.minimumHeight &&
+        cached.maximumHeight === surfaceDisplacement.maximumHeight) {
+      return this.frustum.intersectsSphere(cached.sphere) && (!cached.box || this.boxInsideFrustum(cached.box));
+    }
 
     const longitudeCenter = (rectangle.west + rectangle.east) * 0.5;
     const latitudeCenter = (rectangle.south + rectangle.north) * 0.5;
@@ -584,7 +586,9 @@ export class GlobeLodSelector {
     // surfaces; sampling both surfaces is much tighter than adding the full
     // height in every direction while remaining conservative for GPU lift.
     this.tileBounds.radius = radius * 1.01 + 1;
-    if (this.boundsCache.size >= this.maxTiles * 64) this.boundsCache.clear();
+    if (!this.boundsCache.has(key) && this.boundsCache.size >= this.maxTiles * 64) {
+      this.boundsCache.delete(this.boundsCache.keys().next().value!);
+    }
     // Tight ENU box: terrain height expands the up axis, not every lateral
     // axis as a sphere does. Curvature margin keeps unsampled arcs inside.
     const halfSize = maximum.clone().sub(minimum).multiplyScalar(0.5);
@@ -597,7 +601,8 @@ export class GlobeLodSelector {
     const boxCenter = this.tileBounds.center.clone();
     axes.forEach((axis, index) => boxCenter.addScaledVector(axis, midpoint.getComponent(index)));
     const box = { center: boxCenter, axes, halfSize };
-    const bounds = { sphere: this.tileBounds.clone(), box: id.level >= 4 ? box : undefined };
+    const bounds = { sphere: this.tileBounds.clone(), box: id.level >= 4 ? box : undefined,
+      minimumHeight: surfaceDisplacement.minimumHeight, maximumHeight: surfaceDisplacement.maximumHeight };
     this.boundsCache.set(key, bounds);
     return this.frustum.intersectsSphere(bounds.sphere) && (!bounds.box || this.boxInsideFrustum(bounds.box));
   }

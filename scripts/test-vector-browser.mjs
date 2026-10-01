@@ -61,7 +61,9 @@ try {
       const labelsVisible = Number(appState?.imagery?.match(/底图点注记\s+(\d+)\//)?.[1]) > 0;
       const requiredContent = process.env.VECTOR_REQUIRE_LABELS === '0' ? Number(appState?.selected) > 0 : labelsVisible;
       const terrainSettled = appState?.terrain?.includes('关闭') ||
-        !appState?.terrain?.includes('粗层覆盖中') && appState?.terrain?.includes('0 加载');
+        !appState?.terrain?.includes('粗层覆盖中') && appState?.terrain?.includes('0 加载') &&
+        (!appState?.terrain?.includes('排队') || appState?.terrain?.includes('0 排队')) &&
+        (!appState?.terrain?.includes('待提交') || appState?.terrain?.includes('0 待提交'));
       const imagerySettled = appState?.imagery?.includes('0 加载 · 0 排队');
       const settled = requiredContent && terrainSettled && imagerySettled;
       if (!settled) settledAt = 0;
@@ -109,6 +111,48 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const report = await evaluate('(()=>{window.__vectorAuditSampling=false;const a=window.__vectorAuditFrames.sort((x,y)=>x-y);return {frames:a.length,medianMs:a[Math.floor(a.length*.5)],p95Ms:a[Math.floor(a.length*.95)],maximumMs:a.at(-1),selected:document.querySelector("#selected-value")?.textContent,terrain:document.querySelector("#terrain-value")?.textContent,imagery:document.querySelector("#imagery-value")?.textContent};})()');
       console.log(`Zoom sweep: ${JSON.stringify(report.result?.result?.value)}`);
+    }
+    if (process.env.VECTOR_MOTION_SWEEP === '1') {
+      const box = (await evaluate('(()=>{const r=document.querySelector("canvas").getBoundingClientRect();return {x:r.x+r.width*.45,y:r.y+r.height*.65};})()')).result.result.value;
+      const dispatch = (params) => new Promise((resolve) => {
+        const id = ++nextId; pending.set(id, resolve);
+        socket.send(JSON.stringify({ id, method: 'Input.dispatchMouseEvent', params }));
+      });
+      await evaluate('(()=>{window.__motionFrames=[];window.__motionLongTasks=[];let previous=performance.now();window.__motionSampling=true;window.__motionObserver=new PerformanceObserver(list=>window.__motionLongTasks.push(...list.getEntries().map(e=>e.duration)));window.__motionObserver.observe({type:"longtask",buffered:false});function sample(now){window.__motionFrames.push(now-previous);previous=now;if(window.__motionSampling)requestAnimationFrame(sample);}requestAnimationFrame(sample);})()');
+      // Physical pointer events: left pans, right rotates, middle changes pitch.
+      for (const [button, buttons, dx, dy] of [['left', 1, 220, 70], ['right', 2, 180, -70], ['middle', 4, 0, 60]]) {
+        await dispatch({ type: 'mousePressed', x: box.x, y: box.y, button, buttons, clickCount: 1 });
+        for (let step = 1; step <= 24; step++) {
+          await dispatch({ type: 'mouseMoved', x: box.x + dx * step / 24, y: box.y + dy * step / 24, button, buttons });
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+        await dispatch({ type: 'mouseReleased', x: box.x + dx, y: box.y + dy, button, buttons: 0, clickCount: 1 });
+      }
+      for (const deltaY of [-240, -240, -240, 240, 240, 240]) {
+        await dispatch({ type: 'mouseWheel', x: box.x, y: box.y, deltaX: 0, deltaY });
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+      const motion = await evaluate('(()=>{window.__motionSampling=false;window.__motionObserver.disconnect();const a=window.__motionFrames.sort((x,y)=>x-y);return {frames:a.length,medianMs:a[Math.floor(a.length*.5)],p95Ms:a[Math.floor(a.length*.95)],p99Ms:a[Math.floor(a.length*.99)],maximumMs:a.at(-1),longTasks:window.__motionLongTasks.length,longTaskMaxMs:Math.max(0,...window.__motionLongTasks)};})()');
+      const stoppedAt = Date.now();
+      let recoveredAt = 0;
+      let fpsRecoveredAt = null;
+      let fpsSince = null;
+      let recoveredState;
+      let quietSince = 0;
+      while (Date.now() - stoppedAt < 30000) {
+        recoveredState = (await evaluate('({selected:document.querySelector("#selected-value")?.textContent,terrain:document.querySelector("#terrain-value")?.textContent,imagery:document.querySelector("#imagery-value")?.textContent,fps:document.querySelector("#fps-value")?.textContent})')).result.result.value;
+        if (parseFloat(recoveredState.fps) < 50) fpsSince = null;
+        else fpsSince ??= Date.now();
+        if (fpsRecoveredAt === null && fpsSince !== null && Date.now() - fpsSince >= 1000) fpsRecoveredAt = fpsSince - stoppedAt;
+        const quiet = parseFloat(recoveredState.fps) >= 50 && recoveredState.imagery?.includes('0 加载 · 0 排队') &&
+          (recoveredState.terrain?.includes('关闭') || ['0 加载', '0 排队', '0 待提交'].every(token => recoveredState.terrain?.includes(token)));
+        if (!quiet) quietSince = 0;
+        else quietSince ||= Date.now();
+        if (quietSince && Date.now() - quietSince >= 1000) { recoveredAt = quietSince - stoppedAt; break; }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      const phases = await evaluate('(()=>{const samples=window.__terrainFrameAudit??[];return Object.fromEntries(["lodMs","terrainMs","surfaceMs","featureMs","renderSubmitMs"].map(key=>{const a=samples.map(s=>s[key]).sort((x,y)=>x-y);return [key,{samples:a.length,p95:a[Math.floor(a.length*.95)]??null,max:a.at(-1)??null}]}));})()');
+      console.log(`Motion sweep: ${JSON.stringify({ ...motion.result.result.value, phases: phases.result.result.value, fpsRecoveryMs: fpsRecoveredAt, contentSettledMs: recoveredAt || null, final: recoveredState })}`);
     }
     if (process.env.VECTOR_SCREENSHOT_PATH) {
       const screenshot = await new Promise((resolve) => {
