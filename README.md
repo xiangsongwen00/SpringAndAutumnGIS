@@ -111,3 +111,5 @@ npm run test:terrain
 - 中键拖动：围绕当前视线与地表的交点调整仰角；
 - 滚轮：沿当前视线按真实离地高度缩放；
 - `engine.flyTo({ longitude, latitude, altitude, heading, pitch, duration })`：执行可中断的镜头动画，`pitch=-90` 表示垂直俯视。
+
+矢量点注记性能试验（2026-10-01）：[带注记 Esri 底图](http://localhost:5180/?baseLayer=esri-native-labels&levelOffset=-1.0&longitude=106.5516&latitude=29.563&altitude=12000)，[同位置无注记对照](http://localhost:5180/?baseLayer=esri-native-vector&levelOffset=-1.0&longitude=106.5516&latitude=29.563&altitude=12000)。Enlabel.json 是原 En.json 的完整副本，独立点文字通道共享 PBF 缓存；当前显示最多64个点注记，尚无完整 glyph/SDF、图标和沿线文字。地形斜视 LOD 增加椭球地平线/有向盒细筛、演示上限350；MapTiler 网络上限改为 TileJSON 声明的15，显示 overzoom 不受该网络上限限制。验收方法和边界见《测试数据》§9、《设计》§16.7。

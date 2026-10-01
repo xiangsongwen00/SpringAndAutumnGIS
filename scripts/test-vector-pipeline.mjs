@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import * as THREE from 'three';
 import {
   VectorStyleRuntime, buildFillGeometry, buildLineStrokeGeometry,
-  bindVectorTerrain, vectorTerrainUniforms, MvtTileSource, analyzeVectorSurfaceStyle
+  bindVectorTerrain, vectorTerrainUniforms, MvtTileSource, analyzeVectorSurfaceStyle, MvtRasterProvider
 } from '../dist/spring-and-autumn-gis.es.js';
 
 const style = {
@@ -109,3 +109,21 @@ assert.equal(capabilities.unsupportedLayers, 2);
 assert.equal(capabilities.degradedLayers, 1);
 assert.equal(capabilities.supportedLayers, 1);
 console.log('GPU surface capability checks passed (no black pattern fallback).');
+const metadataRequests = [];
+const metadataFetcher = async (url) => {
+  metadataRequests.push(String(url));
+  return new Response(JSON.stringify({ maxzoom: 15, tiles: ['https://fixture/{z}/{x}/{y}'] }));
+};
+const cappedSource = new MvtTileSource({ id: 'maptiler-fixture', source: { type: 'vector', url: 'https://fixture/tiles.json' }, fetcher: metadataFetcher });
+await cappedSource.initialize();
+assert.equal(cappedSource.maxLevel, 15);
+await assert.rejects(cappedSource.load({ level: 16, x: 0, y: 0 }), RangeError);
+assert.equal(metadataRequests.length, 1, 'out-of-range tiles must not reach the server');
+const cappedProvider = new MvtRasterProvider({ id: 'metadata-cap', maxLevel: 20,
+  style: { version: 8, sources: { fixture: { type: 'vector', url: 'https://fixture/tiles.json' } }, layers: [] },
+  fetcher: metadataFetcher });
+await cappedProvider.styleCapabilities();
+cappedProvider.setViewLevel(20);
+assert.equal(cappedProvider.maxLevel, 15);
+assert.equal(cappedProvider.currentSourceLevel, 15);
+console.log('TileJSON capability checks passed (metadata cap before raster selection, no z16 network request).');

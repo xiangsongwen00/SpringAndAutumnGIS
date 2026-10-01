@@ -277,20 +277,9 @@ export class GlobeEngine {
       for (const layer of this.imageryLayers.values()) {
         if (layer.visible) layer.provider.setViewLevel?.(cameraLevel);
       }
-      const minimumLodLevelOffset = this.imagery?.provider.minimumLodLevelOffset;
-      // Satellite imagery does not use a forced minimum. Avoid a complete
-      // geodetic view-state calculation on every animation frame in that mode.
-      const surfacePitch = minimumLodLevelOffset === undefined
-        ? null
-        : this.controls.getViewState().pitch;
-      const useMinimumLevelOverride =
-        minimumLodLevelOffset !== undefined &&
-        surfacePitch !== null &&
-        surfacePitch <= -55;
-      let minimumLevelOverride = !useMinimumLevelOverride
-        ? undefined
-        : Math.floor(cameraLevel) + minimumLodLevelOffset!;
-      const requestedMinimumLevelOverride = minimumLevelOverride;
+      // Provider network/style zoom is not a minimum mesh LOD. Forcing its
+      // camera zoom across the viewport defeats peripheral error reduction.
+      const requestedMinimumLevelOverride = undefined;
       const terrainRevision = this.terrain?.revision ?? -1;
       const now = performance.now();
       if (terrainRevision !== this.observedTerrainRevision) {
@@ -317,27 +306,10 @@ export class GlobeEngine {
         terrainRefreshDue;
       const lodStartedAt = performance.now();
       if (selectionChanged) {
-        let selection = this.lod.select(
+        const selection = this.lod.select(
           this.camera,
-          viewportHeight,
-          minimumLevelOverride
+          viewportHeight
         );
-        // A forced vector minimum can exceed the tile budget at polar/oblique
-        // global views. Never keep a half-refined mix spanning several levels:
-        // lower the whole minimum and select again until refinement completes.
-        while (
-          minimumLevelOverride !== undefined &&
-          minimumLevelOverride > this.lod.minLevel &&
-          selection.tiles.length >= this.lod.maxTiles &&
-          minimumSelectedLevel(selection.stats) < minimumLevelOverride
-        ) {
-          minimumLevelOverride -= 1;
-          selection = this.lod.select(
-            this.camera,
-            viewportHeight,
-            minimumLevelOverride
-          );
-        }
         this.lodSelection = selection;
         this.lodSelectionTerrainRevision = terrainRevision;
         this.lodSelectionViewportWidth = viewportWidth;
@@ -623,9 +595,4 @@ export class GlobeEngine {
     this.lastStatsSignature = signature;
     this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers, performance: this.framePerformance });
   }
-}
-
-function minimumSelectedLevel(stats: GlobeLodStats): number {
-  const levels = [...stats.levels.keys()];
-  return levels.length > 0 ? Math.min(...levels) : Number.POSITIVE_INFINITY;
 }

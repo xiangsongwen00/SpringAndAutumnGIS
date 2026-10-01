@@ -143,7 +143,7 @@ export type {
   TerrainTileScheme
 } from './core/terrain/TerrainProvider';
 
-export { GlobeLodSelector } from './core/lod/GlobeLodSelector';
+export { GlobeLodSelector, tileRequestUrgency } from './core/lod/GlobeLodSelector';
 export type {
   GlobeLodSelectorOptions,
   GlobeLodStats,

@@ -10,7 +10,7 @@ export interface RasterTileProvider {
   readonly maxLevel: number;
   /** Data zoom = globe LOD zoom + levelOffset. Only zero or negative offsets are supported. */
   readonly levelOffset?: number;
-  /** Optional minimum selected globe LOD relative to the current camera level. */
+  /** @deprecated Engine no longer forces a provider's minimum across the viewport. */
   readonly minimumLodLevelOffset?: number;
   /** Receives the continuous camera level before each selection/update. */
   setViewLevel?(cameraLevel: number): void;

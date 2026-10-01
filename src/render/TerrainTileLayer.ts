@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransform';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
-import type { SelectedTile } from '../core/lod/GlobeLodSelector';
+import { tileRequestUrgency, type SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { SurfaceDisplacementBoundsSource } from '../core/lod/GlobeLodSelector';
 import type { SurfaceDisplacementRange } from '../core/lod/GlobeLodSelector';
 import {
@@ -338,8 +338,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
-      (a, b) => a.viewCenterDistance - b.viewCenterDistance ||
-        b.screenPixels - a.screenPixels || b.id.level - a.id.level
+      (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
+        a.viewCenterDistance - b.viewCenterDistance || b.id.level - a.id.level
     );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const selected = prioritized[rank];

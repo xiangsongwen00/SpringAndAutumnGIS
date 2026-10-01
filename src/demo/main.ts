@@ -7,7 +7,7 @@ import {
   LayerCollection,
   MvtRasterProvider,
   GpuVectorTileProvider,
-  type MvtVectorLayer,
+  MvtVectorLayer,
   TerrainRgbProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
@@ -100,6 +100,7 @@ layers.setVisible(activeBaseLayer.id, true);
 baseLayerSelect.value = activeBaseLayer.id;
 let baseProvider: RasterTileProvider;
 let nativeBase: GpuVectorTileProvider | null = null;
+let nativeSymbols: MvtVectorLayer | null = null;
 try {
   layers.setRuntime(activeBaseLayer.id, { phase: 'loading', pending: 1 });
   baseProvider = await registry.createRasterProviderAsync(
@@ -187,13 +188,15 @@ const renderStats = (stats: GlobeEngineStats): void => {
     : '影像未启用';
   if (nativeBase) {
     const report = nativeBase.capabilityReport;
-    imageryValue.textContent += ` · GPU 地表绘制 · 注记待接入${report
+    imageryValue.textContent += ` · GPU 地表绘制 · ${nativeSymbols ? '独立点注记' : '注记待接入'}${report
       ? ` · 样式 ${report.supportedLayers}支持/${report.degradedLayers}降级/${report.unsupportedLayers}跳过` : ''}`;
     imageryValue.textContent += ` · PBF≤${nativeBase.dataMaxLevel}级/绘制≤${nativeBase.maxLevel}级`;
     const draw = nativeBase.drawStats;
     imageryValue.textContent += ` · 制图${draw.queued}排队/${draw.lastMs.toFixed(1)}ms/峰值${draw.maxMs.toFixed(1)}ms`;
   }
-  const nativeMvt = [...stats.vectorLayers.entries()].find(([id]) => id !== 'native-base')?.[1];
+  const baseSymbolStats = stats.vectorLayers.get('native-base-symbols');
+  if (baseSymbolStats) imageryValue.textContent += ` · 底图点注记 ${baseSymbolStats.visibleLabels}/${baseSymbolStats.allocatedLabels}（显示/缓存）· placement ${baseSymbolStats.placementMs.toFixed(1)}ms`;
+  const nativeMvt = [...stats.vectorLayers.entries()].find(([id]) => id !== 'native-base-symbols')?.[1];
   if (nativeMvt) {
     imageryValue.textContent +=
       ` ｜ 业务 MVT ${nativeMvt.sourceLevel}级 · ${nativeMvt.ready} 就绪 · ` +
@@ -235,7 +238,7 @@ const engine = new GlobeEngine({
     maxLevel: MAX_LOD_LEVEL,
     targetPixels: 128,
     collapseFactor: 0.7,
-    maxTiles: 480,
+    maxTiles: 350,
     minimumHorizonDetailFactor: 0.08,
     horizonDetailExponent: 0.5,
     maximumSurfaceDisplacement: terrain ? 12_000 * numericEnvironmentValue(
@@ -284,10 +287,14 @@ applyActiveLayerUi();
 if (activeBaseLayer.kind === 'vector') {
   try {
     nativeBase = await createNativeBase(activeBaseLayer);
+    nativeSymbols = await createNativeSymbols(activeBaseLayer, nativeBase);
     baseProvider = nativeBase;
     engine.setImageryProvider(nativeBase);
+    if (nativeSymbols) engine.addVectorLayer('native-base-symbols', nativeSymbols);
   } catch (error) {
     const failedLayer = activeBaseLayer;
+    nativeSymbols?.dispose(); nativeSymbols = null;
+    nativeBase?.dispose(); nativeBase = null;
     layers.setRuntime(failedLayer.id, { phase: 'error', pending: 0, failed: 1,
       lastError: error instanceof Error ? error.message : String(error) });
     const fallback = baseLayers.find((layer) => layer.sourceId === 'google-satellite');
@@ -316,10 +323,12 @@ baseLayerSelect.addEventListener('change', async () => {
   layers.setRuntime(next.id, { phase: 'loading', pending: 1, failed: 0, lastError: null });
   let provider: RasterTileProvider = baseProvider;
   let nextNative: GpuVectorTileProvider | null = null;
+  let nextSymbols: MvtVectorLayer | null = null;
   try {
     if (next.kind === 'vector') {
       nextNative = await createNativeBase(next);
       provider = nextNative;
+      nextSymbols = await createNativeSymbols(next, nextNative);
     } else {
       provider = await registry.createRasterProviderAsync(next.sourceId, {
         levelOffset: next.levelOffset
@@ -327,6 +336,7 @@ baseLayerSelect.addEventListener('change', async () => {
       await diagnoseMvtStyle(provider, `底图 ${next.id}`);
     }
   } catch (error) {
+    nextSymbols?.dispose(); nextNative?.dispose();
     if (revision !== layerSwitchRevision) return;
     layers.setRuntime(next.id, {
       phase: 'error', pending: 0, failed: 1,
@@ -336,7 +346,10 @@ baseLayerSelect.addEventListener('change', async () => {
     console.error(`[图层 ${next.id}] 加载失败`, error);
     return;
   }
-  if (revision !== layerSwitchRevision) { nextNative?.dispose(); return; }
+  if (revision !== layerSwitchRevision) { nextSymbols?.dispose(); nextNative?.dispose(); return; }
+  engine.removeVectorLayer('native-base-symbols');
+  nativeSymbols = nextSymbols;
+  if (nativeSymbols) engine.addVectorLayer('native-base-symbols', nativeSymbols);
   const previousNative = nativeBase;
   nativeBase = nextNative;
   layers.setVisible(next.id, true);
@@ -356,6 +369,7 @@ levelOffsetInput.addEventListener('input', () => {
   if (!Number.isFinite(offset)) return;
   activeBaseLayer = layers.setLevelOffset(activeBaseLayer.id, offset);
   nativeBase?.setViewLevelOffset(offset);
+  nativeSymbols?.setViewLevelOffset(offset);
   baseProvider.setViewLevelOffset?.(offset);
   if (annotationLayerId) {
     const annotationLayer = engine.getImageryLayer('annotation');
@@ -780,6 +794,20 @@ async function createNativeBase(layer: LayerState): Promise<GpuVectorTileProvide
   });
   try { await vector.initialize(); return vector; }
   catch (error) { vector.dispose(); throw error; }
+}
+
+async function createNativeSymbols(layer: LayerState, provider: GpuVectorTileProvider): Promise<MvtVectorLayer | null> {
+  if (layer.sourceId !== 'esri-native-labels') return null;
+  const source = registry.get(layer.sourceId)!;
+  const symbols = new MvtVectorLayer(engine.ellipsoid, {
+    id: 'native-base-symbols', styleUrl: source.styleUrl, sourceId: source.sourceId,
+    role: 'base', symbols: true, symbolsOnly: true, maxLevel: provider.maxLevel,
+    levelOffset: layer.levelOffset, terrain: engine.terrain ?? undefined, order: 10000,
+    maxConcurrentRequests: 1, maxCachedTiles: 64, maxLabelsPerTile: 8, maxVisibleLabels: 64, maxAllocatedLabels: 256,
+    decodedTileLoader: (id, signal) => provider.loadVectorTile(id, signal)
+  });
+  try { await symbols.initialize(); return symbols; }
+  catch (error) { symbols.dispose(); throw error; }
 }
 
 function setLevelOffsetUi(offset: number): void {

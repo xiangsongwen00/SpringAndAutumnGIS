@@ -6,6 +6,7 @@ import { RasterTileLayer } from '../src/render/RasterTileLayer';
 import { UrlTemplateRasterProvider } from '../src/core/tiles/RasterTileProvider';
 import { Ellipsoid } from '../src/core/geo/Ellipsoid';
 import { WebMercatorTilingScheme } from '../src/core/tiling/WebMercatorTilingScheme';
+import { MvtVectorLayer } from '../src/render/MvtVectorLayer';
 
 // Actual PBF -> worker -> style -> GPU -> surface sampling. North red, south green.
 const result = document.querySelector('#result')!;
@@ -219,8 +220,35 @@ try {
   const surfaceScene = new THREE.Scene(); surfaceScene.add(surface.object3d);
   renderer.setRenderTarget(target); renderer.render(surfaceScene, camera);
   surface.dispose(); dem.dispose();
+  const labelId = { level: 2, x: 2, y: 1 };
+  const labelStyle: MapStyle = { version: 8, sources: { fixture: { type: 'vector', tiles: ['https://fixture/{z}/{x}/{y}'] } },
+    layers: [{ id: 'labels', type: 'symbol', source: 'fixture', 'source-layer': 'labels',
+      layout: { 'text-field': ['get', 'name'], 'text-size': 12 }, paint: { 'text-color': '#000000' } }] };
+  const labels = new MvtVectorLayer(Ellipsoid.WGS84, { id: 'label-test', style: labelStyle,
+    symbolsOnly: true, symbols: true, levelOffset: 0, maxLabelsPerTile: 8, maxVisibleLabels: 1, maxAllocatedLabels: 8,
+    decodedTileLoader: async () => new Map([['labels', [{ type: 1, extent: 4096, properties: { name: '注记测试' },
+      geometry: [[{ x: 2048, y: 2048 }]] }]]]) });
+  await labels.initialize();
+  const labelRectangle = new WebMercatorTilingScheme().rectangle(labelId);
+  const labelLongitude = 45, labelLatitude = Math.atan(Math.sinh(Math.PI * .25)) * 180 / Math.PI;
+  const labelCamera = new THREE.PerspectiveCamera(50, 1, 1, 100000000);
+  labelCamera.position.copy(Ellipsoid.WGS84.cartographicToCartesian({ longitude: labelLongitude, latitude: labelLatitude, height: 100000 }));
+  labelCamera.lookAt(Ellipsoid.WGS84.cartographicToCartesian({ longitude: labelLongitude, latitude: labelLatitude }));
+  labelCamera.updateMatrixWorld();
+  const labelSelection = [{ id: labelId, rectangle: labelRectangle, screenPixels: 128, viewCenterDistance: 0 }];
+  labels.update(labelSelection, 2, labelCamera, 128, 128);
+  for (let wait = 0; wait < 100 && !labels.stats.ready; wait++) await new Promise((resolve) => setTimeout(resolve, 10));
+  labels.update(labelSelection, 2, labelCamera, 128, 128);
+  check(labels.stats.visibleLabels === 1, 'independent label pass must visibly place the point text');
+  check(labels.stats.allocatedLabels <= 8, 'label allocation budget');
+  let surfaceGeometry = false;
+  labels.object3d.traverse((object) => { if (object instanceof THREE.Mesh) surfaceGeometry = true; });
+  check(!surfaceGeometry, 'label pass must not duplicate surface geometry');
+  const labelScene = new THREE.Scene(); labelScene.add(labels.object3d);
+  renderer.setRenderTarget(target); renderer.render(labelScene, labelCamera);
+  labels.dispose();
   check(failures.length === 0, failures.join('\n'));
-  result.textContent = 'PASS: DPR 1/1.25/2, XYZ/TMS, parent crops, 2x2 seams, z19/20 vector overzoom, constant line width, decoded parent reuse, terrain shader, no shader errors';
+  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + bounded independent point labels, no shader errors';
   result.setAttribute('data-status', 'passed');
 } catch (error) {
   result.textContent = `FAIL: ${error instanceof Error ? error.stack : error}`;

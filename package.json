@@ -23,7 +23,7 @@
     "build": "vite build && tsc -p tsconfig.build.json",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node scripts/test-layer-management.mjs && node scripts/test-tile-runtime.mjs && node scripts/test-raster-orientation.mjs && node scripts/test-terrain-stitch.mjs && node scripts/test-vector-pipeline.mjs",
+    "test": "npm run build && node scripts/test-layer-management.mjs && node scripts/test-tile-runtime.mjs && node scripts/test-raster-orientation.mjs && node scripts/test-terrain-stitch.mjs && node scripts/test-vector-pipeline.mjs && node scripts/test-lod-visibility.mjs && node scripts/test-lod-budget.mjs",
     "test:vector": "npm run build && node scripts/test-vector-pipeline.mjs",
     "test:vector:browser": "node scripts/test-vector-browser.mjs",
     "test:terrain": "npm run build && node scripts/test-terrain-stitch.mjs",

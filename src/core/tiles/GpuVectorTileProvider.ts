@@ -81,8 +81,10 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
     this.unsupportedLayers = new Set(this.capabilityReport.issues
       .filter((issue) => issue.severity === 'unsupported').map((issue) => issue.layerId));
     this.source = new MvtTileSource({ id: selected.id, source: { ...selected.source, ...this.sourceOverride }, fetcher: this.loaderFetcher });
+    await this.source.initialize();
     this._dataMaxLevel = Math.max(this.minLevel, Math.round(this.configuredDataMaxLevel ??
       this.sourceOverride?.maxzoom ?? selected.source.maxzoom ?? 22));
+    this._dataMaxLevel = Math.min(this._dataMaxLevel, this.source.maxLevel);
     if (this.runtime.issues.length) throw new Error(`样式编译失败：${JSON.stringify(this.runtime.issues.slice(0, 3))}`);
     console.info(`[GPU vector ${this.id}] 地表初版能力边界`, this.limitations);
     console.info(`[GPU vector ${this.id}] 样式绘制能力`, this.capabilityReport);
@@ -94,6 +96,24 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   get drawStats() { return { queued: this.drawQueue.length, lastMs: this.lastDrawMs, maxMs: this.maxDrawMs }; }
 
   async loadTexture(id: TileId, signal?: AbortSignal): Promise<THREE.Texture> {
+    const { sourceTile, offset, scale, decoded } = await this.loadSourceTile(id, signal);
+    return this.enqueueDraw(() => this.drawTile(id, sourceTile, offset, scale, decoded), signal);
+  }
+
+  /** Shared PBF/Worker cache for the independent symbol pass; local XYZ UVs. */
+  async loadVectorTile(id: TileId, signal?: AbortSignal): Promise<DecodedVectorTile> {
+    const { offset, scale, decoded } = await this.loadSourceTile(id, signal);
+    if (scale === 1) return decoded;
+    const result = new Map<string, readonly import('../../vector/style/VectorStyleTypes').DecodedFeature[]>();
+    for (const [name, features] of filterToSubtile(decoded, offset, scale, this.tileSize)) {
+      result.set(name, features.map((feature) => ({ ...feature, geometry: feature.geometry.map((ring) =>
+        ring.map((point) => ({ x: (point.x - offset.x * feature.extent) * scale,
+          y: (point.y - offset.y * feature.extent) * scale } as typeof point))) })));
+    }
+    return result;
+  }
+
+  private async loadSourceTile(id: TileId, signal?: AbortSignal) {
     if (!this.source || !this.runtime) throw new Error('GPU vector provider is not initialized');
     signal?.throwIfAborted();
     const sourceLevel = Math.min(id.level, this.dataMaxLevel);
@@ -114,7 +134,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
     finally { signal?.removeEventListener('abort', abort); lease.release(); }
     signal?.throwIfAborted();
     if (this.disposed) throw new Error('GPU vector provider disposed');
-    return this.enqueueDraw(() => this.drawTile(id, sourceTile, offset, scale, decoded), signal);
+    return { sourceTile, offset, scale, decoded };
   }
 
   private drawTile(id: TileId, sourceTile: TileId, offset: THREE.Vector2, scale: number,

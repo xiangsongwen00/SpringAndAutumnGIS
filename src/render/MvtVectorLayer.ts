@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
-import type { SelectedTile } from '../core/lod/GlobeLodSelector';
+import { tileRequestUrgency, type SelectedTile } from '../core/lod/GlobeLodSelector';
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { VectorDecodeService } from '../vector/worker/VectorDecodeService';
 import { MvtTileSource } from '../vector/source/MvtTileSource';
@@ -43,9 +43,13 @@ export type MvtVectorLayerOptions = Readonly<{
   terrainSampleBudget?: number;
   maxLabelsPerTile?: number;
   maxVisibleLabels?: number;
+  maxAllocatedLabels?: number;
   /** Surface backgrounds are enabled for base maps, disabled for overlays. */
   role?: 'base' | 'overlay';
   symbols?: boolean;
+  /** Independent bounded symbol pass; never duplicates surface geometry. */
+  symbolsOnly?: boolean;
+  decodedTileLoader?: (id: TileId, signal?: AbortSignal) => Promise<ReadonlyMap<string, readonly DecodedFeature[]>>;
   fetcher?: typeof fetch;
 }>;
 
@@ -58,6 +62,7 @@ export type MvtVectorLayerStats = Readonly<{
   visible: number;
   allocatedLabels: number;
   visibleLabels: number;
+  placementMs: number;
 }>;
 
 type TileState = 'queued' | 'loading' | 'ready' | 'error';
@@ -87,17 +92,25 @@ export class MvtVectorLayer {
   private readonly ellipsoid: Ellipsoid;
   private readonly styleLoader: MapStyleLoader;
   private readonly directSource?: VectorSource;
-  private readonly decoder = new VectorDecodeService();
+  private readonly decoder: VectorDecodeService | null;
   private readonly terrain?: TerrainHeightSource;
   private readonly minLevel: number;
   private readonly maxLevel: number;
   private levelOffset: number;
   private readonly role: 'base' | 'overlay';
   private readonly symbols: boolean;
+  private readonly symbolsOnly: boolean;
+  private readonly decodedTileLoader?: MvtVectorLayerOptions['decodedTileLoader'];
+  private placementDirty = true;
+  private readonly placementCameraPosition = new THREE.Vector3(Infinity, Infinity, Infinity);
+  private readonly placementCameraQuaternion = new THREE.Quaternion();
+  private placementViewport = '';
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
   private readonly maxLabelsPerTile: number;
   private readonly maxVisibleLabels: number;
+  private readonly maxAllocatedLabels: number;
+  private placementMs = 0;
   private readonly heightOffset: number;
   private readonly order: number;
   private readonly bounds?: readonly [number, number, number, number];
@@ -126,10 +139,14 @@ export class MvtVectorLayer {
     this.levelOffset = THREE.MathUtils.clamp(options.levelOffset ?? -1.7, -8, 2);
     this.role = options.role ?? 'overlay';
     this.symbols = options.symbols ?? this.role === 'overlay';
+    this.symbolsOnly = options.symbolsOnly ?? false;
+    this.decodedTileLoader = options.decodedTileLoader;
+    this.decoder = this.decodedTileLoader ? null : new VectorDecodeService();
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 6));
     this.maxCachedTiles = Math.max(16, Math.round(options.maxCachedTiles ?? 256));
     this.maxLabelsPerTile = Math.max(0, Math.round(options.maxLabelsPerTile ?? 12));
     this.maxVisibleLabels = Math.max(0, Math.round(options.maxVisibleLabels ?? 48));
+    this.maxAllocatedLabels = Math.max(this.maxVisibleLabels, Math.round(options.maxAllocatedLabels ?? this.maxVisibleLabels * 4));
     this.heightOffset = Math.max(0, options.heightOffset ?? (this.role === 'base' ? 0.1 : 3));
     this.order = options.order ?? 300;
     this.bounds = options.bounds;
@@ -165,11 +182,13 @@ export class MvtVectorLayer {
     if (this.styleRuntime.issues.length) console.warn(`[MVT ${this.id}] 样式编译诊断`, this.styleRuntime.issues);
     this.sourceId = selected.id;
     this.sourceLayers = new Set(this.styleLoader.sourceLayerNames(style, selected.id));
-    this.source = new MvtTileSource({
+    const source = new MvtTileSource({
       id: selected.id,
       source: this.directSource ?? selected.source,
       fetcher: this.fetcher
     });
+    if (!this.decodedTileLoader) await source.initialize();
+    this.source = source;
   }
 
   get stats(): MvtVectorLayerStats {
@@ -189,6 +208,7 @@ export class MvtVectorLayer {
       visible,
       allocatedLabels,
       visibleLabels,
+      placementMs: this.placementMs,
       sourceLevel: this.currentSourceLevel
     };
   }
@@ -205,7 +225,7 @@ export class MvtVectorLayer {
     this.currentSourceLevel = THREE.MathUtils.clamp(
       Math.floor(cameraLevel + this.levelOffset + 1e-9),
       this.minLevel,
-      this.maxLevel
+      this.decodedTileLoader ? this.maxLevel : Math.min(this.maxLevel, this.source.maxLevel)
     );
     const desired = new Map<string, { id: TileId; priority: number }>();
     for (const selected of selection) {
@@ -213,7 +233,7 @@ export class MvtVectorLayer {
       if (!this.hasTile(id)) continue;
       const key = tileKey(id);
       const current = desired.get(key);
-      const priority = selected.viewCenterDistance * 1_000_000 - selected.screenPixels;
+      const priority = -tileRequestUrgency(selected);
       if (!current || priority < current.priority) desired.set(key, { id, priority });
     }
     const visible = new Set<string>();
@@ -263,8 +283,19 @@ export class MvtVectorLayer {
         this.positionLabel(label.sprite, label.longitude, label.latitude);
       }
       this.observedTerrainRevision = this.terrain?.revision ?? -1;
+      this.placementDirty = true;
     }
-    this.updateLabels(camera, viewportWidth, viewportHeight);
+    const placementViewport = `${viewportWidth}/${viewportHeight}/${this.currentSourceLevel}`;
+    if (this.placementDirty || !camera.position.equals(this.placementCameraPosition) ||
+        !camera.quaternion.equals(this.placementCameraQuaternion) || placementViewport !== this.placementViewport) {
+      const placementStartedAt = performance.now();
+      this.updateLabels(camera, viewportWidth, viewportHeight);
+      this.placementMs = performance.now() - placementStartedAt;
+      this.placementDirty = false;
+      this.placementCameraPosition.copy(camera.position);
+      this.placementCameraQuaternion.copy(camera.quaternion);
+      this.placementViewport = placementViewport;
+    }
     this.evict();
   }
 
@@ -294,7 +325,7 @@ export class MvtVectorLayer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.decoder.dispose();
+    this.decoder?.dispose();
     for (const record of this.records.values()) this.disposeRecord(record);
     this.records.clear();
     this.queue.length = 0;
@@ -319,9 +350,15 @@ export class MvtVectorLayer {
 
   private async loadRecord(record: TileRecord): Promise<void> {
     try {
-      const bytes = await this.source!.load(record.id, record.controller?.signal);
+      let decoded: ReadonlyMap<string, readonly DecodedFeature[]>;
+      if (this.decodedTileLoader) decoded = await this.decodedTileLoader(record.id, record.controller?.signal);
+      else {
+        const bytes = await this.source!.load(record.id, record.controller?.signal);
+        if (this.disposed || record.controller?.signal.aborted) return;
+        decoded = await this.decoder!.decode(bytes, this.sourceLayers);
+      }
       if (this.disposed || record.controller?.signal.aborted) return;
-      const decoded = await this.decoder.decode(bytes, this.sourceLayers);
+      if (this.symbolsOnly) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       if (this.disposed || record.controller?.signal.aborted) return;
       const built = this.buildTile(record.id, decoded);
       record.group = built.group;
@@ -329,6 +366,7 @@ export class MvtVectorLayer {
       record.group.visible = false;
       this.object3d.add(record.group);
       record.state = 'ready';
+      this.placementDirty = true;
       record.error = null;
     } catch (error) {
       if (record.controller?.signal.aborted) return;
@@ -343,9 +381,14 @@ export class MvtVectorLayer {
     group.renderOrder = this.order;
     const labels: LabelState[] = [];
     const labelTexts = new Set<string>();
-    const types = new Set(['background', 'fill', 'line', 'circle']);
+    const allocatedLabels = [...this.records.values()].reduce((sum, record) => sum + record.labels.length, 0);
+    const types = new Set(this.symbolsOnly ? [] : ['background', 'fill', 'line', 'circle']);
     if (this.symbols) types.add('symbol');
-    for (const bucket of this.styleRuntime!.buckets(decoded, this.sourceId, id.level, types)) {
+    const buckets = this.styleRuntime!.buckets(decoded, this.sourceId, id.level, types);
+    // Higher style layers get placement priority, rather than spending the
+    // per-tile budget on low-order park labels before city/admin text.
+    if (this.symbolsOnly) buckets.sort((a, b) => b.order - a.order);
+    for (const bucket of buckets) {
       const { layer, features, order } = bucket;
       const renderOrder = this.order + order * 0.001;
       if (layer.type === 'background' && this.role === 'base') {
@@ -403,10 +446,16 @@ export class MvtVectorLayer {
         configureObject(points, renderOrder);
         group.add(points);
       } else if (layer.type === 'symbol' && this.symbols) {
+        // First symbol pass supports point text, not along-line text/icons.
+        if (this.symbolsOnly && layer.layout?.['symbol-placement'] === 'line') continue;
         for (const feature of features) {
-          if (labels.length >= this.maxLabelsPerTile) break;
+          if (labels.length >= this.maxLabelsPerTile || allocatedLabels + labels.length >= this.maxAllocatedLabels) break;
           const text = resolveText(layer.layout?.['text-field'], feature.properties);
           const point = firstPoint(id, feature);
+          if (this.symbolsOnly) {
+            const anchor = feature.geometry[0]?.[0];
+            if (!anchor || anchor.x < 0 || anchor.y < 0 || anchor.x >= feature.extent || anchor.y >= feature.extent) continue;
+          }
           if (!text || !point || labelTexts.has(text)) continue;
           const label = this.createLabel(text, point[0], point[1], layer);
           group.add(label.sprite);

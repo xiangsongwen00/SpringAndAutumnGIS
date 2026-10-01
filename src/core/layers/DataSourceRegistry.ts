@@ -218,7 +218,9 @@ export class DataSourceRegistry {
   ): Promise<RasterTileProvider> {
     const source = this.require(id);
     if (source.kind !== 'wmts-raster' || !source.capabilitiesUrl) {
-      return this.createRasterProvider(id, overrides);
+      const provider = this.createRasterProvider(id, overrides);
+      if (provider instanceof MvtRasterProvider) await provider.initialize();
+      return provider;
     }
     const availability = this.availability(id);
     if (!availability.available) {

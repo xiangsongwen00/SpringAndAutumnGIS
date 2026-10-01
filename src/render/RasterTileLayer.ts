@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
-import type { SelectedTile } from '../core/lod/GlobeLodSelector';
+import { tileRequestUrgency, type SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
 import {
   TileStateMachine,
@@ -591,8 +591,8 @@ export class RasterTileLayer {
       if (record.state === 'queued') record.priority = Number.POSITIVE_INFINITY;
     }
     const prioritized = [...selection].sort(
-      (a, b) => a.viewCenterDistance - b.viewCenterDistance ||
-        b.screenPixels - a.screenPixels || b.id.level - a.id.level
+      (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
+        a.viewCenterDistance - b.viewCenterDistance || b.id.level - a.id.level
     );
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const tile = prioritized[rank];

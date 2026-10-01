@@ -11,7 +11,7 @@ export type MvtTileSourceOptions = {
 export class MvtTileSource {
   readonly id: string;
   readonly minLevel: number;
-  readonly maxLevel: number;
+  private resolvedMaxLevel: number;
 
   private templates: readonly string[];
   private readonly tileJsonUrl?: string;
@@ -37,8 +37,11 @@ export class MvtTileSource {
     this.subdomains = options.source.subdomains ?? [];
     this.fetcher = options.fetcher ?? fetch;
     this.minLevel = Math.max(0, Math.round(options.source.minzoom ?? 0));
-    this.maxLevel = Math.max(this.minLevel, Math.round(options.source.maxzoom ?? 30));
+    this.resolvedMaxLevel = Math.max(this.minLevel, Math.round(options.source.maxzoom ?? 30));
   }
+
+  get maxLevel(): number { return this.resolvedMaxLevel; }
+  async initialize(signal?: AbortSignal): Promise<void> { await this.resolveTemplates(signal); }
 
   url(tile: TileId): string {
     // Keep the compatibility renderer deterministic. ArcGIS style sources
@@ -53,6 +56,11 @@ export class MvtTileSource {
 
   async load(tile: TileId, signal?: AbortSignal): Promise<ArrayBuffer> {
     const templates = await this.resolveTemplates(signal);
+    if (tile.level < this.minLevel || tile.level > this.maxLevel ||
+        !Number.isInteger(tile.x) || !Number.isInteger(tile.y) || tile.x < 0 || tile.y < 0 ||
+        tile.x >= 2 ** tile.level || tile.y >= 2 ** tile.level) {
+      throw new RangeError(`MVT ${this.id} 请求超出 TileJSON/XYZ 范围：${tile.level}/${tile.x}/${tile.y}（${this.minLevel}–${this.maxLevel}）`);
+    }
     const template = templates[(tile.x + tile.y) % templates.length];
     if (!template) throw new Error(`矢量数据源 ${this.id} 没有可用 tiles 模板。`);
     const tileUrl = resolveTileUrl(template, tile, this.scheme, this.subdomains);
@@ -72,7 +80,11 @@ export class MvtTileSource {
     if (!response.ok) {
       throw new Error(`矢量 TileJSON 加载失败：${response.status} ${sanitizeUrl(this.tileJsonUrl)}`);
     }
-    const tileJson = await response.json() as { tiles?: string[]; scheme?: string };
+    const tileJson = await response.json() as { tiles?: string[]; scheme?: string; maxzoom?: number };
+    if (tileJson.maxzoom !== undefined) {
+      if (!Number.isInteger(tileJson.maxzoom) || tileJson.maxzoom < this.minLevel) throw new Error(`矢量 TileJSON ${this.id} maxzoom 无效。`);
+      this.resolvedMaxLevel = Math.min(this.resolvedMaxLevel, tileJson.maxzoom);
+    }
     if (!this.explicitScheme && tileJson.scheme !== undefined) {
       if (tileJson.scheme !== 'xyz' && tileJson.scheme !== 'tms') {
         throw new Error(`矢量 TileJSON ${this.id} 的 scheme 无效：${tileJson.scheme}`);

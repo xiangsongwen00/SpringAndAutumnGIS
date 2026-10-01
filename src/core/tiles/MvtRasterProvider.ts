@@ -42,7 +42,7 @@ export type MvtRasterProviderOptions = Readonly<{
 export class MvtRasterProvider implements RasterTileProvider {
   readonly id: string;
   readonly minLevel: number;
-  readonly maxLevel: number;
+  private resolvedMaxLevel: number;
   readonly levelOffset: number;
   readonly minimumLodLevelOffset: number;
   readonly estimatedTextureBytes: number;
@@ -65,7 +65,7 @@ export class MvtRasterProvider implements RasterTileProvider {
     }
     this.id = options.id ?? 'mvt-raster';
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
-    this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
+    this.resolvedMaxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
     this._viewLevelOffset = normalizeViewLevelOffset(
       options.viewLevelOffset ?? options.levelOffset ?? DEFAULT_LEVEL_OFFSET
     );
@@ -136,7 +136,21 @@ export class MvtRasterProvider implements RasterTileProvider {
     return Math.min(renderLevel, this.viewSourceLevel, this.maxLevel);
   }
 
-  styleCapabilities(): Promise<MapStyleCapabilityReport> {
+  get maxLevel(): number { return this.resolvedMaxLevel; }
+
+  async initialize(): Promise<void> {
+    const style = await this.styleLoader.load();
+    const selected = this.styleLoader.selectVectorSource(style);
+    this.source ??= new MvtTileSource({ id: selected.id, source: this.directSource ?? selected.source, fetcher: this.fetcher });
+    await this.source.initialize();
+    const cap = Math.min(this.resolvedMaxLevel, this.source.maxLevel);
+    if (cap !== this.resolvedMaxLevel) {
+      this.resolvedMaxLevel = cap; this.viewSourceLevel = Math.min(this.viewSourceLevel, cap); this._revision++;
+    }
+  }
+
+  async styleCapabilities(): Promise<MapStyleCapabilityReport> {
+    await this.initialize();
     return this.styleLoader.capabilities();
   }
 
@@ -160,6 +174,7 @@ export class MvtRasterProvider implements RasterTileProvider {
   }
 
   async loadTexture(tile: TileId, signal?: AbortSignal): Promise<THREE.Texture> {
+    await this.initialize();
     const style = await this.styleLoader.load();
     const selected = this.styleLoader.selectVectorSource(style);
     const source = this.source ??= new MvtTileSource({
