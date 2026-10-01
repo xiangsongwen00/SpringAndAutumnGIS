@@ -96,7 +96,7 @@ const parent = [tiles[0]];
 direct.update(parent); await new Promise(resolve => setImmediate(resolve)); direct.update(parent);
 requestedLevels.length = 0;
 direct.update([selected({ level: 8, x: parent[0].id.x * 16, y: parent[0].id.y * 16 })]);
-assert.deepEqual(requestedLevels, [8], 'ready coverage skips unnecessary middle DEM levels');
+assert.deepEqual(requestedLevels, [8], 'default legacy path requests target directly with an existing ancestor');
 await new Promise(resolve => setImmediate(resolve)); direct.dispose();
 
 const missingChild = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'missing-child', minLevel: 4, maxLevel: 5,

@@ -124,6 +124,7 @@ export class TerrainRgbProvider implements TerrainProvider {
         signal?.throwIfAborted();
         return createTerrainTile(sourceTile, field.width, field.height, field.heights, field.minimumHeight, field.maximumHeight);
       } catch (error) {
+        signal?.throwIfAborted();
         lastError = error;
       }
     }

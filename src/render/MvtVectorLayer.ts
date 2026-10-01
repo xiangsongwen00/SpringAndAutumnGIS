@@ -288,7 +288,8 @@ export class MvtVectorLayer {
       }
     }
     for (const record of this.records.values()) {
-      if (record.group) record.group.visible = visible.has(record.key);
+      if (record.group) record.group.visible = visible.has(record.key) &&
+        this.terrain?.hasSurfaceCoverage?.(record.id) !== false;
       if (record.group?.visible) record.group.traverse((object) => {
         const material = (object as THREE.Mesh).material;
         if (material instanceof THREE.ShaderMaterial) bindVectorTerrain(material, record.id, this.terrain);

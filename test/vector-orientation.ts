@@ -14,6 +14,8 @@ import { VectorNativeService } from '../src/vector/worker/VectorNativeService';
 import type { SurfacePlan } from '../src/vector/worker/VectorSurfaceBuild';
 import type { DecodedVectorTile } from '../src/vector/style/VectorStyleTypes';
 import { SerialWorkerClient } from '../src/core/workers/SerialWorkerClient';
+import { TerrainTileLayer } from '../src/render/TerrainTileLayer';
+import { bindVectorTerrain, vectorTerrainUniforms } from '../src/vector/terrain/VectorTerrainBinding';
 
 // Actual PBF -> worker -> style -> GPU -> surface sampling. North red, south green.
 const result = document.querySelector('#result')!;
@@ -449,8 +451,45 @@ try {
   abortDraw.abort();
   check(await cancelledPartial && partialDisposed && sliced.drawStats.queued === 0, 'cancel partial target and release queue/resources');
   sliced.dispose();
+  // Prepared display DEM really uploads R32F data and is the same binding used
+  // by native vectors. Probe the GPU, not only an in-memory height assertion.
+  const coverage = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'prepared-browser', minLevel: 2, maxLevel: 6,
+    loadTile: async id => {
+      const heights = new Float32Array(33 * 33).fill(id.level === 6 ? 8000 : 6000);
+      const texture = new THREE.DataTexture(heights, 33, 33, THREE.RedFormat, THREE.FloatType);
+      texture.minFilter = texture.magFilter = THREE.LinearFilter; texture.needsUpdate = true;
+      return { id, heights, texture, width: 33, height: 33,
+        minimumHeight: heights[0], maximumHeight: heights[0] };
+    } }, { regionalCoverage: true, maxCommitsPerFrame: 1, prepareTexture: texture => renderer.initTexture(texture) });
+  const preparedIds = [{ level: 6, x: 16, y: 16 }, { level: 6, x: 17, y: 16 }];
+  const preparedSelection = preparedIds.map(id => ({ id, rectangle: new WebMercatorTilingScheme().rectangle(id),
+    screenPixels: 128, viewCenterDistance: 0 }));
+  for (let frame = 0; frame < 40; frame++) {
+    coverage.update(preparedSelection);
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    if (coverage.resolveTexture(preparedIds[0])?.sourceLevel === 6) break;
+  }
+  check(coverage.resolveTexture(preparedIds[0])?.sourceLevel === 6, 'prepared region must converge');
+  const probe = new THREE.ShaderMaterial({ uniforms: { ...vectorTerrainUniforms(), probeUv: { value: new THREE.Vector2() } },
+    vertexShader: 'void main(){gl_Position=vec4(position.xy,0.0,1.0);}',
+    fragmentShader: `uniform sampler2D terrainTexture; uniform vec2 terrainTexelSize,probeUv;
+      void main(){vec2 p=.5*terrainTexelSize+probeUv*(vec2(1.0)-terrainTexelSize);
+      float h=texture2D(terrainTexture,p).r;gl_FragColor=vec4(h/10000.0,0.0,0.0,1.0);}`,
+    depthTest: false, depthWrite: false });
+  bindVectorTerrain(probe, preparedIds[0], coverage);
+  check(probe.uniforms.terrainTexture.value === coverage.resolveTexture(preparedIds[0])!.texture,
+    'native vector and raster binding must share the prepared display texture');
+  const probeScene = new THREE.Scene(); probeScene.add(new THREE.Mesh(geometry, probe));
+  for (const u of [0, .0625, .125, .5, 1]) {
+    probe.uniforms.probeUv.value.set(u, .5);
+    renderer.setRenderTarget(target); renderer.render(probeScene, camera);
+    renderer.readRenderTargetPixels(target, 0, 0, 128, 128, pixels);
+    const expected = coverage.sampleTileHeight(preparedIds[0], u, .5)! / 10000 * 255;
+    check(Math.abs(pixels[0] - expected) <= 2, `GPU/CPU committed height mismatch at ${u}: ${pixels[0]} vs ${expected}`);
+  }
+  probe.dispose(); coverage.dispose();
   check(failures.length === 0, failures.join('\n'));
-  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + DEM/native/surface Workers, chunk publication/cancellation, point labels; no shader errors';
+  result.textContent = 'PASS: DPR/XYZ/TMS/seams/overzoom/cache/terrain + prepared display DEM GPU/CPU/native bindings, DEM/native/surface Workers, chunk publication/cancellation, point labels; no shader errors';
   result.setAttribute('data-status', 'passed');
 } catch (error) {
   result.textContent = `FAIL: ${error instanceof Error ? error.stack : error}`;

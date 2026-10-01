@@ -19,7 +19,7 @@ const processHandle = spawn(chrome, ['--headless', '--no-first-run', '--disable-
   `--user-data-dir=${profile}`, initialUrl], { windowsHide: true, stdio: 'ignore' });
 let launchError;
 processHandle.on('error', (error) => { launchError = error; });
-const deadline = Date.now() + 60000;
+const deadline = Date.now() + Math.max(1000, Number(process.env.VECTOR_AUDIT_TIMEOUT_MS ?? 60000));
 const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
 let socket;
 const pending = new Map();
@@ -80,7 +80,8 @@ try {
       const terrainSettled = appState?.terrain?.includes('关闭') ||
         !appState?.terrain?.includes('粗层覆盖中') && appState?.terrain?.includes('0 加载') &&
         (!appState?.terrain?.includes('排队') || appState?.terrain?.includes('0 排队')) &&
-        (!appState?.terrain?.includes('待提交') || appState?.terrain?.includes('0 待提交'));
+        (!appState?.terrain?.includes('待提交') || appState?.terrain?.includes('0 待提交')) &&
+        (!appState?.terrain?.includes('地表准备') || appState?.terrain?.includes('0 地表准备'));
       const imagerySettled = appState?.imagery?.includes('0 加载 · 0 排队');
       const settled = requiredContent && terrainSettled && imagerySettled;
       if (!settled) settledAt = 0;
@@ -89,6 +90,16 @@ try {
       await pause();
     } while (Date.now() < deadline);
     console.log(JSON.stringify(appState));
+    if (process.env.VECTOR_OBSERVE_SECONDS) {
+      const observations = [];
+      const until = Date.now() + Number(process.env.VECTOR_OBSERVE_SECONDS) * 1000;
+      while (Date.now() < until) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const observed = await evaluate('({terrain:document.querySelector("#terrain-value")?.textContent,fps:document.querySelector("#fps-value")?.textContent})');
+        observations.push({ second: observations.length + 1, ...observed.result?.result?.value });
+      }
+      console.log(`Loading observations: ${JSON.stringify(observations)}`);
+    }
     if (process.env.VECTOR_COLD_START === '1') {
       const startup = await evaluate('(()=>{window.__coldSampling=false;const s=window.__coldAudit;const a=s.frames.sort((x,y)=>x-y);return {firstTextureMs:s.firstTextureMs,observedSettledMs:performance.now(),frames:a.length,p95Ms:a[Math.floor(a.length*.95)],p99Ms:a[Math.floor(a.length*.99)],longTasks:s.longTasks.length,longTaskMaxMs:Math.max(0,...s.longTasks.map(t=>t.durationMs)),largestLongTasks:s.longTasks.sort((x,y)=>y.durationMs-x.durationMs).slice(0,5),phases:Object.fromEntries(["lodMs","terrainMs","surfaceMs","featureMs","renderSubmitMs"].map(key=>{const p=(window.__coldFrameAudit??[]).map(s=>s[key]).sort((x,y)=>x-y);return [key,{p95:p[Math.floor(p.length*.95)]??null,max:p.at(-1)??null}]})),resourceEntries:performance.getEntriesByType("resource").length};})()');
       assert.ok(startup.result?.result?.value, JSON.stringify(startup));
@@ -181,7 +192,7 @@ try {
         else fpsSince ??= Date.now();
         if (fpsRecoveredAt === null && fpsSince !== null && Date.now() - fpsSince >= 1000) fpsRecoveredAt = fpsSince - stoppedAt;
         const quiet = parseFloat(recoveredState.fps) >= 50 && recoveredState.imagery?.includes('0 加载 · 0 排队') &&
-          (recoveredState.terrain?.includes('关闭') || ['0 加载', '0 排队', '0 待提交'].every(token => recoveredState.terrain?.includes(token)));
+          (recoveredState.terrain?.includes('关闭') || ['0 加载', '0 排队', '0 待提交', '0 地表准备'].every(token => recoveredState.terrain?.includes(token)));
         if (!quiet) quietSince = 0;
         else quietSince ||= Date.now();
         if (quietSince && Date.now() - quietSince >= 1000) { recoveredAt = quietSince - stoppedAt; break; }

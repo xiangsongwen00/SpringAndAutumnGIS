@@ -162,11 +162,15 @@ for (let index = 0; index < 4; index++) {
   assert.ok(reversedEdges.get(cornerTiles[index]).get(corners[index]).distanceTo(canonicalCorner) < 1e-8);
 }
 const { TerrainTileLayer, Ellipsoid, sampleTerrainTile } = await import('../dist/spring-and-autumn-gis.es.js');
-const heightLayer = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'binding-fixture', minLevel: 0, maxLevel: 14 }, { exaggeration: 2 });
+const heightLayer = new TerrainTileLayer(Ellipsoid.WGS84, { id: 'binding-fixture', minLevel: 0, maxLevel: 14 }, { regionalCoverage: true, exaggeration: 2 });
 const ancestorData = terrainTile({ level: 9, x: 350, y: 200 }, 9, 0);
 for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) ancestorData.data.heights[y * 9 + x] = 4000 + 100 * x + 200 * y;
 heightLayer.records.set('9/350/200', { ...ancestorData, key: '9/350/200', state: 'ready', lastUsedFrame: 0 });
 heightLayer.coverageReady = true;
+assert.equal(heightLayer.sampleTileHeight({ level: 11, x: 1401, y: 802 }, .25, .75), null,
+  'upload-ready data alone is not a committed display height');
+heightLayer.publishedKeys.add('9/350/200');
+heightLayer.displayedData.set('9/350/200', ancestorData.data);
 assert.equal(heightLayer.sampleTileHeight({ level: 11, x: 1401, y: 802 }, .25, .75),
   2 * sampleTerrainTile(ancestorData.data, 1.25 / 4, 2.75 / 4));
 heightLayer.dispose();

@@ -905,6 +905,8 @@ export class RasterTileLayer {
         (uniforms.uvOffset!.value as THREE.Vector2).set(localX * scale, localY * scale);
       }
       const terrain = this.terrain?.resolveTexture(tile.id);
+      // A missing regional root is unavailable coverage, not a zero-height DEM.
+      renderTile.mesh.visible = this.terrain?.hasSurfaceCoverage?.(tile.id) !== false;
       // Coordinate keys are not resource identities: eviction/reload can
       // replace the DEM (or parent) at the same z/x/y. CPU edges already use
       // the new immutable source; keep GPU interiors on that same source.

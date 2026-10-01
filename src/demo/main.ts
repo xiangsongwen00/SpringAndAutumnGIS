@@ -214,6 +214,10 @@ const renderStats = (stats: GlobeEngineStats): void => {
     ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${stats.terrain.queued} 排队 · ${stats.terrain.pending} 待提交 · ${stats.terrain.committed} 提交/${stats.terrain.commitMs.toFixed(1)}ms · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · 原始DEM/地表接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
   const timing = stats.performance;
+  if (stats.terrain) terrainValue.textContent += ` · 显示代次 ${stats.terrain.displayGeneration}` +
+    `/${stats.terrain.displayed} 高程资源 · ${stats.terrain.waitingRegions} 区域待细化` +
+    `/${stats.terrain.qualityLimitedRegions} 预算限精度 · ${stats.terrain.preparingPatches} 地表准备` +
+    `/${stats.terrain.prepareMs.toFixed(1)}ms · ${stats.terrain.timeouts} 地形超时`;
   terrainValue.textContent += ` · CPU ms LOD ${timing.lodMs.toFixed(1)}/地形 ${timing.terrainMs.toFixed(1)}` +
     `/地表 ${timing.surfaceMs.toFixed(1)}/要素 ${timing.featureMs.toFixed(1)}/提交 ${timing.renderSubmitMs.toFixed(1)}` +
     ` · ${timing.drawCalls} draws/${(timing.triangles / 1000).toFixed(0)}k 三角形`;
@@ -258,6 +262,7 @@ const engine = new GlobeEngine({
   imagery: baseProvider,
   terrain,
   terrainLayer: {
+    regionalCoverage: new URLSearchParams(window.location.search).get('terrainCoverage') === 'regional',
     segments: 64,
     maxConcurrentRequests: 4,
     maxCachedTiles: 256,
