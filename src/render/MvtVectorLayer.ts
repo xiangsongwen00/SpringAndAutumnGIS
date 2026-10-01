@@ -105,6 +105,8 @@ export class MvtVectorLayer {
   private readonly placementCameraPosition = new THREE.Vector3(Infinity, Infinity, Infinity);
   private readonly placementCameraQuaternion = new THREE.Quaternion();
   private placementViewport = '';
+  private readonly placementProjection = new THREE.Matrix4();
+  private previousSelection: readonly SelectedTile[] | null = null;
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
   private readonly maxLabelsPerTile: number;
@@ -127,8 +129,6 @@ export class MvtVectorLayer {
   private currentSourceLevel = 0;
   private layerOpacity: number;
   private observedTerrainRevision = -1;
-  private readonly labelNormal = new THREE.Vector3();
-  private readonly labelToCamera = new THREE.Vector3();
   private disposed = false;
 
   constructor(ellipsoid: Ellipsoid, options: MvtVectorLayerOptions) {
@@ -227,6 +227,18 @@ export class MvtVectorLayer {
       this.minLevel,
       this.decodedTileLoader ? this.maxLevel : Math.min(this.maxLevel, this.source.maxLevel)
     );
+    const viewportKey = `${viewportWidth}/${viewportHeight}/${this.currentSourceLevel}`;
+    const terrainRevision = this.terrain?.revision ?? -1;
+    const cameraPoseChanged = camera.position.distanceToSquared(this.placementCameraPosition) > 1e-8 ||
+      1 - Math.min(1, Math.abs(camera.quaternion.dot(this.placementCameraQuaternion))) > 1e-12;
+    // Async completion marks placementDirty and pumps its own queue. Waiting
+    // requests are not a reason to rebuild all visible mappings every frame.
+    if (selection === this.previousSelection && !this.placementDirty &&
+        terrainRevision === this.observedTerrainRevision && viewportKey === this.placementViewport &&
+        !cameraPoseChanged &&
+        camera.projectionMatrix.equals(this.placementProjection)) return;
+    if (this.previousSelection !== selection) this.placementDirty = true;
+    this.previousSelection = selection;
     const desired = new Map<string, { id: TileId; priority: number }>();
     for (const selected of selection) {
       const id = ancestorAtLevel(selected.id, Math.min(selected.id.level, this.currentSourceLevel));
@@ -278,22 +290,23 @@ export class MvtVectorLayer {
     this.queue.sort((a, b) => a.priority - b.priority);
     this.pumpQueue();
     // Geometry samples the shared DEM on the GPU. Only symbol anchors need CPU height queries.
-    if (this.terrain?.revision !== this.observedTerrainRevision) {
+    if (terrainRevision !== this.observedTerrainRevision) {
       for (const record of this.records.values()) for (const label of record.labels) {
         this.positionLabel(label.sprite, label.longitude, label.latitude);
       }
-      this.observedTerrainRevision = this.terrain?.revision ?? -1;
+      this.observedTerrainRevision = terrainRevision;
       this.placementDirty = true;
     }
     const placementViewport = `${viewportWidth}/${viewportHeight}/${this.currentSourceLevel}`;
-    if (this.placementDirty || !camera.position.equals(this.placementCameraPosition) ||
-        !camera.quaternion.equals(this.placementCameraQuaternion) || placementViewport !== this.placementViewport) {
+    if (this.placementDirty || cameraPoseChanged || placementViewport !== this.placementViewport ||
+        !camera.projectionMatrix.equals(this.placementProjection)) {
       const placementStartedAt = performance.now();
       this.updateLabels(camera, viewportWidth, viewportHeight);
       this.placementMs = performance.now() - placementStartedAt;
       this.placementDirty = false;
       this.placementCameraPosition.copy(camera.position);
       this.placementCameraQuaternion.copy(camera.quaternion);
+      this.placementProjection.copy(camera.projectionMatrix);
       this.placementViewport = placementViewport;
     }
     this.evict();
@@ -591,19 +604,21 @@ export class MvtVectorLayer {
     viewportWidth: number,
     viewportHeight: number
   ): void {
-    const fov = THREE.MathUtils.degToRad(camera.fov);
     const occupied: Array<readonly [number, number, number, number]> = [];
     const projected = new THREE.Vector3();
     const records = [...this.records.values()].sort((left, right) => left.priority - right.priority);
     for (const record of records) {
-      const labelsAllowed = record.group?.visible && record.id.level === this.currentSourceLevel;
+      // Grazing views legitimately select lower-LOD ground than camera zoom.
+      // Visibility/collision decides labels, not exact equality with that zoom.
+      const labelsAllowed = record.group?.visible;
       for (const label of record.labels) {
         if (!labelsAllowed || occupied.length >= this.maxVisibleLabels) {
           label.sprite.visible = false;
           continue;
         }
-        const distance = Math.max(1, camera.position.distanceTo(label.sprite.position));
-        const worldPerPixel = 2 * distance * Math.tan(fov / 2) / Math.max(1, viewportHeight);
+        const viewPoint = label.sprite.position.clone().applyMatrix4(camera.matrixWorldInverse);
+        const distance = Math.max(1, -viewPoint.z);
+        const worldPerPixel = 2 * distance / (camera.projectionMatrix.elements[5]! * Math.max(1, viewportHeight));
         label.sprite.scale.set(
           label.pixelWidth * worldPerPixel,
           label.pixelHeight * worldPerPixel,
@@ -620,15 +635,7 @@ export class MvtVectorLayer {
         ];
         const outside = projected.z < -1 || projected.z > 1 ||
           box[2] < 0 || box[0] > viewportWidth || box[3] < 0 || box[1] > viewportHeight;
-        const longitude = THREE.MathUtils.degToRad(label.longitude);
-        const latitude = THREE.MathUtils.degToRad(label.latitude);
-        this.labelNormal.set(
-          Math.cos(latitude) * Math.sin(longitude),
-          Math.sin(latitude),
-          Math.cos(latitude) * Math.cos(longitude)
-        );
-        this.labelToCamera.copy(camera.position).sub(label.sprite.position);
-        const behindHorizon = this.labelNormal.dot(this.labelToCamera) <= 0;
+        const behindHorizon = ellipsoidOccludes(camera.position, label.sprite.position, this.ellipsoid);
         const collided = occupied.some((other) => rectanglesOverlap(box, other));
         label.sprite.visible = !outside && !behindHorizon && !collided;
         if (label.sprite.visible) occupied.push(box);
@@ -728,4 +735,18 @@ function rectanglesOverlap(
   b: readonly [number, number, number, number]
 ): boolean {
   return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+}
+
+function ellipsoidOccludes(camera: THREE.Vector3, point: THREE.Vector3, ellipsoid: Ellipsoid): boolean {
+  const ox = camera.x / ellipsoid.equatorialRadius, oy = camera.y / ellipsoid.polarRadius,
+    oz = camera.z / ellipsoid.equatorialRadius;
+  const dx = point.x / ellipsoid.equatorialRadius - ox, dy = point.y / ellipsoid.polarRadius - oy,
+    dz = point.z / ellipsoid.equatorialRadius - oz;
+  const a = dx * dx + dy * dy + dz * dz, b = 2 * (ox * dx + oy * dy + oz * dz),
+    c = ox * ox + oy * oy + oz * oz - 1;
+  if (a <= 0 || c <= 0) return false;
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant <= 0) return false;
+  const t = (-b - Math.sqrt(discriminant)) / (2 * a);
+  return t > 0 && t < 1 - 1e-7;
 }

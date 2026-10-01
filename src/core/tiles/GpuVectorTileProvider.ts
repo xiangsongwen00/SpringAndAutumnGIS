@@ -43,10 +43,12 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
     reject: (error: unknown) => void; signal?: AbortSignal; abort: () => void }> = [];
   private lastDrawMs = 0;
   private maxDrawMs = 0;
+  private readonly recentDraws: Array<{ at: number; ms: number }> = [];
   private runtime: VectorStyleRuntime | null = null;
   private source: MvtTileSource | null = null;
   private sourceId = '';
   private readonly camera = new THREE.Camera();
+  private readonly surfaceMaterials = new Map<string, THREE.ShaderMaterial>();
   private readonly types = new Set(['background', 'fill', 'line', 'circle']);
   private disposed = false;
   private unsupportedLayers = new Set<string>();
@@ -60,11 +62,14 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   constructor(options: GpuVectorTileProviderOptions) {
     super({ id: options.id, urlTemplate: 'gpu://vector/{z}/{x}/{y}',
       minLevel: options.minLevel, maxLevel: options.displayMaxLevel ?? 27,
-      viewLevelOffset: options.levelOffset, tileSize: options.tileSize ?? 512 });
+      viewLevelOffset: options.levelOffset, tileSize: options.tileSize ?? 256 });
     this.loader = new MapStyleLoader(options);
     this.loaderFetcher = options.fetcher;
     this.renderer = options.renderer;
-    this.tileSize = options.tileSize ?? 512;
+    // Mesh density is selected around 128 CSS pixels per tile. A 256px target
+    // keeps the 350-leaf working set (~117MiB incl. mipmaps) inside the default
+    // cache. 512px targets need ~467MiB and can stall ancestor replacement.
+    this.tileSize = options.tileSize ?? 256;
     this.sourceOverride = options.source;
     this.maxDrawsPerFrame = Math.max(1, Math.floor(options.maxDrawsPerFrame ?? 1));
     this.drawBudgetMs = Math.max(1, options.drawBudgetMs ?? 4);
@@ -93,7 +98,12 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   get styleIssues() { return this.runtime?.issues ?? []; }
   get dataMaxLevel() { return this._dataMaxLevel; }
   get decodedCacheStats() { return this.decodedTiles.stats; }
-  get drawStats() { return { queued: this.drawQueue.length, lastMs: this.lastDrawMs, maxMs: this.maxDrawMs }; }
+  get drawStats() {
+    const cutoff = performance.now() - 1000;
+    while (this.recentDraws.length && this.recentDraws[0]!.at < cutoff) this.recentDraws.shift();
+    return { queued: this.drawQueue.length, lastMs: this.lastDrawMs, maxMs: this.maxDrawMs,
+      recentCount: this.recentDraws.length, recentMs: this.recentDraws.reduce((sum, draw) => sum + draw.ms, 0) };
+  }
 
   async loadTexture(id: TileId, signal?: AbortSignal): Promise<THREE.Texture> {
     const { sourceTile, offset, scale, decoded } = await this.loadSourceTile(id, signal);
@@ -165,6 +175,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
           } }
         }] : [bucket];
       });
+      let materialIndex = 0;
       for (const bucket of drawBuckets) {
         const { layer, features, order } = bucket;
         const type = layer.type;
@@ -185,8 +196,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
         const dash = layer.paint?.['line-dasharray'];
         const dashValues = Array.isArray(dash) ? dash.slice(0, 8).map(Number) : [];
         const lineWidth = Number(layer.paint?.['line-width'] ?? 1);
-        const material = new THREE.ShaderMaterial({
-          uniforms: {
+        const uniforms = {
             tileScale: { value: type === 'background' ? 1 : scale },
             tileOffset: { value: type === 'background' ? new THREE.Vector2() : offset },
             color: { value: new THREE.Color(typeof colorValue === 'string' ? colorValue : '#000000') },
@@ -195,7 +205,14 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
             dash: { value: [...dashValues.map((value) => value * lineWidth), ...new Array(8 - dashValues.length).fill(0)] },
             dashCount: { value: dashValues.length },
             dashPeriod: { value: dashValues.reduce((sum, value) => sum + value * lineWidth, 0) }
-          },
+          };
+        const materialKey = `${type === 'circle' ? 'circle' : 'surface'}/${materialIndex++}`;
+        let material = this.surfaceMaterials.get(materialKey);
+        if (material) {
+          for (const [name, uniform] of Object.entries(uniforms)) material.uniforms[name]!.value = uniform.value;
+        } else {
+          material = new THREE.ShaderMaterial({
+          uniforms,
           // MVT local Y grows southward; FBO texture Y grows upward. North
           // must land at texture Y=1, matching RasterTileLayer's 1-xyzUv.y.
           // XYZ/TMS row conversion belongs exclusively to MvtTileSource.
@@ -214,12 +231,18 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
             #include <colorspace_fragment>
           }`,
           side: THREE.DoubleSide, transparent: true, depthTest: false, depthWrite: false, toneMapped: false
-        });
+          });
+          // Keep a bounded pool of rendered materials/program references.
+          // Disposing every bucket after each tile deleted the last shader
+          // reference and forced repeated driver compilation on later tiles.
+          if (this.surfaceMaterials.size < 256) this.surfaceMaterials.set(materialKey, material);
+        }
         const object = type === 'circle' ? new THREE.Points(geometry, material) : new THREE.Mesh(geometry, material);
         object.renderOrder = order;
         object.frustumCulled = false;
         scene.add(object);
-        resources.push(geometry, material);
+        resources.push(geometry);
+        if (this.surfaceMaterials.get(materialKey) !== material) resources.push(material);
       }
       renderer.setRenderTarget(target);
       // RenderTarget.viewport is already in physical texture pixels.
@@ -269,6 +292,8 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
         try { job.resolve(job.run()); } catch (error) { job.reject(error); }
         this.lastDrawMs = performance.now() - drawStartedAt;
         this.maxDrawMs = Math.max(this.maxDrawMs, this.lastDrawMs);
+        this.recentDraws.push({ at: performance.now(), ms: this.lastDrawMs });
+        while (this.recentDraws.length > 120) this.recentDraws.shift();
         count++;
         // One indivisible tile can exceed the budget; never start another
         // one then. Worker Bucket subdivision is still needed for that case.
@@ -287,6 +312,8 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
       job.reject(new Error('GPU vector provider disposed'));
     }
     this.decodedTiles.clear(true); this.decoder.dispose();
+    for (const material of this.surfaceMaterials.values()) material.dispose();
+    this.surfaceMaterials.clear();
   }
 }
 

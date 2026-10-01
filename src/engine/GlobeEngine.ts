@@ -23,6 +23,7 @@ import {
 } from '../render/TerrainTileLayer';
 import { GeoJsonLayer } from '../render/GeoJsonLayer';
 import { MvtVectorLayer, type MvtVectorLayerStats } from '../render/MvtVectorLayer';
+import { GpuFrameTimer } from '../render/GpuFrameTimer';
 import {
   GlobeCameraController,
   type GlobeCameraViewState,
@@ -32,6 +33,8 @@ import {
 export type GlobeFramePerformance = Readonly<{
   lodMs: number; terrainMs: number; surfaceMs: number; featureMs: number;
   renderSubmitMs: number; drawCalls: number; triangles: number;
+  gpuMs: number | null;
+  lodSelections: number;
 }>;
 export type GlobeEngineStats = GlobeLodStats & Readonly<{
   cameraLevel: number;
@@ -85,7 +88,9 @@ export type GlobeEngineOptions = {
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
   private framePerformance: GlobeFramePerformance = { lodMs: 0, terrainMs: 0, surfaceMs: 0,
-    featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0 };
+    featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0, gpuMs: null, lodSelections: 0 };
+  private readonly gpuTimer: GpuFrameTimer;
+  private lodSelections = 0;
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(50, 1, 0.02, 100_000_000);
   readonly renderer: THREE.WebGLRenderer;
@@ -129,6 +134,7 @@ export class GlobeEngine {
   private readonly onContextLost = (event: Event): void => {
     event.preventDefault();
     this.contextLost = true;
+    this.gpuTimer.reset();
     for (const layer of this.imageryLayers.values()) layer.handleContextLost();
     this.terrain?.handleContextLost();
   };
@@ -186,6 +192,7 @@ export class GlobeEngine {
     this.renderer.setPixelRatio(1);
     this.renderer.setClearColor(options.clearColor ?? 0x07131d, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.gpuTimer = new GpuFrameTimer(this.renderer.getContext() as WebGL2RenderingContext);
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost, false);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored, false);
     this.container.appendChild(this.renderer.domElement);
@@ -256,7 +263,7 @@ export class GlobeEngine {
     this.controls.lookSpeed = this.navigation.lookSpeed;
     this.controls.tiltSpeed = this.navigation.tiltSpeed;
     this.controls.zoomSpeed = this.navigation.zoomSpeed;
-    this.controls.minDistance = radius + this.navigation.minAltitude;
+    this.controls.minDistance = this.surfaceRadiusInDirection(this.camera.position) + this.navigation.minAltitude;
     this.controls.maxDistance = radius * 16;
     this.controls.target.set(0, 0, 0);
 
@@ -272,7 +279,7 @@ export class GlobeEngine {
       if (this.contextLost) return;
       this.resize();
       this.updateNavigationSensitivity();
-      const cameraChanged = this.controls.update();
+      this.controls.update();
       const cameraLevel = this.getCameraLevel();
       for (const layer of this.imageryLayers.values()) {
         if (layer.visible) layer.provider.setViewLevel?.(cameraLevel);
@@ -291,9 +298,16 @@ export class GlobeEngine {
       }
       const viewportHeight = this.renderer.domElement.clientHeight;
       const viewportWidth = this.renderer.domElement.clientWidth;
-      const cameraPoseChanged = cameraChanged ||
-        !this.camera.position.equals(this.lodCameraPosition) ||
-        !this.camera.quaternion.equals(this.lodCameraQuaternion);
+      // Compare cumulative motion against the last selected pose. Exact float
+      // equality makes clamp/rotation noise rebuild the entire leaf set. Keep
+      // the tolerance below a small fraction of one screen pixel even near
+      // the ground; slow deliberate movement eventually crosses it as well.
+      const translationTolerance = Math.max(1e-4,
+        this.cameraAltitude() / Math.max(1, this.focalPixels()) * 0.05);
+      const rotationError = 1 - Math.min(1, Math.abs(this.camera.quaternion.dot(this.lodCameraQuaternion)));
+      const cameraPoseChanged =
+        this.camera.position.distanceToSquared(this.lodCameraPosition) > translationTolerance ** 2 ||
+        rotationError > 1e-12;
       const terrainRefreshDue =
         terrainRevision !== this.lodSelectionTerrainRevision &&
         now >= this.terrainRevisionRefreshAt;
@@ -306,6 +320,7 @@ export class GlobeEngine {
         terrainRefreshDue;
       const lodStartedAt = performance.now();
       if (selectionChanged) {
+        this.lodSelections++;
         const selection = this.lod.select(
           this.camera,
           viewportHeight
@@ -339,12 +354,15 @@ export class GlobeEngine {
       }
       this.grid.update(selection.tiles, this.camera.position);
       const renderStartedAt = performance.now();
+      this.gpuTimer.begin();
       this.renderer.render(this.scene, this.camera);
+      this.gpuTimer.end();
       this.framePerformance = {
         lodMs: terrainStartedAt - lodStartedAt, terrainMs: surfaceStartedAt - terrainStartedAt,
         surfaceMs: featureStartedAt - surfaceStartedAt, featureMs: renderStartedAt - featureStartedAt,
         renderSubmitMs: performance.now() - renderStartedAt,
-        drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles
+        drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles,
+        gpuMs: this.gpuTimer.valueMs, lodSelections: this.lodSelections
       };
       this.emitStats(selection.stats, imageryStats, terrainStats, cameraLevel);
     };
@@ -359,6 +377,7 @@ export class GlobeEngine {
 
   dispose(): void {
     this.stop();
+    this.gpuTimer.reset();
     this.resizeObserver.disconnect();
     this.controls.dispose();
     for (const layer of this.imageryLayers.values()) layer.dispose();

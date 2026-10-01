@@ -179,6 +179,9 @@ try {
   for (let y = 0; y < 128; y++) if (pixels[(y * 128 + 64) * 4] > 240) roadWidth++;
   check(roadWidth === 6, `overzoom line width must stay 6 pixels, got ${roadWidth}`);
   roadTexture.dispose();
+  const retainedMaterials = (overzoom as unknown as { surfaceMaterials: Map<string, THREE.ShaderMaterial> }).surfaceMaterials;
+  check(retainedMaterials.size > 0 && retainedMaterials.size <= 256,
+    'surface pass must retain bounded shader materials between tile draws');
   check(overzoomUrls.length === 1 && overzoomUrls[0] === 'https://fixture/2/0/0', 'parent PBF must be fetched/decoded once');
   const controller = new AbortController();
   const cancelled = overzoom.loadTexture({ level: 19, x: 1, y: 0 }, controller.signal);
@@ -192,6 +195,7 @@ try {
   const observedDispose = pendingDispose.then(() => false, () => true);
   for (let tick = 0; tick < 8; tick++) await Promise.resolve();
   overzoom.dispose();
+  check(retainedMaterials.size === 0, 'provider disposal must release pooled surface materials');
   check(await observedDispose, 'disposing provider must reject queued draw');
 
   // Compile/render the actual shared terrain shader, not only the tile pass.
@@ -200,7 +204,7 @@ try {
   const terrain = { revision: 1, enabled: true, exaggeration: 1, resolveTexture: () => ({
     key: 'fixture', texture: dem, scale: 1, offsetX: 0, offsetY: 0, sourceLevel: 2,
     width: 3, height: 3, parentKey: '', parentTexture: null, parentScale: 1, parentOffsetX: 0, parentOffsetY: 0
-  }), sampleHeight: () => 0 };
+  }), sampleHeight: () => 0, sampleTileHeight: () => 0 };
   const surface = new RasterTileLayer(Ellipsoid.WGS84,
     new UrlTemplateRasterProvider({ id: 'empty', urlTemplate: 'https://fixture/{z}/{x}/{y}', minLevel: 2, maxLevel: 2 }),
     { terrain });
@@ -217,8 +221,29 @@ try {
       uniforms.hasTerrain.value = true; uniforms.terrainTexture.value = dem;
     }
   });
+  (surface as unknown as { syncTerrainEdges: (tiles: unknown[]) => void }).syncTerrainEdges([
+    { id, rectangle, screenPixels: 128, viewCenterDistance: 0 }
+  ]);
+  surface.object3d.traverse((object) => {
+    if (object instanceof THREE.Mesh) {
+      const mask = object.geometry.getAttribute('terrainEdgeMask');
+      check(Array.from(mask.array).some((value) => value === 1), 'shared ECEF edge must reach the actual GPU geometry');
+    }
+  });
   const surfaceScene = new THREE.Scene(); surfaceScene.add(surface.object3d);
   renderer.setRenderTarget(target); renderer.render(surfaceScene, camera);
+  terrain.enabled = false;
+  surface.object3d.traverse((object) => {
+    if (object instanceof THREE.Mesh) (object.material as THREE.ShaderMaterial).uniforms.hasTerrain.value = false;
+  });
+  (surface as unknown as { syncTerrainEdges: (tiles: unknown[]) => void }).syncTerrainEdges([
+    { id, rectangle, screenPixels: 128, viewCenterDistance: 0 }
+  ]);
+  surface.object3d.traverse((object) => {
+    if (object instanceof THREE.Mesh) check(Array.from(object.geometry.getAttribute('terrainEdgeMask').array)
+      .some((value) => value === 1), 'flat globe must keep shared ECEF edge active without DEM');
+  });
+  renderer.render(surfaceScene, camera);
   surface.dispose(); dem.dispose();
   const labelId = { level: 2, x: 2, y: 1 };
   const labelStyle: MapStyle = { version: 8, sources: { fixture: { type: 'vector', tiles: ['https://fixture/{z}/{x}/{y}'] } },
@@ -240,7 +265,26 @@ try {
   for (let wait = 0; wait < 100 && !labels.stats.ready; wait++) await new Promise((resolve) => setTimeout(resolve, 10));
   labels.update(labelSelection, 2, labelCamera, 128, 128);
   check(labels.stats.visibleLabels === 1, 'independent label pass must visibly place the point text');
+  labels.update(labelSelection, 6, labelCamera, 128, 128);
+  check(labels.stats.visibleLabels === 1, 'lower selected LOD labels must not disappear when camera zoom is higher');
+  labels.object3d.traverse((object) => {
+    if (object instanceof THREE.Sprite) object.position.copy(Ellipsoid.WGS84.cartographicToCartesian({
+      longitude: labelLongitude, latitude: labelLatitude, height: 8000 }));
+  });
+  labelCamera.position.copy(Ellipsoid.WGS84.cartographicToCartesian({
+    longitude: labelLongitude, latitude: labelLatitude - 2, height: 1000 }));
+  labelCamera.lookAt(Ellipsoid.WGS84.cartographicToCartesian({
+    longitude: labelLongitude, latitude: labelLatitude, height: 8000 }));
+  labelCamera.updateMatrixWorld();
+  labels.update(labelSelection, 6, labelCamera, 128, 128);
+  check(labels.stats.visibleLabels === 1, 'visible elevated label beyond its tangent-plane horizon must survive');
   check(labels.stats.allocatedLabels <= 8, 'label allocation budget');
+  let repeatedTileChecks = 0;
+  const labelsInternal = labels as unknown as { hasTile: (id: typeof labelId) => boolean };
+  const originalHasTile = labelsInternal.hasTile.bind(labels);
+  labelsInternal.hasTile = (id) => { repeatedTileChecks++; return originalHasTile(id); };
+  labels.update(labelSelection, 6, labelCamera, 128, 128);
+  check(repeatedTileChecks === 0, 'stationary labels must reuse visibility mapping instead of scanning tiles');
   let surfaceGeometry = false;
   labels.object3d.traverse((object) => { if (object instanceof THREE.Mesh) surfaceGeometry = true; });
   check(!surfaceGeometry, 'label pass must not duplicate surface geometry');

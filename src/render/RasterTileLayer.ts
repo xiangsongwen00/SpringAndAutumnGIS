@@ -10,6 +10,7 @@ import {
 import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
+import { terrainSurfaceEdges } from '../core/terrain/TerrainSurfaceEdges';
 
 export type RasterTileLayerOptions = {
   segments?: number;
@@ -76,6 +77,7 @@ export class RasterTileLayer {
   private readonly renderTiles = new Map<string, RenderTile>();
   private readonly textures = new Map<string, TextureRecord>();
   private readonly visibleTextureKeys = new Set<string>();
+  private readonly desiredTextureKeys = new Set<string>();
   private readonly maxConcurrentRequests: number;
   private readonly maxCachedTiles: number;
   private readonly maxTextureBytes: number;
@@ -95,6 +97,9 @@ export class RasterTileLayer {
   private fallbackCount = 0;
   private suspended = false;
   private lastSelection: readonly SelectedTile[] | null = null;
+  private edgeSelection: readonly SelectedTile[] | null = null;
+  private edgeRevision = -1;
+  private edgeTileSignature = '';
   private materialsDirty = true;
   private observedTerrainRevision = -1;
   private observedProviderRevision = -1;
@@ -209,7 +214,9 @@ export class RasterTileLayer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const renderTile of this.renderTiles.values()) renderTile.mesh.material.dispose();
+    for (const renderTile of this.renderTiles.values()) {
+      renderTile.mesh.material.dispose(); renderTile.mesh.geometry.dispose();
+    }
     for (const record of this.textures.values()) {
       this.cancelTileRecord(record);
       this.releaseTexture(record.texture);
@@ -274,13 +281,19 @@ export class RasterTileLayer {
       if (selectedKeys.has(key)) continue;
       this.object3d.remove(renderTile.mesh);
       renderTile.mesh.material.dispose();
+      renderTile.mesh.geometry.dispose();
       this.renderTiles.delete(key);
     }
     for (const tile of selection) {
       const key = tileKey(tile.id);
       if (this.renderTiles.has(key)) continue;
       const material = this.createMaterial(tile.id);
-      const mesh = new THREE.Mesh(this.geometryForLevel(tile.id.level), material);
+      const geometry = this.geometryForLevel(tile.id.level).clone();
+      const count = geometry.getAttribute('position').count;
+      geometry.setAttribute('terrainEdgeHigh', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+      geometry.setAttribute('terrainEdgeLow', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+      geometry.setAttribute('terrainEdgeMask', new THREE.BufferAttribute(new Float32Array(count), 1));
+      const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false;
       mesh.renderOrder = this.object3d.renderOrder;
       mesh.onBeforeRender = (_renderer, _scene, camera) => {
@@ -297,13 +310,20 @@ export class RasterTileLayer {
    * sample coincide with its two children, preventing T-junction cracks.
    */
   private geometryForLevel(level: number): THREE.BufferGeometry {
-    const segments = Math.max(this.baseSegments, Math.round(1024 / 2 ** level));
+    const segments = this.segmentsForLevel(level);
     let geometry = this.geometries.get(segments);
     if (!geometry) {
       geometry = createGridGeometry(segments);
       this.geometries.set(segments, geometry);
     }
     return geometry;
+  }
+
+  private segmentsForLevel(level: number): number {
+    // A ~1.4 degree angular step is subpixel at a globe overview. The previous
+    // 1024-wide world grid spent 16x as many triangles on low-zoom tiles, even
+    // without DEM. Terrain/high-zoom detail still uses the base grid density.
+    return Math.max(this.baseSegments, Math.round(256 / 2 ** level));
   }
 
   private createMaterial(tile: TileId): THREE.ShaderMaterial {
@@ -411,6 +431,9 @@ export class RasterTileLayer {
         varying vec3 v_globeNormal;
         varying vec3 v_terrainNormal;
         attribute float skirt;
+        attribute vec3 terrainEdgeHigh;
+        attribute vec3 terrainEdgeLow;
+        attribute float terrainEdgeMask;
         uniform vec3 sag_originHigh;
         uniform vec3 sag_originLow;
         uniform vec3 sag_east;
@@ -530,6 +553,9 @@ export class RasterTileLayer {
               heightMeters
             );
           }
+          if (terrainEdgeMask > 0.5) {
+            gl_Position = sag_projectLocalToEye(vec3(0.0), terrainEdgeHigh, terrainEdgeLow);
+          }
           #include <logdepthbuf_vertex>
         }
       `,
@@ -585,6 +611,7 @@ export class RasterTileLayer {
 
   private queueVisibleTextures(selection: readonly SelectedTile[]): void {
     this.visibleTextureKeys.clear();
+    this.desiredTextureKeys.clear();
     this.desiredMinimumLevel = null;
     this.desiredMaximumLevel = null;
     for (const record of this.textures.values()) {
@@ -615,6 +642,7 @@ export class RasterTileLayer {
       const desired = ancestorAtLevel(tile.id, maximumSourceLevel);
       if (this.provider.hasTile && !this.provider.hasTile(desired)) continue;
       this.visibleTextureKeys.add(tileKey(desired));
+      this.desiredTextureKeys.add(tileKey(desired));
       const detailPriority = rank * 2 + 1;
       const ready = this.findReadyAncestor(tile.id);
       if (ready) {
@@ -807,7 +835,9 @@ export class RasterTileLayer {
       // transparent area and creates a persistent rectangular smear.
       const source = hasCoverage ? this.findReadyAncestor(tile.id) : undefined;
       const sourceKey = source?.key ?? '';
-      if (source && source.id.level < tile.id.level) this.fallbackCount += 1;
+      // The configured view offset/overzoom is intentional, not a cache miss.
+      // Count only a texture below this leaf's actual requested source zoom.
+      if (source && source.id.level < desired.level) this.fallbackCount += 1;
       if (source) {
         this.displayedMinimumLevel = this.displayedMinimumLevel === null
           ? source.id.level
@@ -869,6 +899,52 @@ export class RasterTileLayer {
       );
     }
     this.releaseTransitionTextures(false);
+    this.syncTerrainEdges(selection);
+  }
+
+  private syncTerrainEdges(selection: readonly SelectedTile[]): void {
+    const revision = this.terrain?.revision ?? -1;
+    if (this.edgeSelection === selection && this.edgeRevision === revision) return;
+    this.edgeSelection = selection;
+    // A camera movement changes request priorities, not necessarily topology.
+    // Compare tile IDs before resampling/uploading every boundary attribute.
+    const signature = selection.map(({ id }) => tileKey(id)).join('|');
+    if (signature === this.edgeTileSignature && this.edgeRevision === revision) return;
+    this.edgeTileSignature = signature; this.edgeRevision = revision;
+    const tiles = selection.map(({ id }) => ({ id,
+      segments: this.segmentsForLevel(id.level),
+      height: (u: number, v: number) => this.terrain?.sampleTileHeight?.(id, u, v) ?? 0 }));
+    // The reference ellipsoid also needs shared coarse/fine ECEF chords.
+    // Disabling DEM must not disable topology/precision reconciliation.
+    const boundaries = terrainSurfaceEdges(tiles, this.surfaceOffset);
+    for (const tile of tiles) {
+      const renderTile = this.renderTiles.get(tileKey(tile.id));
+      if (!renderTile) continue;
+      const geometry = renderTile.mesh.geometry;
+      const mask = geometry.getAttribute('terrainEdgeMask') as THREE.BufferAttribute;
+      const high = geometry.getAttribute('terrainEdgeHigh') as THREE.BufferAttribute;
+      const low = geometry.getAttribute('terrainEdgeLow') as THREE.BufferAttribute;
+      (mask.array as Float32Array).fill(0);
+      const boundary = boundaries?.get(tile);
+      if (boundary) {
+        const uv = geometry.getAttribute('uv');
+        const write = (index: number, point: THREE.Vector3) => {
+          const x = Math.fround(point.x), y = Math.fround(point.y), z = Math.fround(point.z);
+          high.setXYZ(index, x, y, z); low.setXYZ(index, point.x - x, point.y - y, point.z - z);
+          mask.setX(index, 1);
+        };
+        // Interior vertices cannot have an edge override. Visit the perimeter
+        // map and duplicated skirt only, not the entire n*n surface grid.
+        for (const [vertex, point] of boundary) write(vertex, point);
+        for (let index = (tile.segments + 1) ** 2; index < uv.count; index++) {
+          const vertex = Math.round(uv.getY(index) * tile.segments) * (tile.segments + 1) +
+            Math.round(uv.getX(index) * tile.segments);
+          const point = boundary.get(vertex);
+          if (point) write(index, point);
+        }
+      }
+      mask.needsUpdate = true; high.needsUpdate = true; low.needsUpdate = true;
+    }
   }
 
   private findReadyAncestor(id: TileId): TextureRecord | undefined {
@@ -905,7 +981,10 @@ export class RasterTileLayer {
       [...this.renderTiles.values()].map((tile) => tile.textureKey).filter(Boolean)
     );
     const candidates = [...this.textures.values()]
-      .filter((record) => record.state !== 'loading' && !protectedKeys.has(record.key))
+      // Pending visible targets must not be evicted: without another selection
+      // event they would never be queued again, leaving a permanent ancestor.
+      .filter((record) => record.state === 'ready' && !protectedKeys.has(record.key) &&
+        !this.desiredTextureKeys.has(record.key))
       .sort((a, b) => a.lastUsedFrame - b.lastUsedFrame);
     let remainingBytes = residentBytes;
     while (

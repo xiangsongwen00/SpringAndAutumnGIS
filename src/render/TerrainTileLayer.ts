@@ -62,6 +62,8 @@ export interface TerrainHeightSource extends SurfaceDisplacementBoundsSource {
   readonly enabled: boolean;
   resolveTexture(id: TileId): TerrainTextureBinding | undefined;
   sampleHeight(longitude: number, latitude: number): number | null;
+  /** CPU equivalent of resolveTexture + shader UV sampling, including exaggeration. */
+  sampleTileHeight?(id: TileId, u: number, v: number): number | null;
 }
 
 type TerrainState = 'queued' | 'loading' | 'ready' | 'error';
@@ -105,6 +107,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private suspended = false;
   private _enabled = true;
   private _revision = 0;
+  // Small immutable metadata outlives texture LRU, so culling does not oscillate
+  // between measured bounds and the unknown 12km envelope after eviction.
+  private readonly knownHeightRanges = new Map<string, SurfaceDisplacementRange>();
   private lastSelection: readonly SelectedTile[] | null = null;
   private materialsDirty = true;
   private stitchedEdges = 0;
@@ -212,6 +217,16 @@ export class TerrainTileLayer implements TerrainHeightSource {
     };
   }
 
+  sampleTileHeight(id: TileId, u: number, v: number): number | null {
+    if (!this._enabled || !this.coverageReady) return null;
+    const record = this.findReadyAncestor(id);
+    if (!record?.data) return null;
+    const size = 2 ** (id.level - record.id.level);
+    return sampleTerrainTile(record.data,
+      (id.x - record.id.x * size + u) / size,
+      (id.y - record.id.y * size + v) / size) * this.exaggeration;
+  }
+
   sampleHeight(longitude: number, latitude: number): number | null {
     if (!this._enabled) return null;
     const clampedLatitude = THREE.MathUtils.clamp(
@@ -243,6 +258,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
 
   heightRange(id: TileId): SurfaceDisplacementRange | null {
     if (!this._enabled) return { minimumHeight: 0, maximumHeight: 0 };
+    for (let level = Math.min(id.level, this.provider.maxLevel); level >= this.provider.minLevel; level--) {
+      const scale = 2 ** (id.level - level);
+      const known = this.knownHeightRanges.get(tileKey({ level, x: Math.floor(id.x / scale), y: Math.floor(id.y / scale) }));
+      if (known) return known;
+    }
     const record = this.findReadyAncestor(id);
     if (!record?.data) return null;
     return {
@@ -262,6 +282,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     for (const geometry of this.geometries.values()) geometry.dispose();
     this.renderTiles.clear();
     this.records.clear();
+    this.knownHeightRanges.clear();
     this.geometries.clear();
     this.object3d.clear();
   }
@@ -427,7 +448,18 @@ export class TerrainTileLayer implements TerrainHeightSource {
           record.data = data;
           record.state = 'ready';
           record.lastUsedFrame = this.frame;
-          this.stitchLoadedTerrain(record);
+          // Raw DEM is authoritative and immutable. Surface ECEF constraints
+          // reconcile rendered seams; incremental averaging of every cached
+          // neighbour previously changed old mountains on unrelated arrivals.
+          this.knownHeightRanges.set(record.key, { minimumHeight: data.minimumHeight * this.exaggeration - 2,
+            maximumHeight: data.maximumHeight * this.exaggeration + 2 });
+          if (this.knownHeightRanges.size > 32768) {
+            for (const key of this.knownHeightRanges.keys()) {
+              if (!this.visibleKeys.has(key) && this.records.get(key)?.state !== 'ready') {
+                this.knownHeightRanges.delete(key); break;
+              }
+            }
+          }
           this._revision += 1;
           this.materialsDirty = true;
         }
@@ -532,6 +564,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (texture && !this.suspended) texture.dispose();
   }
 
+  /** Legacy diagnostic helper; normal loading preserves immutable raw DEM. */
   private stitchLoadedTerrain(loaded: TerrainRecord): void {
     if (!loaded.data) return;
     const startedAt = performance.now();

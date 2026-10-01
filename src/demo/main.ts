@@ -135,7 +135,7 @@ const businessLayerRevisions = new Map<string, number>();
 const businessLayerControllers = new Map<string, AbortController>();
 
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
-let terrainEnabled = terrainEnabledByConfig;
+let terrainEnabled = terrainEnabledByConfig && new URLSearchParams(window.location.search).get('terrain') !== '0';
 const terrainTestLocations = [
   { name: '珠峰', longitude: 86.925, latitude: 27.988, altitude: 24_000 },
   { name: '重庆', longitude: 106.5516, latitude: 29.563, altitude: 12_000 }
@@ -193,6 +193,7 @@ const renderStats = (stats: GlobeEngineStats): void => {
     imageryValue.textContent += ` · PBF≤${nativeBase.dataMaxLevel}级/绘制≤${nativeBase.maxLevel}级`;
     const draw = nativeBase.drawStats;
     imageryValue.textContent += ` · 制图${draw.queued}排队/${draw.lastMs.toFixed(1)}ms/峰值${draw.maxMs.toFixed(1)}ms`;
+    imageryValue.textContent += ` · 近1s制图${draw.recentCount}张/${draw.recentMs.toFixed(1)}ms`;
   }
   const baseSymbolStats = stats.vectorLayers.get('native-base-symbols');
   if (baseSymbolStats) imageryValue.textContent += ` · 底图点注记 ${baseSymbolStats.visibleLabels}/${baseSymbolStats.allocatedLabels}（显示/缓存）· placement ${baseSymbolStats.placementMs.toFixed(1)}ms`;
@@ -204,13 +205,14 @@ const renderStats = (stats: GlobeEngineStats): void => {
       `${nativeMvt.visibleLabels}/${nativeMvt.allocatedLabels} 注记 · ${nativeMvt.errors} 失败`;
   }
   terrainValue.textContent = stats.terrain
-    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · ${stats.terrain.stitchedEdges} 接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
+    ? `地形 ${terrainEnabled ? '开启' : '关闭'} · ${stats.terrain.coverageReady ? '覆盖完成' : '粗层覆盖中'} · ${stats.terrain.ready} 就绪 · ${stats.terrain.loading} 加载 · ${(stats.terrain.resourceBytes / 1024 / 1024).toFixed(0)} MiB · 原始DEM/地表接边 · ${stats.terrain.fallbacks} 回退 · ${stats.terrain.errors} 失败`
     : '地形未配置';
   const timing = stats.performance;
   terrainValue.textContent += ` · CPU ms LOD ${timing.lodMs.toFixed(1)}/地形 ${timing.terrainMs.toFixed(1)}` +
     `/地表 ${timing.surfaceMs.toFixed(1)}/要素 ${timing.featureMs.toFixed(1)}/提交 ${timing.renderSubmitMs.toFixed(1)}` +
     ` · ${timing.drawCalls} draws/${(timing.triangles / 1000).toFixed(0)}k 三角形`;
-  if (stats.terrain) terrainValue.textContent += ` · 接边末次/峰值 ${stats.terrain.stitchLastMs.toFixed(1)}/${stats.terrain.stitchMaxMs.toFixed(1)} ms`;
+  terrainValue.textContent += ` · GPU ${timing.gpuMs === null ? '不可用' : timing.gpuMs.toFixed(1) + 'ms'}` +
+    ` · LOD重选${timing.lodSelections}次`;
 };
 
 const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_URL) ??
@@ -306,7 +308,14 @@ if (activeBaseLayer.kind === 'vector') {
     console.error(`[图层 ${failedLayer.id}] 初始加载失败，保留影像底图`, error);
   }
 }
+engine.setTerrainEnabled(terrainEnabled);
 engine.start();
+if (new URLSearchParams(window.location.search).has('pitch')) {
+  engine.flyTo({ longitude: queryNumber('longitude', 105, -180, 180),
+    latitude: queryNumber('latitude', 32, -85, 85),
+    altitude: queryNumber('altitude', 8_600_000, 100, 100_000_000),
+    heading: queryNumber('heading', 0, 0, 360), pitch: queryNumber('pitch', -90, -90, -0.1), duration: 0 });
+}
 void enableQueryBusinessLayers();
 
 let layerSwitchRevision = 0;

@@ -32,3 +32,19 @@ for (const [width, height] of [[1280, 800], [1920, 1080]]) {
   }
 }
 console.log('LOD budget checks passed (flat top-down zoom, hysteresis stability, 1280/1920 viewport).');
+
+const stableCamera = new THREE.PerspectiveCamera(50, 1.6, 1, 100000000);
+stableCamera.position.copy(ellipsoid.cartographicToCartesian({ longitude: 86.925, latitude: 27.9881, height: 12000 }));
+stableCamera.lookAt(ellipsoid.cartographicToCartesian({ longitude: 86.925, latitude: 27.9881 }));
+let measured = null;
+const source = { revision: 0, heightRange: () => measured, maximumHeight: () => measured?.maximumHeight ?? null };
+const stableSelector = new GlobeLodSelector({ ...options, maximumSurfaceDisplacement: 12000 });
+stableSelector.setSurfaceDisplacementSource(source);
+const baseline = stableSelector.select(stableCamera, 1000).tiles.map((tile) => tile.id);
+for (const height of [8000, 1000, null, 7000, null, 500]) {
+  measured = height === null ? null : { minimumHeight: 0, maximumHeight: height };
+  source.revision++;
+  assert.deepEqual(stableSelector.select(stableCamera, 1000).tiles.map((tile) => tile.id), baseline,
+    'stationary loaded/evicted DEM bounds must not produce a LOD request cycle');
+}
+console.log('Stationary mountain view bounds-feedback checks passed.');

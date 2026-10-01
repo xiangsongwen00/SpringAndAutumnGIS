@@ -482,10 +482,13 @@ export class GlobeCameraController {
   private enforceDistance(): void {
     const distance = this.camera.position.length();
     let clamped = false;
-    if (distance < this.minDistance) {
+    // setLength() and the ellipsoid radius calculation can disagree by a few
+    // nanometres. Re-clamping that noise also re-aims the camera every frame.
+    const tolerance = 1e-4;
+    if (distance < this.minDistance - tolerance) {
       this.camera.position.setLength(this.minDistance);
       clamped = true;
-    } else if (distance > this.maxDistance) {
+    } else if (distance > this.maxDistance + tolerance) {
       this.camera.position.setLength(this.maxDistance);
       clamped = true;
     }

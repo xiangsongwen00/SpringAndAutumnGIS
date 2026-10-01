@@ -102,6 +102,8 @@ export class GlobeLodSelector {
   private readonly frustum = new THREE.Frustum();
   private readonly tileBounds = new THREE.Sphere();
   private readonly viewSurfaceSamples: ViewSurfaceSample[] = [];
+  private readonly viewBoundsMatrix = new THREE.Matrix4();
+  private readonly viewHeightRanges = new Map<string, SurfaceDisplacementRange>();
   private surfaceDisplacementSource?: SurfaceDisplacementBoundsSource;
   private surfaceDisplacementRevision = -1;
   private cameraDistance = 0;
@@ -142,6 +144,7 @@ export class GlobeLodSelector {
     if (next === this.maximumSurfaceDisplacement) return;
     this.maximumSurfaceDisplacement = next;
     this.boundsCache.clear();
+    this.viewHeightRanges.clear();
     this.previousSplits.clear();
   }
 
@@ -150,6 +153,7 @@ export class GlobeLodSelector {
     this.surfaceDisplacementSource = source;
     this.surfaceDisplacementRevision = source?.revision ?? -1;
     this.boundsCache.clear();
+    this.viewHeightRanges.clear();
     this.previousSplits.clear();
   }
 
@@ -191,6 +195,14 @@ export class GlobeLodSelector {
       ? this.minLevel
       : clampInteger(minimumLevelOverride, this.minLevel, this.maxLevel);
     this.projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    if (!this.projectionView.equals(this.viewBoundsMatrix)) {
+      this.viewBoundsMatrix.copy(this.projectionView);
+      this.viewHeightRanges.clear();
+      // Flat ellipsoid bounds are world-space and independent of the camera.
+      // Keep them during navigation instead of repeating all 25-point bounds
+      // samples for every tile on each camera movement.
+      if (this.maximumSurfaceDisplacement > 0) this.boundsCache.clear();
+    }
     this.frustum.setFromProjectionMatrix(this.projectionView);
     this.updateViewSurfaceSamples(camera);
 
@@ -319,7 +331,13 @@ export class GlobeLodSelector {
     // A continuous peripheral gradient, with a foreground exception. Near
     // ground stays detailed even at the bottom edge of a grazing view; distant
     // edges no longer demand the same pixel density as the focus region.
-    return Math.max(0.3, 1 / (1 + 2 * screenDistance ** 2), 0.75 * nearRatio ** 4);
+    // At grazing pitch the centre is the distant horizon, not the foreground.
+    // A screen-centre bonus alone spends the budget refining distant ground.
+    // Apply distance falloff to that bonus; nadir/global distances are similar
+    // and therefore retain their previous peripheral gradient.
+    const peripheral = Math.max(0.3, 1 / (1 + 2 * screenDistance ** 2));
+    return Math.max(0.12, peripheral * Math.max(0.15, nearRatio ** 0.65),
+      0.9 * nearRatio ** 4);
   }
 
   private projectedDetailPixels(
@@ -387,6 +405,18 @@ export class GlobeLodSelector {
   }
 
   private surfaceDisplacementForTile(id: TileId): SurfaceDisplacementRange {
+    const key = tileKey(id), current = this.querySurfaceDisplacementForTile(id);
+    const previous = this.viewHeightRanges.get(key);
+    // For a stationary view, tighten-on-load / widen-on-eviction can feed back
+    // into selection and requests forever. Keep a monotone safe envelope until
+    // the camera/projection changes; actual DEM textures may still improve.
+    const range = previous ? { minimumHeight: Math.min(previous.minimumHeight, current.minimumHeight),
+      maximumHeight: Math.max(previous.maximumHeight, current.maximumHeight) } : current;
+    this.viewHeightRanges.set(key, range);
+    return range;
+  }
+
+  private querySurfaceDisplacementForTile(id: TileId): SurfaceDisplacementRange {
     const loadedRange = this.surfaceDisplacementSource?.heightRange?.(id);
     if (loadedRange) {
       const minimumHeight = THREE.MathUtils.clamp(

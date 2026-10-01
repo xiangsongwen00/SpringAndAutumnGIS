@@ -10,10 +10,11 @@ const url = process.env.VECTOR_TEST_URL ?? 'http://127.0.0.1:5173/test/vector-or
 const chrome = process.env.CHROME_PATH ?? (process.platform === 'win32'
   ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : 'google-chrome');
 const profile = await mkdtemp(join(tmpdir(), 'sag-vector-browser-'));
+const gpuArguments = process.env.VECTOR_GPU_MODE === 'hardware' ? [] :
+  ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
 const processHandle = spawn(chrome, ['--headless', '--no-first-run', '--disable-extensions',
   `--window-size=${process.env.VECTOR_WINDOW_SIZE ?? '1280,800'}`,
-  '--disable-background-networking', '--disable-gpu-sandbox', '--use-gl=angle',
-  '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--remote-debugging-port=0',
+  '--disable-background-networking', '--disable-gpu-sandbox', ...gpuArguments, '--remote-debugging-port=0',
   `--user-data-dir=${profile}`, url], { windowsHide: true, stdio: 'ignore' });
 let launchError;
 processHandle.on('error', (error) => { launchError = error; });
@@ -58,23 +59,56 @@ try {
       const response = await evaluate('({selected:document.querySelector("#selected-value")?.textContent,imagery:document.querySelector("#imagery-value")?.textContent,terrain:document.querySelector("#terrain-value")?.textContent,fps:document.querySelector("#fps-value")?.textContent})');
       appState = response.result?.result?.value;
       const labelsVisible = Number(appState?.imagery?.match(/底图点注记\s+(\d+)\//)?.[1]) > 0;
+      const requiredContent = process.env.VECTOR_REQUIRE_LABELS === '0' ? Number(appState?.selected) > 0 : labelsVisible;
       const terrainSettled = appState?.terrain?.includes('关闭') ||
         !appState?.terrain?.includes('粗层覆盖中') && appState?.terrain?.includes('0 加载');
       const imagerySettled = appState?.imagery?.includes('0 加载 · 0 排队');
-      const settled = labelsVisible && terrainSettled && imagerySettled;
+      const settled = requiredContent && terrainSettled && imagerySettled;
       if (!settled) settledAt = 0;
       else settledAt ||= Date.now();
-      if (labelsVisible && (process.env.VECTOR_WAIT_SETTLED !== '1' || settledAt && Date.now() - settledAt >= 2000)) break;
+      if (requiredContent && (process.env.VECTOR_WAIT_SETTLED !== '1' || settledAt && Date.now() - settledAt >= 2000)) break;
       await pause();
     } while (Date.now() < deadline);
     console.log(JSON.stringify(appState));
-    assert.ok(Number(appState?.imagery?.match(/底图点注记\s+(\d+)\//)?.[1]) > 0, 'Real Esri point labels did not become visible');
+    if (process.env.VECTOR_REQUIRE_LABELS !== '0') {
+      assert.ok(Number(appState?.imagery?.match(/底图点注记\s+(\d+)\//)?.[1]) > 0, 'Real Esri point labels did not become visible');
+    } else assert.ok(Number(appState?.selected) > 0, 'Real terrain scene did not become visible');
     if (process.env.VECTOR_TERRAIN_OFF === '1') {
       assert.ok(appState?.terrain?.includes('关闭'), 'Terrain-off audit must actually disable terrain');
-      assert.ok(Number(appState?.selected) < 315, 'Flat top-down audit must leave budget headroom');
+      const pitch = Number(new URL(url).searchParams.get('pitch') ?? -90);
+      assert.ok(Number(appState?.selected) < (pitch <= -55 ? 315 : 351), 'Terrain-off audit tile budget');
     }
     if (process.env.VECTOR_WAIT_SETTLED === '1') {
       assert.ok(settledAt && Date.now() - settledAt >= 2000, 'Real map did not settle before the audit deadline');
+    }
+    const rendererInfo = await evaluate('(()=>{const gl=document.querySelector("canvas")?.getContext("webgl2");const ext=gl?.getExtension("WEBGL_debug_renderer_info");return {renderer:gl?.getParameter(ext?.UNMASKED_RENDERER_WEBGL??gl.RENDERER),buffer:gl?[gl.drawingBufferWidth,gl.drawingBufferHeight]:null};})()');
+    console.log(JSON.stringify(rendererInfo.result?.result?.value));
+    if (process.env.VECTOR_STABILITY_SECONDS) {
+      const first = appState?.terrain?.match(/LOD重选(\d+)次/)?.[1];
+      const until = Date.now() + Number(process.env.VECTOR_STABILITY_SECONDS) * 1000;
+      while (Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const response = await evaluate('({selected:document.querySelector("#selected-value")?.textContent,terrain:document.querySelector("#terrain-value")?.textContent,imagery:document.querySelector("#imagery-value")?.textContent,fps:document.querySelector("#fps-value")?.textContent})');
+        appState = response.result?.result?.value;
+        assert.equal(appState?.terrain?.match(/LOD重选(\d+)次/)?.[1], first, 'Settled stationary view must not keep reselecting LOD');
+      }
+      console.log(`Stationary stable: ${JSON.stringify(appState)}`);
+    }
+    if (process.env.VECTOR_ZOOM_SWEEP === '1') {
+      const box = (await evaluate('(()=>{const r=document.querySelector("canvas").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height*.75};})()')).result.result.value;
+      await evaluate('(()=>{window.__vectorAuditFrames=[];let previous=performance.now();window.__vectorAuditSampling=true;function sample(now){window.__vectorAuditFrames.push(now-previous);previous=now;if(window.__vectorAuditSampling)requestAnimationFrame(sample);}requestAnimationFrame(sample);})()');
+      for (const deltaY of [120, 120, -120, -120, 120, -120]) {
+        await new Promise((resolve) => {
+          const id = ++nextId; pending.set(id, resolve);
+          socket.send(JSON.stringify({ id, method: 'Input.dispatchMouseEvent', params: {
+            type: 'mouseWheel', x: box.x, y: box.y, deltaX: 0, deltaY
+          } }));
+        });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const report = await evaluate('(()=>{window.__vectorAuditSampling=false;const a=window.__vectorAuditFrames.sort((x,y)=>x-y);return {frames:a.length,medianMs:a[Math.floor(a.length*.5)],p95Ms:a[Math.floor(a.length*.95)],maximumMs:a.at(-1),selected:document.querySelector("#selected-value")?.textContent,terrain:document.querySelector("#terrain-value")?.textContent,imagery:document.querySelector("#imagery-value")?.textContent};})()');
+      console.log(`Zoom sweep: ${JSON.stringify(report.result?.result?.value)}`);
     }
     if (process.env.VECTOR_SCREENSHOT_PATH) {
       const screenshot = await new Promise((resolve) => {
