@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Ellipsoid } from '../geo/Ellipsoid';
+import { CoordinateTransform } from '../coordinates/CoordinateTransform';
 import {
   GeographicTilingScheme,
   tileKey,
@@ -50,6 +51,10 @@ export interface SurfaceDisplacementBoundsSource {
   maximumHeight(id: TileId): number | null;
   /** Exact loaded height interval when available. */
   heightRange?(id: TileId): SurfaceDisplacementRange | null;
+  /** Loaded local height for the detail sampling shell, not an occlusion test. */
+  sampleHeight?(longitude: number, latitude: number): number | null;
+  /** Resolved DEM/ancestor snapshot; avoids repeated pyramid searches per point. */
+  tileHeightSampler?(id: TileId): { key: string; sample: (u: number, v: number) => number };
 }
 
 export type SurfaceDisplacementRange = Readonly<{
@@ -99,11 +104,16 @@ export class GlobeLodSelector {
   private readonly tangentNorth = new THREE.Vector3();
   private readonly projectionView = new THREE.Matrix4();
   private readonly projectedCenter = new THREE.Vector3();
+  private readonly detailPoint = new THREE.Vector3();
+  private readonly detailProjected = new THREE.Vector3();
   private readonly frustum = new THREE.Frustum();
   private readonly tileBounds = new THREE.Sphere();
   private readonly viewSurfaceSamples: ViewSurfaceSample[] = [];
+  private readonly coordinates = new CoordinateTransform();
   private readonly viewBoundsMatrix = new THREE.Matrix4();
   private readonly viewHeightRanges = new Map<string, SurfaceDisplacementRange>();
+  private readonly viewDetailRanges = new Map<string, SurfaceDisplacementRange | null>();
+  private readonly viewDetailHeights = new Map<string, number | null>();
   private surfaceDisplacementSource?: SurfaceDisplacementBoundsSource;
   private surfaceDisplacementRevision = -1;
   private cameraDistance = 0;
@@ -112,6 +122,7 @@ export class GlobeLodSelector {
   private cameraLatitude = 0;
   private focalPixels = 1;
   private nearestVisibleDistance = Infinity;
+  private viewSampleHeight: number | null = null;
   private visited = 0;
   private horizonCulled = 0;
   private frustumCulled = 0;
@@ -145,6 +156,9 @@ export class GlobeLodSelector {
     this.maximumSurfaceDisplacement = next;
     this.boundsCache.clear();
     this.viewHeightRanges.clear();
+    this.viewDetailRanges.clear();
+    this.viewDetailHeights.clear();
+    this.viewSampleHeight = null;
     this.previousSplits.clear();
   }
 
@@ -154,6 +168,9 @@ export class GlobeLodSelector {
     this.surfaceDisplacementRevision = source?.revision ?? -1;
     this.boundsCache.clear();
     this.viewHeightRanges.clear();
+    this.viewDetailRanges.clear();
+    this.viewDetailHeights.clear();
+    this.viewSampleHeight = null;
     this.previousSplits.clear();
   }
 
@@ -199,6 +216,9 @@ export class GlobeLodSelector {
     if (!this.projectionView.equals(this.viewBoundsMatrix)) {
       this.viewBoundsMatrix.copy(this.projectionView);
       this.viewHeightRanges.clear();
+      this.viewDetailRanges.clear();
+      this.viewDetailHeights.clear();
+      this.viewSampleHeight = null;
       // World-space bounds remain valid across camera motion. A changed
       // per-view height envelope is checked locally in isInsideFrustum.
     }
@@ -321,6 +341,55 @@ export class GlobeLodSelector {
         viewCenterDistance = Math.min(viewCenterDistance, sample.screenDistance);
       }
     }
+    // Culling already lifts the bounds, but an h=0 centre/ray may lie far
+    // outside the viewport while this tile's mountain occupies the foreground.
+    // Evaluate loaded local heights in world space too. No whole-tile
+    // screen-centre penalty for terrain that is actually close to the camera.
+    const detailKey = tileKey(id);
+    const loadedRange = this.viewDetailRanges.get(detailKey);
+    if (this.maximumSurfaceDisplacement > 0 && loadedRange &&
+        (loadedRange.minimumHeight !== 0 || loadedRange.maximumHeight !== 0)) {
+      const minimumHeight = THREE.MathUtils.clamp(loadedRange.minimumHeight, -this.maximumSurfaceDisplacement, this.maximumSurfaceDisplacement);
+      const maximumHeight = THREE.MathUtils.clamp(loadedRange.maximumHeight, minimumHeight, this.maximumSurfaceDisplacement);
+      const heights = [minimumHeight, (minimumHeight + maximumHeight) * .5, maximumHeight];
+      const locations = [[longitude, latitude],
+        [closestLongitudeInRectangle(this.cameraLongitude, rectangle.west, rectangle.east),
+          THREE.MathUtils.clamp(this.cameraLatitude, rectangle.south, rectangle.north)],
+        [rectangle.west, rectangle.south], [rectangle.east, rectangle.south],
+        [rectangle.west, rectangle.north], [rectangle.east, rectangle.north]];
+      const snapshot = this.tilingScheme.id === 'web-mercator'
+        ? this.surfaceDisplacementSource?.tileHeightSampler?.(id) : undefined;
+      const mercatorY = (lat: number) => (1 - Math.asinh(Math.tan(THREE.MathUtils.degToRad(lat))) / Math.PI) * .5;
+      const northY = this.tilingScheme.id === 'web-mercator' ? mercatorY(rectangle.north) : 0;
+      const southY = this.tilingScheme.id === 'web-mercator' ? mercatorY(rectangle.south) : 1;
+      for (const [lon, lat] of locations) {
+        const pointKey = `${lon}/${lat}`;
+        if (!this.viewDetailHeights.has(pointKey)) {
+          const u = (lon! - rectangle.west) / (rectangle.east - rectangle.west);
+          const v = this.tilingScheme.id === 'web-mercator' ? (mercatorY(lat!) - northY) / (southY - northY)
+            : (rectangle.north - lat!) / (rectangle.north - rectangle.south);
+          const height = snapshot && snapshot.key !== 'flat' ? snapshot.sample(u, v)
+            : this.surfaceDisplacementSource?.sampleHeight?.(lon!, lat!);
+          this.viewDetailHeights.set(pointKey, height !== null && height !== undefined && Number.isFinite(height) ? height : null);
+        }
+        const actualHeight = this.viewDetailHeights.get(pointKey);
+        // Bounds extrema are for safe culling, not a fictitious flat mountain
+        // at every corner. Prefer the actual loaded local height for detail.
+        const pointHeights = actualHeight !== null && actualHeight !== undefined ? [actualHeight]
+          : this.surfaceDisplacementSource?.sampleHeight ? [] : heights;
+        for (const height of pointHeights) {
+          this.ellipsoid.cartographicToCartesian({ longitude: lon!, latitude: lat!, height }, this.detailPoint);
+          this.detailProjected.copy(this.detailPoint).applyMatrix4(this.projectionView);
+          if (Math.abs(this.detailProjected.x) > 1.05 || Math.abs(this.detailProjected.y) > 1.05 ||
+              this.detailProjected.z < -1 || this.detailProjected.z > 1) continue;
+          const screenDistance = Math.hypot(this.detailProjected.x, this.detailProjected.y);
+          screenPixels = Math.max(screenPixels,
+            this.projectedDetailPixels(this.detailPoint, ellipsoidSurfaceNormal(this.detailPoint, this.ellipsoid), worldSpan) *
+              this.detailImportance(this.detailPoint, screenDistance));
+          viewCenterDistance = Math.min(viewCenterDistance, screenDistance);
+        }
+      }
+    }
     return { id, rectangle, screenPixels, viewCenterDistance, canSplit: true };
   }
 
@@ -373,6 +442,20 @@ export class GlobeLodSelector {
   private updateViewSurfaceSamples(camera: THREE.PerspectiveCamera): void {
     this.viewSurfaceSamples.length = 0;
     this.nearestVisibleDistance = Infinity;
+    // Freeze the first loaded local height for this pose. Cache eviction or a
+    // finer DEM must not oscillate the sampling shell in a stationary view.
+    if (this.viewSampleHeight === null && this.maximumSurfaceDisplacement > 0) {
+      const position = this.coordinates.worldToGeodetic(this.cameraPosition);
+      const height = this.surfaceDisplacementSource?.sampleHeight?.(position.longitude, position.latitude);
+      if (height !== null && height !== undefined && Number.isFinite(height)) {
+        this.viewSampleHeight = THREE.MathUtils.clamp(height, -this.maximumSurfaceDisplacement, this.maximumSurfaceDisplacement);
+        // One initial refinement when a previously unknown local surface
+        // becomes available; no repeat tighten/evict feedback for this pose.
+        this.viewDetailRanges.clear();
+        this.viewDetailHeights.clear();
+      }
+    }
+    const sampleHeight = this.viewSampleHeight ?? 0;
     const ndcSamples: Array<readonly [number, number]> = [];
     // Symmetric coverage works for roll/heading as well as the usual bottom
     // foreground. Rays that see only sky simply have no surface sample.
@@ -384,14 +467,14 @@ export class GlobeLodSelector {
         .unproject(camera)
         .sub(this.cameraPosition)
         .normalize();
-      const point = intersectEllipsoid(this.cameraPosition, direction, this.ellipsoid);
+      const point = intersectEllipsoid(this.cameraPosition, direction, this.ellipsoid, sampleHeight);
       if (!point) continue;
       this.nearestVisibleDistance = Math.min(this.nearestVisibleDistance, this.cameraPosition.distanceTo(point));
       const horizontal = Math.hypot(point.x, point.z);
       const longitude = THREE.MathUtils.radToDeg(Math.atan2(point.x, point.z));
       const latitude = THREE.MathUtils.radToDeg(Math.atan2(
-        point.y * this.ellipsoid.equatorialRadius ** 2,
-        horizontal * this.ellipsoid.polarRadius ** 2
+        point.y * (this.ellipsoid.equatorialRadius + sampleHeight) ** 2,
+        horizontal * (this.ellipsoid.polarRadius + sampleHeight) ** 2
       ));
       this.viewSurfaceSamples.push({
         longitude,
@@ -417,6 +500,8 @@ export class GlobeLodSelector {
 
   private querySurfaceDisplacementForTile(id: TileId): SurfaceDisplacementRange {
     const loadedRange = this.surfaceDisplacementSource?.heightRange?.(id);
+    const key = tileKey(id);
+    if (!this.viewDetailRanges.has(key)) this.viewDetailRanges.set(key, loadedRange ? { ...loadedRange } : null);
     if (loadedRange) {
       const minimumHeight = THREE.MathUtils.clamp(
         loadedRange.minimumHeight,
@@ -655,10 +740,11 @@ function ellipsoidSurfaceNormal(point: THREE.Vector3, ellipsoid: Ellipsoid): THR
 function intersectEllipsoid(
   origin: THREE.Vector3,
   direction: THREE.Vector3,
-  ellipsoid: Ellipsoid
+  ellipsoid: Ellipsoid,
+  height = 0
 ): THREE.Vector3 | null {
-  const a2 = ellipsoid.equatorialRadius ** 2;
-  const b2 = ellipsoid.polarRadius ** 2;
+  const a2 = (ellipsoid.equatorialRadius + height) ** 2;
+  const b2 = (ellipsoid.polarRadius + height) ** 2;
   const quadraticA =
     (direction.x * direction.x + direction.z * direction.z) / a2 +
     (direction.y * direction.y) / b2;
@@ -674,6 +760,9 @@ function intersectEllipsoid(
   const root = Math.sqrt(discriminant);
   const near = (-quadraticB - root) / (2 * quadraticA);
   const far = (-quadraticB + root) / (2 * quadraticA);
+  // If transient DEM/camera collision puts the eye inside the sampling shell,
+  // its far exit is not a visible foreground hit. Never sample the back globe.
+  if (height !== 0 && near < 0) return null;
   const distance = near >= 0 ? near : far >= 0 ? far : -1;
   return distance >= 0 ? origin.clone().addScaledVector(direction, distance) : null;
 }
