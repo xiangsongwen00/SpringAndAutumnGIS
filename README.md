@@ -1,5 +1,11 @@
 # SpringAndAutumnGIS
 
+## SDK公共入口（阶段A）
+
+2026-10-08新增`Viewer.create(container, options)`，支持统一XYZ/TMS/provider/Style v8底图选择与异步切换、首帧地形开关、LOD经纬网显隐及幂等销毁。低层GlobeEngine保留。用`npm pack`生成安装包，再在外部项目以ES模块import；目前未发布registry，点线面entities仍属阶段B，不要照计划文档当成已实现API。
+
+完整接口、安装与行为边界见[SDK使用说明](./SDK使用说明.md)。独立消费验收运行`npm run test:sdk`，示例/fixture见examples/sdk-consumer。
+
 从底层重构中的轻量 3D GIS 内核。当前实现 **WGS84 三维经纬网 LOD**、可替换的 Web Mercator 影像/矢量瓦片以及 Terrain-RGB 只读地形。
 
 ## 当前架构

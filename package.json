@@ -4,21 +4,24 @@
   "private": false,
   "type": "module",
   "description": "Lightweight 3D GIS engine (library + demo).",
-  "main": "./dist/spring-and-autumn-gis.umd.js",
+  "main": "./dist/spring-and-autumn-gis.umd.cjs",
   "module": "./dist/spring-and-autumn-gis.es.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/spring-and-autumn-gis.es.js",
-      "require": "./dist/spring-and-autumn-gis.umd.js"
+      "require": "./dist/spring-and-autumn-gis.umd.cjs"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "SDK使用说明.md"
   ],
   "sideEffects": false,
   "scripts": {
+    "prepack": "npm run build",
+    "test:sdk": "node scripts/test-sdk-package.mjs",
     "dev": "vite",
     "build": "vite build && tsc -p tsconfig.build.json",
     "preview": "vite preview",
@@ -35,6 +38,13 @@
     "three": "^0.182.0",
     "typescript": "^5.4.5",
     "vite": "^5.1.4"
+  },
+  "peerDependencies": {
+    "three": "^0.182.0",
+    "@types/three": "^0.182.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/three": { "optional": true }
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",

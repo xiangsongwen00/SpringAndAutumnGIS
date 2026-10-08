@@ -1,0 +1,8 @@
+{
+  "name": "spring-and-autumn-sdk-consumer",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc --noEmit && vite build" },
+  "dependencies": { "three": "0.182.0" },
+  "devDependencies": { "@types/three": "0.182.0", "typescript": "5.9.3", "vite": "5.4.21" }
+}

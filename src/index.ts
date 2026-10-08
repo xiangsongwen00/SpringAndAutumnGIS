@@ -175,6 +175,8 @@ export type {
 } from './render/TerrainTileLayer';
 
 export { GlobeEngine } from './engine/GlobeEngine';
+export { Viewer, ViewerError } from './sdk/Viewer';
+export type { ViewerOptions, BaseMapDefinition, BaseMapState, ViewerErrorCode } from './sdk/Viewer';
 export type {
   GlobeEngineOptions,
   GlobeEngineStats,

@@ -214,7 +214,7 @@ try {
   do {
     const response = await evaluate('({status:document.querySelector("#result")?.dataset.status,text:document.querySelector("#result")?.textContent})');
     state = response.result?.result?.value;
-    if (state?.status) break;
+    if (state?.status === 'passed' || state?.status === 'failed') break;
     await pause();
   } while (Date.now() < deadline);
   assert.equal(state?.status, 'passed', state?.text ?? 'Browser regression timed out');

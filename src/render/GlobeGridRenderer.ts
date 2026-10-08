@@ -6,6 +6,7 @@ import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
 
 export type GlobeGridRendererOptions = {
+  visible?: boolean;
   subdivisions?: number;
   heightOffset?: number;
   terrain?: TerrainHeightSource;
@@ -86,6 +87,7 @@ export class GlobeGridRenderer {
       toneMapped: false
     });
     this.object3d = new THREE.LineSegments(this.geometry, this.material);
+    this.object3d.visible = options.visible ?? true;
     this.object3d.frustumCulled = false;
     this.object3d.renderOrder = 2;
     this.object3d.onBeforeRender = (_renderer, _scene, camera) => {

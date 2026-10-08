@@ -23,10 +23,12 @@ export default defineConfig({
     }
   },
   build: {
+    copyPublicDir: false,
     lib: {
       entry: 'src/index.ts',
       name: 'SpringAndAutumnGIS',
-      fileName: (format) => `spring-and-autumn-gis.${format}.js`
+      formats: ['es', 'umd'],
+      fileName: (format) => format === 'umd' ? 'spring-and-autumn-gis.umd.cjs' : 'spring-and-autumn-gis.es.js'
     },
     rollupOptions: {
       external: ['three'],

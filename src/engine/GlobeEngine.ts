@@ -76,6 +76,8 @@ export type GlobeEngineOptions = {
   imagery?: false | RasterTileProvider;
   raster?: RasterTileLayerOptions;
   terrain?: false | TerrainProvider;
+  /** Configure a provider while disabling DEM requests from the first frame. */
+  terrainEnabled?: boolean;
   terrainLayer?: TerrainTileLayerOptions;
   initialView?: {
     longitude: number;
@@ -103,7 +105,8 @@ export class GlobeEngine {
   readonly coordinates = new CoordinateTransform(this.ellipsoid);
   readonly lod: GlobeLodSelector;
   readonly grid: GlobeGridRenderer;
-  readonly imagery: RasterTileLayer | null;
+  private _imagery: RasterTileLayer | null = null;
+  get imagery(): RasterTileLayer | null { return this._imagery; }
   readonly terrain: TerrainTileLayer | null;
   /** Shared per-content lifecycle registry for all raster surface layers. */
   readonly tileStateMachine = new TileStateMachine();
@@ -131,6 +134,7 @@ export class GlobeEngine {
   private readonly lodCameraPosition = new THREE.Vector3();
   private readonly lodCameraQuaternion = new THREE.Quaternion();
   private contextLost = false;
+  private disposed = false;
   private readonly imageryLayers = new Map<string, RasterTileLayer>();
   private readonly featureLayers = new Map<string, GeoJsonLayer>();
   private readonly vectorLayers = new Map<string, MvtVectorLayer>();
@@ -183,7 +187,7 @@ export class GlobeEngine {
     this.lod = new GlobeLodSelector({
       ...options.lod,
       tilingScheme,
-      maximumSurfaceDisplacement: this.terrainMaximumSurfaceDisplacement
+      maximumSurfaceDisplacement: options.terrainEnabled === false ? 0 : this.terrainMaximumSurfaceDisplacement
     });
     this.terrain = options.terrain === false || options.terrain === undefined
       ? null
@@ -193,6 +197,7 @@ export class GlobeEngine {
         prepareTexture: options.terrainLayer?.prepareTexture ?? ((texture) => this.renderer.initTexture(texture))
       });
     this.lod.setSurfaceDisplacementSource(this.terrain ?? undefined);
+    if (options.terrainEnabled === false) this.terrain?.setEnabled(false);
     this.grid = new GlobeGridRenderer(this.ellipsoid, {
       ...options.grid,
       terrain: this.terrain ?? undefined
@@ -237,7 +242,7 @@ export class GlobeEngine {
     );
     atmosphere.scale.y = this.ellipsoid.polarRadius / this.ellipsoid.equatorialRadius;
     atmosphere.renderOrder = 3;
-    this.imagery = options.imagery === false || options.imagery === undefined
+    this._imagery = options.imagery === false || options.imagery === undefined
       ? null
       : new RasterTileLayer(this.ellipsoid, options.imagery, this.imageryLayerOptions);
     if (this.imagery) this.imageryLayers.set('base', this.imagery);
@@ -283,6 +288,7 @@ export class GlobeEngine {
   }
 
   start(): void {
+    if (this.disposed) throw new Error('GlobeEngine has been disposed.');
     if (this.frameHandle !== null) return;
     const renderFrame = (timestamp: number) => {
       this.frameHandle = requestAnimationFrame(renderFrame);
@@ -363,7 +369,7 @@ export class GlobeEngine {
           layer.update(selection.tiles, cameraLevel, this.camera, viewportWidth, viewportHeight);
         }
       }
-      this.grid.update(selection.tiles, this.camera.position);
+      if (this.grid.object3d.visible) this.grid.update(selection.tiles, this.camera.position);
       const renderStartedAt = performance.now();
       this.gpuTimer.begin();
       this.renderer.render(this.scene, this.camera);
@@ -388,6 +394,8 @@ export class GlobeEngine {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.stop();
     this.gpuTimer.reset();
     this.resizeObserver.disconnect();
@@ -413,8 +421,27 @@ export class GlobeEngine {
   }
 
   setImageryProvider(provider: RasterTileProvider): void {
-    this.imagery?.setProvider(provider);
+    if (this.disposed) throw new Error('GlobeEngine has been disposed.');
+    if (this.imagery) this.imagery.setProvider(provider);
+    else this.replaceBaseImagery(provider);
     this.lastStatsSignature = '';
+  }
+
+  /** Configuration-level handoff; does not wait for all viewport tiles. */
+  replaceBaseImagery(provider: RasterTileProvider | null): void {
+    if (this.disposed) throw new Error('GlobeEngine has been disposed.');
+    const next = provider ? new RasterTileLayer(this.ellipsoid, provider, this.imageryLayerOptions) : null;
+    const previous = this._imagery;
+    this._imagery = next;
+    if (next) { this.imageryLayers.set('base', next); this.scene.add(next.object3d); }
+    else this.imageryLayers.delete('base');
+    if (previous) { this.scene.remove(previous.object3d); previous.dispose(); }
+    this.lastStatsSignature = '';
+  }
+
+  setLodGridVisible(visible: boolean): void {
+    if (this.disposed) throw new Error('GlobeEngine has been disposed.');
+    this.grid.object3d.visible = visible;
   }
 
   /** Adds a raster surface layer. Annotation layers should use overlay=true. */
