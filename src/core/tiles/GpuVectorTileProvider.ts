@@ -107,7 +107,9 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   }
 
   async initialize(): Promise<void> {
+    if (this.disposed) throw new Error('GPU vector provider disposed');
     const style = await this.loader.load();
+    if (this.disposed) throw new Error('GPU vector provider disposed');
     const selected = this.loader.selectVectorSource(style);
     this.sourceId = selected.id;
     this.capabilityReport = analyzeVectorSurfaceStyle(style);
@@ -115,6 +117,7 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
       .filter((issue) => issue.severity === 'unsupported').map((issue) => issue.layerId));
     this.source = new MvtTileSource({ id: selected.id, source: { ...selected.source, ...this.sourceOverride }, fetcher: this.loaderFetcher });
     await this.source.initialize();
+    if (this.disposed) throw new Error('GPU vector provider disposed');
     this._dataMaxLevel = Math.max(this.minLevel, Math.round(this.configuredDataMaxLevel ??
       this.sourceOverride?.maxzoom ?? selected.source.maxzoom ?? 22));
     this._dataMaxLevel = Math.min(this._dataMaxLevel, this.source.maxLevel);
@@ -124,8 +127,10 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
       layers: (derefLayers(style.layers as LayerSpecification[]) as StyleLayer[])
         .filter(layer => !this.unsupportedLayers.has(layer.id)) });
     if (this.issues.length) throw new Error(`样式编译失败：${JSON.stringify(this.issues.slice(0, 3))}`);
+    if (this.disposed) throw new Error('GPU vector provider disposed');
     this.initialized = true;
     await this.warmPrograms();
+    if (this.disposed) throw new Error('GPU vector provider disposed');
     console.info(`[GPU vector ${this.id}] 地表初版能力边界`, this.limitations);
     console.info(`[GPU vector ${this.id}] 样式绘制能力`, this.capabilityReport);
   }

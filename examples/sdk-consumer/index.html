@@ -1,5 +1,19 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Installed SDK acceptance</title>
-<style>html,body{margin:0;background:#07131d;color:white}#map{width:800px;height:500px}</style></head>
-<body><div id="map"></div><pre id="result" data-status="running">RUNNING</pre>
-<script type="module" src="/main.ts"></script></body></html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SDK 安装包验收</title>
+<style>html,body{margin:0;background:#07131d;color:#d9edf4;font:16px/1.6 system-ui}main{max-width:1000px;margin:24px auto;padding:0 20px}#map{width:800px;max-width:100%;height:500px;border:1px solid #355667}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#102735;padding:16px}code{color:#8be0ff}[data-status=failed]{color:#ffaba1}[data-status=passed]{color:#9beba6}</style></head>
+<body><main><h1>SDK 安装包验收</h1>
+<p>此目录保留旧自动验收夹具，不随SDK发布。持续交互与TS/JS消费已迁入 E:\0-SpringGISNet，请在独立应用打开 /sdk.html 或 /sdk-js.html。</p>
+<p>这是自动验收页面，不是持续展示的业务地图。它使用自造瓦片、DEM、MVT，完成后会销毁地图以验证资源释放；地图区域变空且显示 PASS 是正常结果。</p>
+<p>引擎根目录 <code>npm run test:sdk</code> 现在只检查dist库输出。日常交互请在独立应用运行 <code>npm run dev</code> 或 <code>npm run preview</code>，不再由引擎启动临时消费者。</p>
+<p>不能用 Live Server 直接打开这里的 TypeScript 源码入口。只有 <code>npm run build</code> 生成的 <code>dist/index.html</code> 才能交给静态服务器。详细步骤见仓库根目录的 SDK使用说明.md。</p>
+<div id="map"></div><pre id="result" data-status="waiting">等待验收模块启动……</pre></main>
+<script>
+  function showBootFailure() {
+    const result = document.getElementById('result');
+    if (result.dataset.status !== 'waiting') return;
+    result.dataset.status = 'failed';
+    result.textContent = '此处仅保留旧TS验收夹具，不能直接静态打开。日常交互请使用 E:\\0-SpringGISNet 的 /sdk.html 或 /sdk-js.html，不再从引擎启动临时消费者。';
+  }
+  setTimeout(showBootFailure, 8000);
+</script>
+<script type="module" src="./main.ts" onerror="showBootFailure()"></script></body></html>

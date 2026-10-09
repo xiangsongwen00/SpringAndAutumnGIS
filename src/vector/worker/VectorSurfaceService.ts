@@ -11,6 +11,7 @@ export class VectorSurfaceService {
   private disposed = false;
   get stats() { return { worker: this.client.available, ...this.client.stats }; }
   async initialize(style: MapStyle): Promise<VectorStyleIssue[]> {
+    if (this.disposed) throw new Error('Surface service disposed');
     if (this.client.available) return (await this.client.request<{ issues: VectorStyleIssue[] }>({ style })).issues;
     console.warn('[Vector surface] Worker unavailable; using compatibility main-thread build');
     this.fallback = new VectorStyleRuntime(style, new Set(['background', 'fill', 'line', 'circle']));

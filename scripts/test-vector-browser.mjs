@@ -22,6 +22,7 @@ processHandle.on('error', (error) => { launchError = error; });
 const deadline = Date.now() + Math.max(1000, Number(process.env.VECTOR_AUDIT_TIMEOUT_MS ?? 60000));
 const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
 let socket;
+const networkSummary = [];
 const pending = new Map();
 let nextId = 0;
 try {
@@ -44,6 +45,12 @@ try {
   socket.onmessage = ({ data }) => {
     const message = JSON.parse(data);
     if (message.id) { pending.get(message.id)?.(message); pending.delete(message.id); }
+    else if (process.env.VECTOR_NETWORK_AUDIT === '1' && message.method === 'Network.responseReceived') {
+      const response = message.params.response;
+      networkSummary.push({ host: new URL(response.url).hostname, status: response.status });
+    } else if (process.env.VECTOR_NETWORK_AUDIT === '1' && message.method === 'Network.loadingFailed') {
+      networkSummary.push({ failure: message.params.errorText });
+    }
   };
   const evaluate = (expression) => new Promise((resolve) => {
     const id = ++nextId;
@@ -54,6 +61,7 @@ try {
     const id = ++nextId; pending.set(id, resolve);
     socket.send(JSON.stringify({ id, method, params }));
   });
+  if (process.env.VECTOR_NETWORK_AUDIT === '1') await command('Network.enable', {});
   if (process.env.VECTOR_COLD_START === '1') {
     await command('Page.enable', {});
     await command('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -211,16 +219,39 @@ try {
     }
   } else {
   let state;
+  const expectedStatus = process.env.VECTOR_EXPECT_STATUS ?? 'passed';
   do {
     const response = await evaluate('({status:document.querySelector("#result")?.dataset.status,text:document.querySelector("#result")?.textContent})');
     state = response.result?.result?.value;
-    if (state?.status === 'passed' || state?.status === 'failed') break;
+    if (state?.status === 'failed' || state?.status === 'blocked') break;
+    if (state?.status === expectedStatus) {
+      if (process.env.VECTOR_EXPECT_IMAGERY_READY === '1') {
+        const readiness = await evaluate('(()=>{const s=JSON.parse(document.querySelector("#state")?.textContent||"{}");return {ready:s.imagery?.ready??0,canvases:document.querySelectorAll("#map canvas").length,frames:s.frameCallbacks??0};})()');
+        const value = readiness.result?.result?.value;
+        if (value?.ready > 0 && value?.canvases === 1 && value?.frames > 0) break;
+      } else break;
+    }
     await pause();
   } while (Date.now() < deadline);
-  assert.equal(state?.status, 'passed', state?.text ?? 'Browser regression timed out');
+  assert.equal(state?.status, expectedStatus, state?.text ?? 'Browser regression timed out');
+  if (process.env.VECTOR_EXPECT_IMAGERY_READY === '1') {
+    const response = await evaluate('(()=>{const s=JSON.parse(document.querySelector("#state")?.textContent||"{}");return {ready:s.imagery?.ready??0,canvases:document.querySelectorAll("#map canvas").length,frames:s.frameCallbacks??0};})()');
+    const value = response.result?.result?.value;
+    assert.ok(value?.ready > 0 && value?.canvases === 1 && value?.frames > 0, `Configured demo did not load imagery on a persistent canvas (${JSON.stringify(value)})`);
+  }
+  if (process.env.VECTOR_EXPECT_NO_CANVAS === '1') {
+    const response = await evaluate('document.querySelectorAll("#map canvas").length');
+    assert.equal(response.result?.result?.value, 0, 'Missing resource config must not create a globe');
+  }
   console.log(state.text);
+  if (process.env.VECTOR_SCREENSHOT_PATH) {
+    const screenshot = await command('Page.captureScreenshot', { format: 'png' });
+    await writeFile(process.env.VECTOR_SCREENSHOT_PATH, Buffer.from(screenshot.result.data, 'base64'));
+    console.log(`Screenshot saved: ${process.env.VECTOR_SCREENSHOT_PATH}`);
+  }
   }
 } finally {
+  if (process.env.VECTOR_NETWORK_AUDIT === '1') console.log(`Network audit (no URLs/credentials): ${JSON.stringify(networkSummary)}`);
   socket?.close();
   if (processHandle.exitCode === null && !launchError) {
     const exited = new Promise((resolve) => processHandle.once('exit', resolve));

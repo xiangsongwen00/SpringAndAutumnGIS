@@ -1,119 +1,107 @@
-# SpringAndAutumnGIS SDK：阶段A
+# SDK 使用说明
 
-2026-10-08。公共初始化入口已实现；程序实体点线面、鼠标绘制及独立地形LOD不在本阶段承诺范围内。不是Cesium API兼容包。
+2026-10-08。引擎仓库负责库输出；独立交互、TS/JS消费和应用构建放在 **E:\0-SpringGISNet**。不再从本仓库通过demo:sdk创建临时消费者或启动交互服务。
 
-## 安装与ES模块引入
+## 1. 引擎只构建 dist
 
-当前尚未发布npm registry。先在引擎仓库运行：
+CMD 示例（npm命令也可在PowerShell中执行，切目录语法不同）：
 
-```sh
-npm pack
+```bat
+cd /d E:\SpringAndAutumnGIS\SpringAndAutumnGIS
+npm run build
+npm run test:sdk
 ```
 
-prepack会自动构建，引擎产物位于dist，tgz名称按当前package版本生成。然后在用户项目中安装实际生成的文件：
+上面cd /d是CMD语法；PowerShell切目录用Set-Location。build生成ES模块、CJS兼容入口和类型声明；test:sdk仅检查现有dist，不安装依赖、不启动服务。不运行浏览器，也不代表真实数据服务已验收。
 
-```sh
-npm install ./spring-and-autumn-gis-0.1.0.tgz three@0.182.0
-# TypeScript项目还需要Three的类型声明
-npm install -D @types/three@0.182.0
+- dist/spring-and-autumn-gis.es.js：ES6库。
+- dist/spring-and-autumn-gis.umd.cjs：CommonJS兼容入口。
+- dist/index.d.ts及各模块声明：TypeScript接口。
+- 引擎dist不是网站，没有交互index.html。
+
+发布可使用npm pack（prepack构建），或构建后npm pack --ignore-scripts。安装包只包含dist、公共文档及npm附带的包描述/许可/README；不带src、交互项目、token.json、全国数据或自有服务资源。Three为peer dependency。未发布npm registry。
+
+## 2. 在实际独立项目消费
+
+```bat
+cd /d E:\0-SpringGISNet
+npm run sdk:update
+npm run dev
 ```
+
+sdk:update将引擎**当前已生成的dist**打成vendor安装包并安装，不构建引擎、不读源码模块、不建立源码目录链接。引擎目录可用SDK_ENGINE_DIR指定；正常dev/build/preview不调用sdk:update，也不依赖引擎仓库仍然存在。
+
+默认开发地址由应用config/pc.env.json决定，当前为5173：
+
+- /：现有Vue站点，引擎区域嵌入交互页。
+- /sdk.html：TypeScript消费。
+- /sdk-js.html：JavaScript ES6消费。
+
+两种消费源码都使用 `import { Viewer } from 'spring-and-autumn-gis'`。JS文件为实际ES模块，不是让浏览器执行TS。详见独立项目的SDK接入说明.md。
+
+应用生产构建/预览：
+
+```bat
+cd /d E:\0-SpringGISNet
+npm run build
+npm run preview
+```
+
+默认preview端口4173。直接服务应用dist；不重新打包引擎、不生成临时项目。静态服务器部署整个应用dist（HTML和assets一起），而不是把引擎库文件当HTML页面打开。Vite仅为应用开发/预览工具，不是SDK运行时必须部署的服务器。
+
+## 3. Viewer最小用法
 
 ```js
-import { Viewer, TerrainRgbProvider } from 'spring-and-autumn-gis';
+import { Viewer } from 'spring-and-autumn-gis';
 
 async function main() {
   const viewer = await Viewer.create('map', {
     basemaps: [
-      { id: 'satellite', type: 'xyz', url: '/tiles/{z}/{x}/{y}.png',
+      { id: 'image', type: 'xyz', url: '/tiles/{z}/{x}/{y}.png',
         scheme: 'xyz', maxLevel: 20, levelOffset: -1.7 },
-      { id: 'vector', type: 'vector-style', style: '/styles/my-style.json', symbols: true }
+      { id: 'vector', type: 'vector-style', style: '/styles/map.json', symbols: true }
     ],
-    baseMap: 'satellite',
-    terrain: {
-      provider: new TerrainRgbProvider({ id: 'dem', urlTemplates: ['/dem/{z}/{x}/{y}.png'] }),
-      enabled: false
-    },
+    baseMap: 'image',
+    terrain: false,
     showLodGrid: false,
-    initialView: { longitude: 106.49, latitude: 29.63, altitude: 12000 }
+    initialView: { longitude: 106.55, latitude: 29.61, altitude: 12000 }
   });
-
   await viewer.setBaseMap('vector');
-  viewer.setTerrainEnabled(true);
   viewer.setLodGridVisible(true);
-  viewer.flyTo({ longitude: 106.55, latitude: 29.61, altitude: 1500, duration: 500 });
-  // 页面卸载/组件销毁时调用；重复调用安全。
-  // viewer.destroy();
+  viewer.flyTo({ longitude: 106.55, latitude: 29.61, altitude: 2000, pitch: -45, duration: 700 });
+  // 页面/组件退出时viewer.destroy()，不是初始化后立即销毁。
   return viewer;
 }
 main().catch(console.error);
 ```
 
-容器必须是有尺寸的HTMLElement，例如`<div id="map" style="width:100%;height:600px"></div>`。模板中的地址由应用部署，不是包内默认服务；数据、Style、token和跨域授权由应用提供。演示En/Enlabel/全国行政区数据不再随SDK打包。
+容器必须有尺寸。地址由应用提供。create和setBaseMap表示配置就绪，不表示所有瓦片已经加载。普通交互页不自动销毁地图；自动回归才进行销毁/重建验证。
 
-## 初始化参数与行为
+## 4. 公共接口与边界
 
-| 参数 | 行为 |
-| --- | --- |
-| container | DOM元素或元素id；无DOM/不存在元素明确报错 |
-| basemaps | 独立底图清单，id非空且唯一 |
-| baseMap | 缺省选择清单第一项；null为无底图；未知id报错 |
-| terrain | false/缺省不配置DEM；或{provider, enabled}，enabled缺省true |
-| showLodGrid | 缺省false；隐藏时跳过经纬网更新，不关闭地图LOD选择 |
-| autoStart | 缺省true；false只创建配置，调用start后开始渲染 |
-| signal | 可取消create中的配置加载；create完成后不再控制Viewer生命周期 |
-| initialView | WGS84度与椭球高度米；纬度有效、数值有限、高度非负 |
-| lod/raster/terrainLayer/navigation/onStats/onFramePerformance | 沿用低层GlobeEngine配置，详见类型声明 |
+- Viewer.create：DOM/id容器，basemaps、baseMap、terrain、showLodGrid、autoStart、signal、initialView及低层LOD/导航/回调配置。默认第一底图，baseMap:null为无底图，showLodGrid默认false。
+- setBaseMap(id|null)：XYZ/TMS、借用RasterTileProvider、Style v8 GPU矢量统一切换，保留业务图层。配置失败保留原底图；被新请求取代的旧请求抛ABORTED。
+- setTerrainEnabled：需初始化时配置DEM Provider。初始enabled:false不请求DEM；不支持运行中替换DEM Provider。
+- setLodGridVisible：隐藏经纬网，不关闭地图LOD；隐藏时跳过网格更新。
+- flyTo、getCameraViewState：WGS84角度与高度米，pitch -90俯视、0水平，duration毫秒。
+- start、stop、destroy：stop暂停渲染但不承诺取消所有在途任务；destroy幂等，销毁后变更拒绝。
+- baseMap、terrainEnabled、lodGridVisible、isDestroyed、getBaseMaps：状态/配置快照。
+- engine：低层扩展入口，可复用GeoJsonLayer等，不要直接破坏SDK持有的base图层或__sdk_base_labels。
+- ViewerError.code：INVALID_OPTIONS、BASEMAP_LOAD_FAILED、ABORTED、TERRAIN_UNAVAILABLE、DESTROYED。公共加载错误不回显后端凭据URL；浏览器WebGL构造错误可能直接抛出。
 
-create成功表示配置已加载、对象可用，不表示视口内所有瓦片已下载/上传。实际进度通过onStats观察；底图配置加载失败与后续瓦片错误是不同阶段。
+内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。GeoJSON面目前为边界，不冒充填充面。entities、交互绘制、独立地形LOD尚未实现。
 
-地形初始关闭时首帧不请求DEM；之后setTerrainEnabled(true)复用已配置provider。没有配置provider时开启会抛TERRAIN_UNAVAILABLE。本阶段不支持Viewer运行中更换DEM provider。
+## 5. 用户资源与凭据
 
-## 底图定义
+独立应用要求用户填写自己的token.json，缺少底图/DEM不启动普通地图；HTTP页面仍可显示配置提示。这是交互应用的约束，Viewer库本身仍允许不配置地形。
 
-- `type: 'xyz'`：url必须含{z}/{x}及{y}或{-y}，支持minLevel/maxLevel/levelOffset/attribution。scheme='tms'将{y}转换成{-y}；显式{-y}不会再反转一次。只改变请求行号，不改变纹理或几何南北方向。
-- `type: 'provider'`：传入现有RasterTileProvider，可接入自行初始化的WMTS等。Viewer不调用借用provider的dispose；调用方管理其生命周期。每瓦片返回纹理由引擎层管理。
-- `type: 'vector-style'`：style为Style v8对象或URL，支持sourceId、levelOffset、symbols及fetcher。使用现有GPU地表制图管线，不是Canvas兜底。symbols缺省true，独立有界注记通道order=10000；仍然是现有样式/点注记子集，不支持所有MapLibre特性。能力报告位于viewer.baseMap.capabilities。URL内部的相对资源保持现有加载器语义，建议应用提供可解析的绝对/同源资源地址。
+独立应用不再import token.json，不把Key嵌入JS。开发/preview通过应用自身的同源/token.json接口返回允许公开的配置，服务端字段剔除；build不自动发布配置。静态部署时显式运行应用npm run config:deploy，或部署自己管理的授权网关/配置。
 
-setBaseMap(id)等待样式/能力/注记配置准备好后提交；最后一次有效请求生效，被取代请求抛ABORTED，配置失败保留原底图。不同类型均走同一入口，业务图层不删除。setBaseMap(null)移除底图。交接保证的是配置一致性，不是全视口高清纹理就绪；新底图瓦片可能先显示占位/祖先，瓦片网络失败不自动回滚配置。
+发布只提供token.example.json、公开服务说明与资源申请教程。不分享维护者Key，不把OSM或云平台资源当成无限免费兜底。浏览器配置是公开数据，不是加密文件，只能放限制域名/权限/配额的客户端Key；服务端Secret必须留在后端。当前本机天地图曾返回429，不宣称真实服务权限/配额已验收成功。
 
-异步切换需捕获Promise错误，尤其快速点击时的ABORTED。取消会释放Viewer拥有的GPU provider与注记资源；custom fetcher也应尊重传入signal。底图已提交后，每次瓦片fetch仍合并其请求signal，不会丢失逐瓦片取消。
+## 6. 验证职责
 
-## 方法与错误
-
-`setBaseMap`、`setTerrainEnabled`、`setLodGridVisible`、`flyTo`、`getCameraViewState`、`start`、`stop`、`destroy`均已实现。
-
-只读状态：`baseMap`（id/type/capabilities）、`terrainEnabled`、`lodGridVisible`、`isDestroyed`。`getBaseMaps()`返回清单快照。`engine`保留低层逃生口，可复用现有图层API；不要直接操作SDK的base图层或保留名称`__sdk_base_labels`，否则破坏其生命周期约束。
-
-ViewerError带code：INVALID_OPTIONS、BASEMAP_LOAD_FAILED、ABORTED、TERRAIN_UNAVAILABLE、DESTROYED。公共加载错误不复制后端URL/token-bearing消息。destroy幂等；销毁后的变更/相机/启动调用拒绝。创建失败和取消清理已创建Viewer；底层WebGL/浏览器构造失败可能直接抛浏览器错误。
-
-## 直接浏览器模块与CommonJS
-
-ESM产物外置Three.js，不能把ES文件作为零依赖脚本直接丢进页面。无构建工具时需同时部署Three模块，并配置import map：
-
-```html
-<script type="importmap">
-{"imports":{"three":"/vendor/three.module.js","three/webgpu":"/vendor/three.webgpu.js"}}
-</script>
-<script type="module">
-import { Viewer } from '/sdk/spring-and-autumn-gis.es.js';
-// 按上面的配置调用Viewer.create(...)
-</script>
-```
-
-Three 0.182模块的相对依赖文件也需按原目录部署，推荐npm+应用构建工具。此路径的原生浏览器import-map部署尚未单独验收，已验收的是tgz安装后的ESM消费。
-
-CommonJS入口改为.umd.cjs，`require('spring-and-autumn-gis')`导出已在独立安装中检查；Viewer本身仍需要浏览器DOM/WebGL，不是Node无头渲染器。旧手工引用.umd.js文件者需调整路径。
-
-Worker由库构建内联；生产页面需要现代浏览器、WebGL及相应Worker/blob CSP许可。Worker被CSP禁用不在本阶段成功启动承诺内；可通过引擎provider诊断查看实际Worker状态。不得把本仓库开发代理当作生产跨域解决方案。
-
-## 消费验收
-
-```sh
-npm test
-npm run typecheck
-npm run test:sdk
-```
-
-test:sdk自动构建打包、检查无demo数据泄露、将tgz安装到临时独立项目，进行严格TS检查(skipLibCheck=false)、生产Vite构建及Chrome浏览器运行，并检查真实矢量Worker、初始化/开关、XYZ/TMS、切换失败/竞争和销毁。还检查CommonJS导出。模板位于examples/sdk-consumer，只import安装包，不引用src或demo。它是验收fixture，内含自造瓦片/DEM/PBF，不是实际业务数据示例。
-
-测试产物保留在输出的临时目录供检查；未执行npm publish或更改版本号。B阶段entities/点线面、C阶段交互绘制仍待实现。
+- 引擎：npm test、npm run typecheck、npm run test:sdk；保持原有渲染回归。
+- 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、Worker、资源隔离与销毁重建。
+- SDK源码更新后显式build和sdk:update；日常应用启动只npm run dev或preview。
+- 历史examples/sdk-consumer仅是旧测试资料，不再随包发布，也不是日常交互入口；以独立应用为准。

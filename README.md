@@ -4,7 +4,7 @@
 
 2026-10-08新增`Viewer.create(container, options)`，支持统一XYZ/TMS/provider/Style v8底图选择与异步切换、首帧地形开关、LOD经纬网显隐及幂等销毁。低层GlobeEngine保留。用`npm pack`生成安装包，再在外部项目以ES模块import；目前未发布registry，点线面entities仍属阶段B，不要照计划文档当成已实现API。
 
-完整接口、安装与行为边界见[SDK使用说明](./SDK使用说明.md)。独立消费验收运行`npm run test:sdk`，示例/fixture见examples/sdk-consumer。
+完整接口、安装与行为边界见[SDK使用说明](./SDK使用说明.md)。本仓库只构建dist与验证库输出，`npm run test:sdk`不再安装临时消费者或启动服务。独立交互放在`E:\0-SpringGISNet`，以已安装SDK依赖提供TS/JS两种消费页面；普通使用只需该应用`npm run dev`或`npm run build && npm run preview`，不再用引擎demo:sdk启动。
 
 从底层重构中的轻量 3D GIS 内核。当前实现 **WGS84 三维经纬网 LOD**、可替换的 Web Mercator 影像/矢量瓦片以及 Terrain-RGB 只读地形。
 

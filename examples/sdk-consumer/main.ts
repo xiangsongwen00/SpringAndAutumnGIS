@@ -3,6 +3,8 @@ import { Viewer, ViewerError, GeoJsonLayer, Ellipsoid, type MapStyle, type Terra
 import * as THREE from 'three';
 
 const result = document.getElementById('result')!;
+result.dataset.status = 'running';
+result.textContent = 'RUNNING: 正在检查安装包初始化、底图切换、Worker 与销毁，请等待 PASS / FAIL。';
 function check(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message); }
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(test: () => boolean) {
@@ -108,6 +110,9 @@ try {
   result.textContent = 'PASS: installed ESM SDK initialization, switches, latest-wins/failure, XYZ/TMS, real Worker, terrain/grid and lifecycle';
   result.dataset.status = 'passed';
 } catch (error) { result.textContent = `FAIL: ${error instanceof Error ? error.stack : error}`; result.dataset.status = 'failed'; }
-finally { viewer?.destroy(); }
+finally {
+  viewer?.destroy();
+
+}
 }
 void run();
