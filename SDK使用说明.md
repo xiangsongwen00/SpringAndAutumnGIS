@@ -89,7 +89,111 @@ main().catch(console.error);
 - engine：低层扩展入口，可复用GeoJsonLayer等，不要直接破坏SDK持有的base图层或__sdk_base_labels。
 - ViewerError.code：INVALID_OPTIONS、BASEMAP_LOAD_FAILED、ABORTED、TERRAIN_UNAVAILABLE、DESTROYED。公共加载错误不回显后端凭据URL；浏览器WebGL构造错误可能直接抛出。
 
-内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。GeoJSON面目前为边界，不冒充填充面。entities、交互绘制、独立地形LOD尚未实现。
+内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。旧GeoJsonLayer的面仍仅为边界；2026-10-09起新增entities填充面与标注，见下一节。完整鼠标线面绘制与独立地形LOD尚未实现。
+
+## 4.1 B版：点线面与标注对象
+
+推荐使用 `viewer.entities`。四种type：point、polyline、polygon、label；任何几何也可附属label。底图切换保留这些业务对象，不与底图清单混用。无需通过engine手动增加GeoJSON图层。
+
+```js
+viewer.entities.add({
+  id: 'station', type: 'point', name: '业务站点',
+  position: [106.55, 29.61, 1500], properties: { category: 'station' },
+  symbol: { shape: 'diamond', size: 22, color: '#ffd166', outlineColor: '#ffffff', outlineWidth: 2 },
+  label: { text: '业务站点', fontSize: 18, color: '#ffffff', haloColor: '#173342', offset: [0, -30] }
+});
+viewer.entities.add({
+  id: 'route', type: 'polyline',
+  positions: [[106.52,29.60,1500], [106.55,29.61,1500], [106.59,29.62,1500]],
+  symbol: { color: '#4bdcff', width: 5, opacity: 1, dash: [12, 6] }
+});
+viewer.entities.add({
+  id: 'area', type: 'polygon',
+  positions: [[106.51,29.63,1500], [106.57,29.63,1500], [106.57,29.67,1500], [106.51,29.67,1500]],
+  holes: [[[106.53,29.64,1500], [106.55,29.64,1500], [106.55,29.66,1500], [106.53,29.66,1500]]],
+  symbol: { fill: true, color: '#27e7a4', opacity: 0.5, outlineColor: '#ffffff', outlineWidth: 2 }
+});
+viewer.entities.add({ id: 'note', type: 'label', position: [106.58,29.65,1500],
+  label: { text: '独立标注', fontSize: 18, backgroundColor: '#173342', padding: 5, offset: [0,0] } });
+
+const station = viewer.entities.getById('station'); // 深度只读快照；查不到返回undefined
+const stations = viewer.entities.query({ type: 'point', properties: { category: 'station' } });
+viewer.entities.update('station', { symbol: { color: '#ff0066', size: 28 }, label: { text: '修改后的标注' } });
+viewer.entities.move('station', { longitude: 0.01, latitude: 0, height: 100 });
+viewer.entities.setVisibleById('station', false);
+viewer.entities.setVisible(false); // 整个集合隐藏，保留各对象自己的visible标志
+viewer.entities.setVisible(true);
+viewer.entities.update('area', { symbol: { fill: false } });
+viewer.entities.update('station', { label: null }); // 仅移除附属标注
+const unsubscribe = viewer.entities.onChange(change => console.log(change.type, change.id));
+viewer.entities.remove('route');
+unsubscribe();
+// viewer.entities.clear(); // 删除全部业务对象，不影响底图
+```
+
+| 接口 | 契约 |
+| --- | --- |
+| add(definition) | id必填且唯一，返回EntitySnapshot；不修改调用方的输入 |
+| getById(id)、has(id)、values、length | 按ID/全量读取；values和对象属性均为冻结快照，不能直接赋值修改 |
+| query({type,visible,name,properties,bounds}) | 条件AND；properties浅层精确值匹配，适合字符串/数值字段；bounds按几何首顶点/点位置查询，不是面相交查询，west>east支持跨日界线 |
+| update(id,patch) | id/type不可变；symbol、label字段合并，position/positions/holes数组替换，properties整体替换；返回新快照，失败不改旧对象 |
+| move(id,{longitude,latitude,height}) | 度／米增量；面和洞一起移动，经度归一化；不是ECEF刚体变换，越界纬度拒绝 |
+| setVisibleById(id,bool)、setVisible(bool)、visible | 单对象／集合显隐；隐藏不释放资源，不被pick选中；元数据／显隐更新不重建几何 |
+| remove(id)、clear() | 删除释放对象GPU资源；remove不存在ID返回false；clear不销毁集合 |
+| onChange(listener) | add/update/remove/clear/visibility，update带fields；返回取消订阅函数，观察者异常不打断其他订阅者 |
+| viewer.pick({x,y},{tolerance}) | canvas左上角为原点的CSS像素；返回最上层命中对象快照或null，默认容差6px |
+| viewer.pickPosition({x,y}) | 仅参考椭球交点；天空／画布外返回null，不是地形/模型深度拾取 |
+
+示例点击查询：从event.clientX/clientY减去canvas.getBoundingClientRect()的left/top再传给pick，不乘devicePixelRatio。应用自行区分点击和导航拖动，独立demo已实现这一判断，并提供可选“单击新增点”。这不是C阶段的多点绘制、预览、撤销状态机。
+
+符号与高度边界：
+
+- 坐标WGS84度、第三维为椭球绝对高度米，省略时30米。默认30米是无地形时的显示抬高，不是采样地形。显式0仍为0；开地形不会自动抬高或贴地，低于山体会被遮挡。此版深度测试始终开启，没有用关闭深度伪装贴地。
+- 点circle/square/diamond或URL图标，size/outlineWidth为CSS像素；宽线为GPU屏幕挤出，不依赖原生WebGL线宽。线端为butt，连接仍为简化效果，不是完整制图级join/cap；纹理与虚线按可见路径屏幕长度累计。图标/流动纹理见§4.2；不支持自定义字体资源或建筑拉伸。
+- polygon是真实填充，支持凹外环、洞和轮廓；fill:false仅轮廓。闭合末点可省略；自交、相交/触碰环、洞在外部、嵌套洞、零面积拒绝。局部面经纬各跨度最多1度，支持局部跨日界线；区域/全国面优先使用已有瓦片图层。显式0高度和很长线段/复杂面仍可能受曲率及细分预算影响，不承诺任意全球曲面贴合精度。
+- 颜色CSS命名色或3/6位hex，透明度用opacity；尺寸/坐标输入、符号字段、几何规模均校验。EntityError.code为INVALID_ENTITY/DUPLICATE_ID/NOT_FOUND/DESTROYED，不能混同ViewerError。
+- 标注是GPU屏幕朝向文字，可配颜色、光晕、背景、字号、offset；offset正x向右、正y向下。几何附属标注锚在首顶点；需要另一个锚点时使用独立label对象。文字最多512字符，显示最多8行、宽度1024CSS px（超出裁切）；使用系统sans-serif，不是完整glyph/sprite/symbol-style兼容系统。
+- 标注有画布/椭球遮挡裁剪、32px网格碰撞及最多256个可见限制，高order优先占位；物理地形遮挡仍交给GPU。业务order范围0..9000，底图引擎注记仍在上层。pick使用屏幕几何与椭球遮挡，不读取地形深度，山体遮住的对象仍可能被几何拾取；精确地形拾取待后续地表快照接口。
+- 默认最多5000对象、单几何10000输入点，线细分有界，面有曲率细分和规模限制；这是可编辑业务对象系统，不承诺数万密集对象60FPS。只重建脏对象，每帧最多8个/2ms软预算；一个任务不能被预算中途抢占。样式/几何跨帧生效，更新期间保留旧显示；remove/隐藏立即影响显示与拾取。
+- destroy释放集合、材质、纹理、几何和订阅；之后集合读写拒绝。不要手动移除__sdk_entities或调用其dispose后继续使用Viewer的entities。EntityCollection单独导出便于无WebGL管理/测试；EntityLayer是低层适配器。
+
+## 4.2 图标朝向、线方向纹理和面滚动材质
+
+用户提供两张示例PNG已放入独立应用public：`mylocation_up.png`本来向上（sourceHeading:0），`Qianjin_left.png`本来向左（270度、sourceDirection:left）。引擎dist/tgz不携带这些图片；任何消费者自行部署自己的图片URL。图片不是底图或业务瓦片，不能按XYZ/TMS再翻转。
+
+```js
+viewer.entities.add({ id: 'person', type: 'point', position: [106.55,29.61,1500],
+  symbol: { icon: { url: './mylocation_up.png', width: 36, height: 36, sourceHeading: 0 },
+    heading: 0, alignment: 'map', color: '#ffffff', opacity: 1 } });
+viewer.entities.update('person', { symbol: { heading: 90 } }); // 朝东，不再下载图片/重建几何
+
+viewer.entities.add({ id: 'flow-route', type: 'polyline',
+  positions: [[106.52,29.60,1500], [106.55,29.61,1500], [106.59,29.62,1500]],
+  symbol: { width: 24, color: '#ffffff', opacity: 0.9,
+    texture: { url: './Qianjin_left.png', sourceDirection: 'left', length: 48, speed: 30 } } });
+
+viewer.entities.add({ id: 'moving-area', type: 'polygon',
+  positions: [[106.51,29.63,1500], [106.57,29.63,1500], [106.57,29.67,1500], [106.51,29.67,1500]],
+  symbol: { fill: true, color: '#ffffff', opacity: 0.5, outlineColor: '#ffffff', outlineWidth: 2,
+    texture: { url: './Qianjin_left.png', repeat: [8,4], offset: [0,0], rotation: 0, speed: [-0.15,0] } } });
+
+viewer.entities.update('flow-route', { symbol: { texture: {
+  url: './Qianjin_left.png', sourceDirection: 'left', length: 48, speed: 0 } } }); // 停止流动
+viewer.entities.update('person', { symbol: { icon: null } }); // 退回简单点符号
+viewer.entities.update('moving-area', { symbol: { texture: null } }); // 退回纯色填充
+const resource = viewer.getEntityResourceState('person'); // none/pending/loading/ready/error；不存在返回null
+viewer.retryEntityResources('person'); // 显式重试失败图片或纹理预算受限标注，返回是否排入重试
+```
+
+朝向与动画契约：
+
+- heading顺时针度数。alignment:map（默认）以当前位置投影的地理北为0，地图旋转时图标随地理北变化；screen以屏幕上方为0。sourceHeading表示原素材方向，最终旋转为目标朝向减原朝向，再加地图北向；原向左图标若要朝北，sourceHeading设270而非修改PNG。宽高为CSS像素，省略用size，图标默认32px。
+- 线width必须大于0才制作条带；图片沿positions方向排列。sourceDirection:left把向左素材校正为沿坐标顺序向前，right为原素材向右。length是沿路径的重复周期CSS像素，speed为CSS像素/秒，正数沿坐标顺序、负数反向、0静止。虚线和箭头使用累计屏幕长度，相机姿态变化时更新长度属性，静止不重算；连接处仍不是完整制图级圆角/斜接。
+- 面纹理UV由局部经纬包围盒归一化；repeat为重复次数，offset为初始UV偏移，rotation为顺时针纹理旋转度数，speed为纹理坐标轴上的平移UV/秒。rotation:0时U向东、V向北，向左箭头配负U流速显示向西移动。旋转后运动轴一起旋转；不是世界米/秒，也不是按地形坡面面积等距铺图。
+- color乘到纹理上，保留原图片颜色用白色；opacity与图片alpha共同生效，面孔洞仍为空。图标和纹理可动态修改/移除；symbol浅层合并，但icon/texture描述整体替换，修改纹理speed时请保留url等字段。
+- PNG/JPEG/WebP，远程图片需要CORS；支持相对/HTTP(S)/blob及对应base64 data URL。不支持任意脚本URL。加载最多4并发、256个ready/loading共享图片，单图片≤8MiB且≤2048×2048；15秒超时，不影响地图瓦片队列。图片与文字纹理共同受64MiB估算RGBA上传预算约束（不含解码临时内存）；预算不足时可暂停新符号纹理/文字并报告error，不无限扩张显存。超限制/404/CORS失败暂显示简单几何，不冒充纹理已经就绪；公共状态不回显带凭据URL。修复服务或释放其他对象后调用retryEntityResources显式重试，不自动无限重试坏URL。
+- 按URL共享引用，样式更新先取得新引用再释放旧显示；最后一个使用者删除后取消请求、关闭ImageBitmap并释放GPU纹理。迟到图片不会覆盖已删除或新建对象。GPU上传前ImageBitmap显式翻转一次，方向回归覆盖上/下和顺时针旋转；这不改变底图XYZ/TMS约束。
+- 流动动画每帧仅修改相位/UV偏移uniform，不重建网格、标注或重复下载。stop暂停渲染，动画时间当前为实例墙钟，恢复时相位会追上当前时间；尚未提供暂停时间轴或动画完成事件。
 
 ## 5. 用户资源与凭据
 
@@ -101,7 +205,7 @@ main().catch(console.error);
 
 ## 6. 验证职责
 
-- 引擎：npm test、npm run typecheck、npm run test:sdk；保持原有渲染回归。
-- 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、Worker、资源隔离与销毁重建。
+- 引擎：npm test、npm run typecheck、npm run test:sdk、npm run test:entities；保持原有渲染回归。
+- 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、真实GPU填充/洞/文字/图标方向/线面滚动/透明度、资源隔离与销毁重建。
 - SDK源码更新后显式build和sdk:update；日常应用启动只npm run dev或preview。
 - 历史examples/sdk-consumer仅是旧测试资料，不再随包发布，也不是日常交互入口；以独立应用为准。

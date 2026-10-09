@@ -209,6 +209,8 @@ export class GlobeCameraController {
     const duration = Math.max(0, options.duration ?? 1800);
     this.resetVelocities();
     if (duration === 0) {
+      // An immediate newer destination must supersede a still-running flight.
+      this.cancelAnimation();
       this.camera.position.copy(destination.position);
       this.camera.quaternion.copy(destination.quaternion);
       this.camera.up.copy(destination.up);

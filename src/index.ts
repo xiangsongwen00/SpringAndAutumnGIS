@@ -176,6 +176,11 @@ export type {
 
 export { GlobeEngine } from './engine/GlobeEngine';
 export { Viewer, ViewerError } from './sdk/Viewer';
+export { EntityCollection, EntityError } from './sdk/EntityCollection';
+export { EntityLayer } from './render/EntityLayer';
+export type { EntityDefinition, EntitySnapshot, EntityPosition, EntityPatch, EntityMove, EntityQuery, EntityChange,
+  EntityPickOptions, ScreenPosition, PointSymbol, LineSymbol, PolygonSymbol, LabelSymbol } from './sdk/EntityTypes';
+export type { PointIcon, LineTexture, PolygonTexture, EntityResourceState } from './sdk/EntityTypes';
 export type { ViewerOptions, BaseMapDefinition, BaseMapState, ViewerErrorCode } from './sdk/Viewer';
 export type {
   GlobeEngineOptions,
@@ -183,6 +188,7 @@ export type {
   GlobeFramePerformance,
   GlobeNavigationOptions
 } from './engine/GlobeEngine';
+export type { GlobeSceneLayer } from './engine/GlobeEngine';
 export { GlobeCameraController } from './engine/GlobeCameraController';
 export type {
   GlobeCameraViewState,

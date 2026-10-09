@@ -45,6 +45,13 @@ export type GlobeEngineStats = GlobeLodStats & Readonly<{
   performance: GlobeFramePerformance;
 }>;
 
+/** A disposable scene overlay, independent of the tile/terrain LOD pipeline. */
+export interface GlobeSceneLayer {
+  readonly object3d: THREE.Object3D;
+  update(camera: THREE.PerspectiveCamera, width: number, height: number): void;
+  dispose(): void;
+}
+
 export type GlobeNavigationOptions = {
   /** Maximum orbit speed used at global scale. */
   rotateSpeed?: number;
@@ -138,6 +145,7 @@ export class GlobeEngine {
   private readonly imageryLayers = new Map<string, RasterTileLayer>();
   private readonly featureLayers = new Map<string, GeoJsonLayer>();
   private readonly vectorLayers = new Map<string, MvtVectorLayer>();
+  private readonly sceneLayers = new Map<string, GlobeSceneLayer>();
   private readonly imageryLayerOptions: RasterTileLayerOptions;
 
   private readonly onContextLost = (event: Event): void => {
@@ -369,6 +377,9 @@ export class GlobeEngine {
           layer.update(selection.tiles, cameraLevel, this.camera, viewportWidth, viewportHeight);
         }
       }
+      for (const layer of this.sceneLayers.values()) {
+        if (layer.object3d.visible) layer.update(this.camera, viewportWidth, viewportHeight);
+      }
       if (this.grid.object3d.visible) this.grid.update(selection.tiles, this.camera.position);
       const renderStartedAt = performance.now();
       this.gpuTimer.begin();
@@ -406,6 +417,8 @@ export class GlobeEngine {
     this.featureLayers.clear();
     for (const layer of this.vectorLayers.values()) layer.dispose();
     this.vectorLayers.clear();
+    for (const layer of this.sceneLayers.values()) { this.scene.remove(layer.object3d); layer.dispose(); }
+    this.sceneLayers.clear();
     this.terrain?.dispose();
     this.grid.dispose();
     this.scene.traverse((object) => {
@@ -499,6 +512,17 @@ export class GlobeEngine {
 
   getFeatureLayer(id: string): GeoJsonLayer | undefined {
     return this.featureLayers.get(id);
+  }
+
+  addSceneLayer(id: string, layer: GlobeSceneLayer): void {
+    if (this.disposed) throw new Error('GlobeEngine has been disposed.');
+    if (this.sceneLayers.has(id)) throw new Error('Scene layer id already exists.');
+    this.sceneLayers.set(id, layer); this.scene.add(layer.object3d);
+  }
+
+  removeSceneLayer(id: string): boolean {
+    const layer = this.sceneLayers.get(id); if (!layer) return false;
+    this.scene.remove(layer.object3d); layer.dispose(); this.sceneLayers.delete(id); return true;
   }
 
   addVectorLayer(id: string, layer: MvtVectorLayer): MvtVectorLayer {

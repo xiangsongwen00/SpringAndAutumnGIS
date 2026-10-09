@@ -1,6 +1,10 @@
 # SDK首版接口与开发计划
 
-日期：2026-10-02。状态：评估与待实施计划，不是已发布API。独立地形LOD本阶段搁置，保留现有渲染/影像连续性策略。
+日期：2026-10-02初始计划，2026-10-09更新。状态：A+B初版已实施，C仍待实施。独立地形LOD本阶段搁置，保留现有渲染/影像连续性策略。
+
+**B版当前实现：** viewer.entities统一管理point/polyline/polygon/label，支持add/getById/has/values/query/update/move/setVisibleById/setVisible/remove/clear/onChange。真实填充面与孔洞、屏幕像素宽线、屏幕朝向标注；viewer.pick选择对象，pickPosition仅参考椭球。公共字段是symbol、positions、holes，不是本页早期草案的style/rings；省略高度现为30米以帮助无地形时显示，仍是绝对高度而非贴地。具体运行示例、限制和错误码以[SDK使用说明§4.1](SDK使用说明.md#41-b版点线面与标注对象)及dist类型声明为准。下文保留早期评估供追溯，不将过时示意代码当作现行API。
+
+2026-10-09验收范围：引擎原有影像/地形/矢量/XYZ-TMS回归、实体不可变快照/管理/非法环/孔洞/释放，以及E:\0-SpringGISNet安装dist后的严格TS、JS同步、浏览器GPU像素、控件及资源数量回归。使用合成测试避免压测真实服务；不以软件GPU测试宣称生产60FPS。未修改版本号、未发布npm，暂保持0.1.0本地候选。
 
 2026-10-08进展：A已实现Viewer公共入口、初始化/开关、统一底图切换与安装包消费流程，实际用法以[SDK使用说明](SDK使用说明.md)和类型声明为准。本页后续接口仍含B/C待实现项（尤其entities），不能当作全部已可执行示例。独立tgz安装的严格TS/生产构建、真实Worker与浏览器生命周期验收通过；未发布npm registry，版本暂保留0.1.0。
 

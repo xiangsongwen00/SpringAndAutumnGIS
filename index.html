@@ -20,7 +20,7 @@
         <small id="frame-time-value">-- ms</small>
       </div>
     </header>
-    <nav class="map-switcher" aria-label="图层管理">
+    <nav id="map-controls-anchor" class="map-switcher" aria-label="图层管理">
       <label class="source-picker">
         <span>底图</span>
         <select id="base-layer-select" aria-label="选择底图"></select>
@@ -34,6 +34,7 @@
       <button id="business-layer-control" type="button" aria-expanded="false" aria-controls="business-layer-panel">业务图层</button>
       <button id="business-layer-test" type="button">测试永远村</button>
       <button id="geojson-test" type="button">测试 GeoJSON</button>
+      <button id="entity-test" type="button" aria-expanded="false" aria-controls="entity-panel">测试点线面</button>
     </nav>
     <aside id="business-layer-panel" class="business-layer-panel" hidden aria-label="业务图层控制">
       <div class="business-layer-panel__header">
@@ -44,6 +45,36 @@
         <span id="business-layer-summary">0 个已启用</span>
       </div>
       <div id="business-layer-list" class="business-layer-list"></div>
+    </aside>
+    <aside id="entity-panel" class="entity-panel" hidden aria-label="点线面与标注测试">
+      <div class="entity-panel__header"><strong>点线面 · 图标 · 标注</strong><button id="entity-close" type="button" aria-label="关闭对象测试">关闭</button></div>
+      <p>复用当前地球，业务对象独立于底图。高度为椭球绝对米，示例1500米不是贴地；开地形时低于山体会被遮挡。</p>
+      <div class="entity-actions"><button id="entity-samples">全部示例</button><button id="entity-sample-point">测试点／人物</button><button id="entity-sample-line">测试流动线</button><button id="entity-sample-polygon">测试纹理面</button><button id="entity-sample-label">测试标注</button></div>
+      <label>选中对象<select id="entity-select"><option value="">未选中</option></select></label>
+      <label class="entity-check"><input id="entity-all-visible" type="checkbox" checked>整个对象集合显示</label>
+      <div class="entity-pair"><label>新增类型<select id="entity-type"><option value="point">点</option><option value="polyline">线</option><option value="polygon">面（可有洞）</option><option value="label">独立标注</option></select></label><label>ID（新增可留空）<input id="entity-id" placeholder="自动生成"></label></div>
+      <label>名称<input id="entity-name" value="业务对象"></label>
+      <div class="entity-pair"><label>经度<input id="entity-lon" type="number" value="106.55" step="0.001"></label><label>纬度<input id="entity-lat" type="number" value="29.61" step="0.001"></label><label>绝对高度／米<input id="entity-height" type="number" value="1500"></label><label>透明度<input id="entity-opacity" type="number" value="1" step="0.1" min="0" max="1"></label></div>
+      <div class="entity-pair"><label>颜色／纹理乘色<input id="entity-color" type="color" value="#ffffff"></label><label>轮廓／文字光晕<input id="entity-outline" type="color" value="#173342"></label><label>点大小／px<input id="entity-size" type="number" value="36" min="1" max="256"></label><label>线宽／面轮廓宽<input id="entity-width" type="number" value="3" min="0" max="64"></label></div>
+      <label>点形状<select id="entity-shape"><option value="circle">圆</option><option value="square">方</option><option value="diamond">菱形</option></select></label>
+      <label class="entity-check"><input id="entity-fill" type="checkbox" checked>面填充</label>
+      <label>标注文字（空则移除附属标注）<input id="entity-text" value="业务标注"></label><label>文字字号<input id="entity-font" type="number" value="16" min="6" max="96"></label>
+      <details><summary>图标朝向／线面纹理／动画</summary>
+        <label class="entity-check"><input id="entity-icon-enabled" type="checkbox">点使用图片图标</label><label>点图标URL<input id="entity-icon-url" value="/mylocation_up.png"></label>
+        <div class="entity-pair"><label>目标朝向°<input id="entity-heading" type="number" value="0"></label><label>素材原朝向°<input id="entity-source-heading" type="number" value="0"></label></div>
+        <label>朝向参照<select id="entity-alignment"><option value="map">地理北</option><option value="screen">屏幕上方</option></select></label>
+        <label class="entity-check"><input id="entity-texture-enabled" type="checkbox">线／面使用纹理</label><label>纹理URL<input id="entity-texture-url" value="/Qianjin_left.png"></label>
+        <div class="entity-pair"><label>线重复周期／px<input id="entity-line-period" type="number" value="48"></label><label>线流速／px/s<input id="entity-line-speed" type="number" value="30"></label></div>
+        <label>线素材原方向<select id="entity-line-direction"><option value="left">向左（Qianjin_left）</option><option value="right">向右</option></select></label>
+        <div class="entity-pair"><label>面U重复<input id="entity-repeat-u" type="number" value="8" step="0.1"></label><label>面V重复<input id="entity-repeat-v" type="number" value="4" step="0.1"></label><label>面U流速／UV/s<input id="entity-speed-u" type="number" value="-0.15" step="0.05"></label><label>面V流速／UV/s<input id="entity-speed-v" type="number" value="0" step="0.05"></label></div>
+        <label>面纹理旋转°<input id="entity-texture-rotation" type="number" value="0"></label>
+        <p>人物素材原方向0°，向左素材270°／left。纹理乘色白色保留原色，speed=0停止动画；改完参数点击“更新选中”。</p>
+      </details>
+      <details><summary>几何与属性JSON</summary><p>线／面positions留空生成局部示例，非空替换坐标；holes是孔洞数组。局部面各轴跨度最多1度，非法自交或孔洞会报错。</p><label>positions<textarea id="entity-positions" rows="3" placeholder="[[经度,纬度,高度],…]"></textarea></label><label>holes<textarea id="entity-holes" rows="2" placeholder="[[[经度,纬度,高度],…]]"></textarea></label><label>properties<textarea id="entity-properties" rows="2">{}</textarea></label></details>
+      <div class="entity-actions"><button id="entity-add">新增对象</button><button id="entity-update">更新选中</button><button id="entity-focus">定位选中</button><button id="entity-toggle">选中显隐</button><button id="entity-remove">删除选中</button><button id="entity-clear">清空集合</button><button id="entity-retry">重试符号资源</button></div>
+      <details><summary>移动与查询</summary><div class="entity-pair"><label>Δ经度<input id="entity-dlon" type="number" value="0.01" step="0.001"></label><label>Δ纬度<input id="entity-dlat" type="number" value="0" step="0.001"></label></div><label>Δ高度／米<input id="entity-dheight" type="number" value="0"></label><button id="entity-move">移动选中</button><label>query JSON<textarea id="entity-query-json" rows="2">{}</textarea></label><button id="entity-query">查询集合</button></details>
+      <label class="entity-check"><input id="entity-click-add" type="checkbox">单击新增点（椭球交点，使用输入高度）</label>
+      <div id="entity-resource" class="entity-resource">0 个对象</div><div id="entity-message" role="status">点击示例按钮开始，点击地图可查询对象。</div><pre id="entity-output">尚未新增</pre>
     </aside>
     <label id="level-debug" class="level-debug">
       <span>底图数据层级偏移</span>

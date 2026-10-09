@@ -6,6 +6,11 @@ import type { MapStyle } from '../vector/style/VectorStyleTypes';
 import type { MapStyleCapabilityReport } from '../vector/style/MapStyleLoader';
 import type { TerrainProvider } from '../core/terrain/TerrainProvider';
 import type { GlobeFlyToOptions } from '../engine/GlobeCameraController';
+import * as THREE from 'three';
+import { EntityCollection } from './EntityCollection';
+import { EntityLayer } from '../render/EntityLayer';
+import type { EntitySnapshot, EntityPickOptions, ScreenPosition, EntityResourceState } from './EntityTypes';
+import type { Cartographic } from '../core/geo/Ellipsoid';
 
 export type BaseMapDefinition =
   | { id: string; type: 'xyz'; url: string; scheme?: 'xyz' | 'tms'; minLevel?: number;
@@ -37,6 +42,8 @@ const SYMBOL_LAYER = '__sdk_base_labels';
 /** Public browser SDK facade. create() means configuration ready, not tile loading complete. */
 export class Viewer {
   readonly engine: GlobeEngine;
+  readonly entities = new EntityCollection();
+  private readonly entityLayer: EntityLayer;
   private readonly definitions = new Map<string, BaseMapDefinition>();
   private current: PreparedBaseMap | null = null;
   private state: BaseMapState = { id: null, type: null, capabilities: null };
@@ -50,6 +57,8 @@ export class Viewer {
     this.engine = new GlobeEngine({ ...engineOptions, container, imagery: false,
       terrain: terrain ? terrain.provider : false, terrainEnabled: terrain ? terrain.enabled ?? true : false,
       grid: { ...engineOptions.grid, visible: showLodGrid } });
+    this.entityLayer = new EntityLayer(this.engine.ellipsoid, this.entities);
+    this.engine.addSceneLayer('__sdk_entities', this.entityLayer);
   }
 
   static async create(container: string | HTMLElement, options: ViewerOptions = {}): Promise<Viewer> {
@@ -139,12 +148,36 @@ export class Viewer {
   setLodGridVisible(visible: boolean): void { this.assertAlive(); this.engine.setLodGridVisible(visible); }
   flyTo(view: GlobeFlyToOptions): void { this.assertAlive(); this.engine.flyTo(view); }
   getCameraViewState() { this.assertAlive(); return this.engine.getCameraViewState(); }
+  /** CSS pixels relative to the canvas, not client coordinates or device pixels. */
+  pick(screen: ScreenPosition, options: EntityPickOptions = {}): EntitySnapshot | null {
+    this.assertAlive(); this.engine.camera.updateMatrixWorld();
+    return this.entityLayer.pick(screen, this.engine.camera, options);
+  }
+  getEntityResourceState(id:string):EntityResourceState|null { this.assertAlive(); return this.entityLayer.getResourceState(id); }
+  retryEntityResources(id:string):boolean { this.assertAlive(); return this.entityLayer.retryResources(id); }
+  /** Reference-ellipsoid intersection only. Not a terrain or model depth pick. */
+  pickPosition(screen: ScreenPosition): Cartographic | null {
+    this.assertAlive();
+    const rect = this.engine.renderer.domElement.getBoundingClientRect();
+    if (![screen.x, screen.y].every(Number.isFinite)) throw new ViewerError('INVALID_OPTIONS', 'Invalid screen position.');
+    if (!rect.width || !rect.height || screen.x < 0 || screen.y < 0 || screen.x > rect.width || screen.y > rect.height) return null;
+    this.engine.camera.updateMatrixWorld();
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(screen.x / rect.width * 2 - 1, 1 - screen.y / rect.height * 2), this.engine.camera);
+    const { origin, direction } = raycaster.ray, a = this.engine.ellipsoid.equatorialRadius, b = this.engine.ellipsoid.polarRadius;
+    const o = new THREE.Vector3(origin.x/a, origin.y/b, origin.z/a), d = new THREE.Vector3(direction.x/a, direction.y/b, direction.z/a);
+    const aa=d.lengthSq(), bb=2*o.dot(d), cc=o.lengthSq()-1, discriminant=bb*bb-4*aa*cc;
+    if (discriminant < 0) return null;
+    const near=(-bb-Math.sqrt(discriminant))/(2*aa), far=(-bb+Math.sqrt(discriminant))/(2*aa), t=near>=0 ? near : far;
+    if(t<0) return null;
+    return this.engine.coordinates.worldToGeodetic(origin.clone().addScaledVector(direction,t));
+  }
   start(): void { this.assertAlive(); this.engine.start(); }
   stop(): void { this.assertAlive(); this.engine.stop(); }
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true; this.generation++; this.controller?.abort(); this.controller = null;
-    this.engine.dispose(); this.current?.dispose(); this.current = null;
+    this.engine.dispose(); this.entities.dispose(); this.current?.dispose(); this.current = null;
   }
   private assertAlive(): void { if (this.destroyed) throw new ViewerError('DESTROYED', 'Viewer has been destroyed.'); }
 

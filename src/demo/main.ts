@@ -1,4 +1,5 @@
 import layerCatalogJson from '../../env.config.json';
+import { attachEntityPlayground } from './EntityPlayground';
 import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
@@ -9,6 +10,7 @@ import {
   GpuVectorTileProvider,
   MvtVectorLayer,
   TerrainRgbProvider,
+  UrlTemplateRasterProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
   type GlobeFramePerformance,
@@ -37,7 +39,8 @@ const layerCatalog = layerCatalogJson as unknown as LayerCatalogConfig;
 // Opt-in bounded samples for the dynamic browser audit, absent in normal use.
 const auditWindow = window as Window & { __terrainFrameAudit?: GlobeFramePerformance[]; __coldFrameAudit?: GlobeFramePerformance[];
   __motionSampling?: boolean; __coldSampling?: boolean };
-const localTokens = await loadTokenConfig();
+const entitySmoke = new URLSearchParams(window.location.search).get('entitySmoke') === '1';
+const localTokens = entitySmoke ? {} : await loadTokenConfig();
 const container = requiredElement<HTMLElement>('#globe');
 const selectedValue = requiredElement<HTMLElement>('#selected-value');
 const visitedValue = requiredElement<HTMLElement>('#visited-value');
@@ -107,7 +110,7 @@ let nativeBase: GpuVectorTileProvider | null = null;
 let nativeSymbols: MvtVectorLayer | null = null;
 try {
   layers.setRuntime(activeBaseLayer.id, { phase: 'loading', pending: 1 });
-  baseProvider = await registry.createRasterProviderAsync(
+  baseProvider = entitySmoke ? new UrlTemplateRasterProvider({urlTemplate:'/entity-smoke-unused/{z}/{x}/{y}.png'}) : await registry.createRasterProviderAsync(
     activeBaseLayer.kind === 'vector' ? 'google-satellite' : activeBaseLayer.sourceId,
     { levelOffset: activeBaseLayer.levelOffset }
   );
@@ -230,7 +233,7 @@ const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_UR
   geovisTerrainUrlFromToken(environmentValue(localTokens.geovis?.terrainToken));
 const mapTilerKey = environmentValue(import.meta.env.VITE_MAPTILER_KEY) ??
   environmentValue(localTokens.maptiler?.key);
-const terrain = terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
+const terrain = !entitySmoke && terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
   ? new TerrainRgbProvider({
       id: 'terrain-rgb-demo',
       urlTemplates: geovisTerrainUrl ? [geovisTerrainUrl] : undefined,
@@ -260,7 +263,7 @@ const engine = new GlobeEngine({
     ) : 0
   },
   grid: { subdivisions: 8, heightOffset: 0.3 },
-  imagery: baseProvider,
+  imagery: entitySmoke ? false : baseProvider,
   terrain,
   terrainLayer: {
     regionalCoverage: new URLSearchParams(window.location.search).get('terrainCoverage') === 'regional',
@@ -305,7 +308,7 @@ const engine = new GlobeEngine({
 });
 
 applyActiveLayerUi();
-if (activeBaseLayer.kind === 'vector') {
+if (!entitySmoke && activeBaseLayer.kind === 'vector') {
   try {
     nativeBase = await createNativeBase(activeBaseLayer);
     nativeSymbols = await createNativeSymbols(activeBaseLayer, nativeBase);
@@ -329,13 +332,14 @@ if (activeBaseLayer.kind === 'vector') {
 }
 engine.setTerrainEnabled(terrainEnabled);
 engine.start();
+const disposeEntityPlayground = attachEntityPlayground(engine);
 if (new URLSearchParams(window.location.search).has('pitch')) {
   engine.flyTo({ longitude: queryNumber('longitude', 105, -180, 180),
     latitude: queryNumber('latitude', 32, -85, 85),
     altitude: queryNumber('altitude', 8_600_000, 100, 100_000_000),
     heading: queryNumber('heading', 0, 0, 360), pitch: queryNumber('pitch', -90, -90, -0.1), duration: 0 });
 }
-void enableQueryBusinessLayers();
+if (!entitySmoke) void enableQueryBusinessLayers();
 
 let layerSwitchRevision = 0;
 baseLayerSelect.addEventListener('change', async () => {
@@ -496,6 +500,7 @@ geoJsonTest.addEventListener('click', async () => {
 
 window.addEventListener('pagehide', () => {
   cancelAnimationFrame(fpsAnimationFrame);
+  disposeEntityPlayground();
   engine.dispose();
 }, { once: true });
 
