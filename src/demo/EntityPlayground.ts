@@ -99,6 +99,7 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
   const unsubscribe=entities.onChange(refresh);
   bind('entity-test',()=>{if(panel.hidden){open(true);if(!entities.length)addSamples();}else open(false);});
   bind('entity-close',()=>open(false));bind('entity-samples',()=>addSamples());
+  bind('pick-debug',()=>{open(true);input('pick-diagnostics').checked=true;message('点击地表查看经纬度、高度、来源和回投误差；可勾选单击新增点。');});
   for(const type of ['point','polyline','polygon','label'] as const)bind(`entity-sample-${type==='polyline'?'line':type}`,()=>addSamples(type));
   bind('entity-select',loadForm,'change');
   bind('entity-add',()=>{
@@ -127,13 +128,14 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
     const start=pointer;pointer=undefined;if(!start||start.id!==event.pointerId||Math.hypot(start.x-event.clientX,start.y-event.clientY)>4||panel.hidden)return;
     try{
       const rect=canvas.getBoundingClientRect(),screen={x:event.clientX-rect.left,y:event.clientY-rect.top};engine.camera.updateMatrixWorld();
-      const hit=layer.pick(screen,engine.camera);if(hit){select('select').value=hit.id;loadForm();message(`选中 ${hit.id}`);return;}
-      if(!input('click-add').checked)return;
-      const ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(screen.x/rect.width*2-1,1-screen.y/rect.height*2),engine.camera);
-      const a=engine.ellipsoid.equatorialRadius,b=engine.ellipsoid.polarRadius,o=ray.ray.origin,d=ray.ray.direction;
-      const origin=new THREE.Vector3(o.x/a,o.y/b,o.z/a),direction=new THREE.Vector3(d.x/a,d.y/b,d.z/a),aa=direction.lengthSq(),bb=2*origin.dot(direction),cc=origin.lengthSq()-1,disc=bb*bb-4*aa*cc;
-      if(disc<0){message('天空无椭球交点。');return;}const t=(-bb-Math.sqrt(disc))/(2*aa);if(t<0)return;
-      const p=engine.coordinates.worldToGeodetic(o.clone().addScaledVector(d,t));input('lon').value=String(p.longitude);input('lat').value=String(p.latitude);input('id').value='';select('type').value='point';el('entity-add').click();
+      const mode=select('pick-mode').value as 'surface'|'ellipsoid'|'absolute-height';
+      const picked=engine.pickPositionDetailed(screen,{mode,height:mode==='absolute-height'?number('height'):undefined});
+      const reference=engine.pickPositionDetailed(screen,{mode:'ellipsoid'}),hit=layer.pick(screen,engine.camera);
+      if(hit){select('select').value=hit.id;loadForm();message(`选中 ${hit.id}`);}
+      else if(input('click-add').checked&&picked){const p=picked.position;input('lon').value=String(p.longitude);input('lat').value=String(p.latitude);input('height').value=String(p.height);input('id').value='';select('type').value='point';el('entity-add').click();}
+      if(input('pick-diagnostics').checked)el('entity-output').textContent=JSON.stringify({picked,referenceEllipsoid:reference?.position??null,selectedObject:hit?.id??null,
+        differenceMeters:picked&&reference?engine.coordinates.geodeticToWorld(picked.position).distanceTo(engine.coordinates.geodeticToWorld(reference.position)):null},null,2);
+      if(!picked)message('此像素无地表交点（天空／画布外）。');else if(!hit)message(`来源 ${picked.source} · 回投误差 ${picked.errorPixels.toFixed(5)} px · 高度 ${picked.position.height.toFixed(2)}m`);
     }catch(error){message(error instanceof Error?error.message:'拾取失败',true);}
   },{signal:events.signal});
   const observer=new ResizeObserver(()=>{const bottom=el('map-controls-anchor').getBoundingClientRect().bottom+12;document.documentElement.style.setProperty('--map-controls-bottom',`${bottom}px`);});

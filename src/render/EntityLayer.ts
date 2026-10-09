@@ -200,7 +200,10 @@ export class EntityLayer implements GlobeSceneLayer {
     const discriminant = bb * bb - 4 * aa * cc;
     if (aa === 0 || discriminant < 0) return false;
     const t = (-bb - Math.sqrt(discriminant)) / (2 * aa);
-    return t > 0 && t < 1 - (margin + 5) / Math.max(1, eye.distanceTo(target));
+    // Coarse displayed globe triangles lie below the analytic ellipsoid. Let GPU surface depth
+    // decide their near-side occlusion rather than hiding a correctly picked negative-height anchor.
+    const below=Math.max(0,1-Math.sqrt((target.x/a)**2+(target.y/b)**2+(target.z/a)**2))*a;
+    return t > 0 && t < 1 - (margin + below + 5) / Math.max(1, eye.distanceTo(target));
   }
   private build(definition: EntityDefinition): Rendered {
     const anchor = entityAnchor(definition), center = this.world(anchor);

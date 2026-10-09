@@ -1,5 +1,7 @@
 export { Ellipsoid } from './core/geo/Ellipsoid';
 export type { Cartographic } from './core/geo/Ellipsoid';
+export { pickSurfacePosition } from './core/geo/SurfacePicker';
+export type { SurfacePickOptions, SurfacePickResult, SurfaceRayHit } from './core/geo/SurfacePicker';
 
 export { CoordinateTransform, WEB_MERCATOR_MAX_LATITUDE } from './core/coordinates/CoordinateTransform';
 export type { TilePosition, WebMercatorPosition } from './core/coordinates/CoordinateTransform';

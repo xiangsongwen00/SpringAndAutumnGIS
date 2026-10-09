@@ -23,6 +23,8 @@
     "prepack": "npm run build",
     "test:sdk": "node scripts/test-sdk-package.mjs",
     "test:entities": "node scripts/test-entities.mjs",
+    "test:picking": "node scripts/test-surface-picking.mjs",
+    "test:entities:browser": "node scripts/test-entity-demo-browser.mjs",
     "dev": "vite",
     "build": "vite build && tsc -p tsconfig.build.json",
     "preview": "vite preview",

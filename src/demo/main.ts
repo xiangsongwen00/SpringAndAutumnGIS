@@ -1,5 +1,6 @@
 import layerCatalogJson from '../../env.config.json';
 import { attachEntityPlayground } from './EntityPlayground';
+import { entityTestRaster, entityTestTerrain } from './EntityTestFixture';
 import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
@@ -10,7 +11,6 @@ import {
   GpuVectorTileProvider,
   MvtVectorLayer,
   TerrainRgbProvider,
-  UrlTemplateRasterProvider,
   type DataSourceDefinition,
   type GlobeEngineStats,
   type GlobeFramePerformance,
@@ -110,7 +110,7 @@ let nativeBase: GpuVectorTileProvider | null = null;
 let nativeSymbols: MvtVectorLayer | null = null;
 try {
   layers.setRuntime(activeBaseLayer.id, { phase: 'loading', pending: 1 });
-  baseProvider = entitySmoke ? new UrlTemplateRasterProvider({urlTemplate:'/entity-smoke-unused/{z}/{x}/{y}.png'}) : await registry.createRasterProviderAsync(
+  baseProvider = entitySmoke ? entityTestRaster() : await registry.createRasterProviderAsync(
     activeBaseLayer.kind === 'vector' ? 'google-satellite' : activeBaseLayer.sourceId,
     { levelOffset: activeBaseLayer.levelOffset }
   );
@@ -142,7 +142,7 @@ const businessLayerRevisions = new Map<string, number>();
 const businessLayerControllers = new Map<string, AbortController>();
 
 const terrainEnabledByConfig = import.meta.env.VITE_ENABLE_TERRAIN === 'true';
-let terrainEnabled = terrainEnabledByConfig && new URLSearchParams(window.location.search).get('terrain') !== '0';
+let terrainEnabled = entitySmoke ? new URLSearchParams(window.location.search).get('terrain') === '1' : terrainEnabledByConfig && new URLSearchParams(window.location.search).get('terrain') !== '0';
 const terrainTestLocations = [
   { name: '珠峰', longitude: 86.925, latitude: 27.988, altitude: 24_000 },
   { name: '重庆', longitude: 106.5516, latitude: 29.563, altitude: 12_000 }
@@ -233,7 +233,7 @@ const geovisTerrainUrl = environmentValue(import.meta.env.VITE_GEOVIS_TERRAIN_UR
   geovisTerrainUrlFromToken(environmentValue(localTokens.geovis?.terrainToken));
 const mapTilerKey = environmentValue(import.meta.env.VITE_MAPTILER_KEY) ??
   environmentValue(localTokens.maptiler?.key);
-const terrain = !entitySmoke && terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
+const terrain = entitySmoke ? (terrainEnabled ? entityTestTerrain() : undefined) : terrainEnabledByConfig && (geovisTerrainUrl || mapTilerKey)
   ? new TerrainRgbProvider({
       id: 'terrain-rgb-demo',
       urlTemplates: geovisTerrainUrl ? [geovisTerrainUrl] : undefined,
@@ -263,7 +263,7 @@ const engine = new GlobeEngine({
     ) : 0
   },
   grid: { subdivisions: 8, heightOffset: 0.3 },
-  imagery: entitySmoke ? false : baseProvider,
+  imagery: baseProvider,
   terrain,
   terrainLayer: {
     regionalCoverage: new URLSearchParams(window.location.search).get('terrainCoverage') === 'regional',

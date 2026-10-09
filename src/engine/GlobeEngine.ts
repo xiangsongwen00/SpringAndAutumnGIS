@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { CoordinateTransform } from '../core/coordinates/CoordinateTransform';
+import { pickSurfacePosition, type SurfacePickOptions, type SurfacePickResult } from '../core/geo/SurfacePicker';
+import type { ScreenPosition } from '../sdk/EntityTypes';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import {
   GlobeLodSelector,
@@ -100,6 +102,11 @@ export type GlobeEngineOptions = {
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
   readonly backgroundWorkBudget = new FrameWorkBudget(4);
+  pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null {
+    if(this.disposed)throw new Error('GlobeEngine has been disposed.');
+    const rect=this.renderer.domElement.getBoundingClientRect();
+    return pickSurfacePosition(this.camera,this.ellipsoid,rect.width,rect.height,screen,options,ray=>this.imagery?.pickSurface(ray)??null);
+  }
   private framePerformance: GlobeFramePerformance = { lodMs: 0, terrainMs: 0, surfaceMs: 0,
     featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0, gpuMs: null, lodSelections: 0 };
   private readonly gpuTimer: GpuFrameTimer;

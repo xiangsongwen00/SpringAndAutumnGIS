@@ -6,11 +6,11 @@ import type { MapStyle } from '../vector/style/VectorStyleTypes';
 import type { MapStyleCapabilityReport } from '../vector/style/MapStyleLoader';
 import type { TerrainProvider } from '../core/terrain/TerrainProvider';
 import type { GlobeFlyToOptions } from '../engine/GlobeCameraController';
-import * as THREE from 'three';
 import { EntityCollection } from './EntityCollection';
 import { EntityLayer } from '../render/EntityLayer';
 import type { EntitySnapshot, EntityPickOptions, ScreenPosition, EntityResourceState } from './EntityTypes';
 import type { Cartographic } from '../core/geo/Ellipsoid';
+import type { SurfacePickOptions, SurfacePickResult } from '../core/geo/SurfacePicker';
 
 export type BaseMapDefinition =
   | { id: string; type: 'xyz'; url: string; scheme?: 'xyz' | 'tms'; minLevel?: number;
@@ -155,23 +155,9 @@ export class Viewer {
   }
   getEntityResourceState(id:string):EntityResourceState|null { this.assertAlive(); return this.entityLayer.getResourceState(id); }
   retryEntityResources(id:string):boolean { this.assertAlive(); return this.entityLayer.retryResources(id); }
-  /** Reference-ellipsoid intersection only. Not a terrain or model depth pick. */
-  pickPosition(screen: ScreenPosition): Cartographic | null {
-    this.assertAlive();
-    const rect = this.engine.renderer.domElement.getBoundingClientRect();
-    if (![screen.x, screen.y].every(Number.isFinite)) throw new ViewerError('INVALID_OPTIONS', 'Invalid screen position.');
-    if (!rect.width || !rect.height || screen.x < 0 || screen.y < 0 || screen.x > rect.width || screen.y > rect.height) return null;
-    this.engine.camera.updateMatrixWorld();
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(new THREE.Vector2(screen.x / rect.width * 2 - 1, 1 - screen.y / rect.height * 2), this.engine.camera);
-    const { origin, direction } = raycaster.ray, a = this.engine.ellipsoid.equatorialRadius, b = this.engine.ellipsoid.polarRadius;
-    const o = new THREE.Vector3(origin.x/a, origin.y/b, origin.z/a), d = new THREE.Vector3(direction.x/a, direction.y/b, direction.z/a);
-    const aa=d.lengthSq(), bb=2*o.dot(d), cc=o.lengthSq()-1, discriminant=bb*bb-4*aa*cc;
-    if (discriminant < 0) return null;
-    const near=(-bb-Math.sqrt(discriminant))/(2*aa), far=(-bb+Math.sqrt(discriminant))/(2*aa), t=near>=0 ? near : far;
-    if(t<0) return null;
-    return this.engine.coordinates.worldToGeodetic(origin.clone().addScaledVector(direction,t));
-  }
+  /** Defaults to the displayed raster/vector surface mesh. Explicit ellipsoid/height modes remain available. */
+  pickPosition(screen: ScreenPosition,options:SurfacePickOptions={}): Cartographic | null { return this.pickPositionDetailed(screen,options)?.position??null; }
+  pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null { this.assertAlive();return this.engine.pickPositionDetailed(screen,options); }
   start(): void { this.assertAlive(); this.engine.start(); }
   stop(): void { this.assertAlive(); this.engine.stop(); }
   destroy(): void {

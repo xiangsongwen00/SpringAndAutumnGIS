@@ -11,6 +11,8 @@ import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
 import { terrainSurfaceEdges } from '../core/terrain/TerrainSurfaceEdges';
+import { intersectRasterSurface } from './RasterSurfacePicker';
+import type { SurfaceRayHit } from '../core/geo/SurfacePicker';
 
 export type RasterTileLayerOptions = {
   /** Short-lived previous high-detail coverage on the same surface mesh. */
@@ -77,6 +79,19 @@ type ContinuityPatch = { id: TileId; sourceKey: string; expires: number };
 /** Visible-leaf raster consumer. Selection remains owned by GlobeLodSelector. */
 export class RasterTileLayer {
   readonly object3d = new THREE.Group();
+  /** Query only; no change to tile selection, DEM publication or GPU geometry. */
+  pickSurface(ray:THREE.Ray):SurfaceRayHit|null {
+    if(!this.visible||this.disposed)return null;
+    let best:SurfaceRayHit|null=null,distance=Infinity;
+    const candidates=[...this.renderTiles.values()].filter(tile=>tile.mesh.visible).map(tile=>{
+      const u=tile.mesh.material.uniforms,center=(u.sag_originHigh!.value as THREE.Vector3).clone().add(u.sag_originLow!.value);
+      const radius=this.ellipsoid.equatorialRadius*Math.min(2,Math.abs(u.tileLongitudeSpan!.value)+Math.abs(u.tileMercatorSpan!.value))+30000*Math.max(1,u.terrainExaggeration!.value);
+      return {tile,center,radius};
+    }).filter(item=>ray.intersectsSphere(new THREE.Sphere(item.center,item.radius))).sort((a,b)=>ray.origin.distanceTo(a.center)-ray.origin.distanceTo(b.center));
+    for(const item of candidates){if(ray.origin.distanceTo(item.center)-item.radius>distance)continue;
+      const world=intersectRasterSurface(ray,item.tile.mesh,this.ellipsoid,distance);if(world){distance=ray.origin.distanceTo(world);best={world,tile:{...item.tile.id}};}}
+    return best;
+  }
   provider: RasterTileProvider;
 
   private readonly ellipsoid: Ellipsoid;
