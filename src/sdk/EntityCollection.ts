@@ -124,10 +124,11 @@ export function validateEntity(value: EntityDefinition): void {
   if (value.type !== 'label' && value.symbol) {
     const s = value.symbol;
     if (typeof s !== 'object' || Array.isArray(s)) invalid('Symbol must be an object.');
-    fields(s, value.type === 'point' ? ['color', 'size', 'shape', 'outlineColor', 'outlineWidth', 'opacity','icon','heading','alignment'] : value.type === 'polyline' ? ['color', 'width', 'opacity', 'dash','texture'] : ['color', 'opacity', 'fill', 'outlineColor', 'outlineWidth','texture']);
+    fields(s, value.type === 'point' ? ['color', 'size', 'shape', 'outlineColor', 'outlineWidth', 'opacity','icon','heading','alignment','occlusion'] : value.type === 'polyline' ? ['color', 'width', 'opacity', 'dash','texture','occlusion'] : ['color', 'opacity', 'fill', 'outlineColor', 'outlineWidth','texture','occlusion']);
     for (const [key, item] of Object.entries(s)) {
       if (item === undefined) continue;
-      if(key==='icon'||key==='texture')validateImageSymbol(item,value.type);
+      if(key==='occlusion'){if(item!=='depth'&&item!=='overlay')invalid('Occlusion policy must be depth or overlay.');}
+      else if(key==='icon'||key==='texture')validateImageSymbol(item,value.type);
       else if(key==='heading')range(item,-360000,360000);
       else if(key==='alignment'){if(item!=='map'&&item!=='screen')invalid('Icon alignment must be map or screen.');}
       else if (key.includes('Color') || key === 'color') color(item);
@@ -144,11 +145,12 @@ export function validateEntity(value: EntityDefinition): void {
   if (value.label) {
     const s = value.label;
     if (typeof s !== 'object' || Array.isArray(s)) invalid('Label must be an object.');
-    fields(s, ['text', 'fontSize', 'color', 'haloColor', 'haloWidth', 'offset', 'backgroundColor', 'padding', 'opacity']);
+    fields(s, ['text', 'fontSize', 'color', 'haloColor', 'haloWidth', 'offset', 'backgroundColor', 'padding', 'opacity','occlusion']);
     if (typeof s.text !== 'string' || s.text.length > 512) invalid('Label text must be at most 512 characters.');
     for (const [key, item] of Object.entries(s)) {
       if (item === undefined || key === 'text') continue;
-      if (key.includes('Color') || key === 'color') color(item);
+      if(key==='occlusion'){if(item!=='depth'&&item!=='overlay')invalid('Occlusion policy must be depth or overlay.');}
+      else if (key.includes('Color') || key === 'color') color(item);
       else if (key === 'offset') { if (!Array.isArray(item) || item.length !== 2) invalid('Label offset needs two pixels values.'); item.forEach(v => range(v, -1024, 1024)); }
       else range(item, key === 'fontSize' ? 6 : 0, key === 'opacity' ? 1 : key === 'fontSize' ? 96 : 32);
     }

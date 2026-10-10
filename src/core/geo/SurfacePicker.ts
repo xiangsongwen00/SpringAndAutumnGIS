@@ -7,7 +7,7 @@ import type { TileId } from '../tiling/GeographicTilingScheme';
 export type SurfacePickOptions = { mode?: 'surface' | 'ellipsoid' | 'absolute-height'; height?: number };
 export type SurfaceRayHit = { world: THREE.Vector3; tile?: TileId };
 export type SurfacePickResult = Readonly<{ position: Required<Cartographic>; source: 'rendered-surface'|'ellipsoid'|'absolute-height';
-  tile: TileId|null; screen: ScreenPosition; reprojected: ScreenPosition; errorPixels: number; distance: number }>;
+  tile: TileId|null; screen: ScreenPosition; reprojected: ScreenPosition; errorPixels: number; distance: number; viewDepth:number }>;
 
 /** All entry points use CSS pixels, the same camera ray and the same displayed-surface callback. */
 export function pickSurfacePosition(camera:THREE.PerspectiveCamera,ellipsoid:Ellipsoid,width:number,height:number,
@@ -44,5 +44,5 @@ export function pickSurfacePosition(camera:THREE.PerspectiveCamera,ellipsoid:Ell
   }
   const projected=hit.world.clone().project(camera),reprojected={x:(projected.x+1)*width/2,y:(1-projected.y)*height/2};
   return {position:coordinates.worldToGeodetic(hit.world),source,tile:hit.tile??null,screen:{...screen},reprojected,
-    errorPixels:Math.hypot(reprojected.x-screen.x,reprojected.y-screen.y),distance:ray.origin.distanceTo(hit.world)};
+    errorPixels:Math.hypot(reprojected.x-screen.x,reprojected.y-screen.y),distance:ray.origin.distanceTo(hit.world),viewDepth:-hit.world.clone().applyMatrix4(camera.matrixWorldInverse).z};
 }

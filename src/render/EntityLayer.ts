@@ -84,8 +84,9 @@ export class EntityLayer implements GlobeSceneLayer {
     const occupied = new Set<string>(); let labelCount = 0;
     if(this.orderDirty){this.ordered=[...this.rendered.values()].sort((a,b)=>(b.definition.order??500)-(a.definition.order??500));this.orderDirty=false;}
     for (const item of this.ordered) {
+      const overlay=item.definition.type==='label'?item.definition.label.occlusion==='overlay':item.definition.symbol?.occlusion==='overlay';
       item.group.visible = item.definition.visible !== false && this.frustum.intersectsSphere(new THREE.Sphere(item.center, item.radius + 100)) &&
-        (item.radius > 100000 || !this.occluded(camera.position, item.center, item.radius));
+        (item.radius > 100000&&!overlay || !this.occluded(camera.position, item.center, item.radius));
       if(item.group.visible){
         for(const binding of item.imageBindings)binding.ready.value=binding.entry.state==='ready'?1:0;
         for(const animation of item.animations){
@@ -110,7 +111,7 @@ export class EntityLayer implements GlobeSceneLayer {
     }
   }
   /** Screen-space object selection; excludes hidden, behind-globe and label-collision-suppressed objects. */
-  pick(screen: ScreenPosition, camera: THREE.PerspectiveCamera, options: EntityPickOptions = {}): EntityDefinition | null {
+  pick(screen: ScreenPosition, camera: THREE.PerspectiveCamera, options: EntityPickOptions = {},surfaceDepth:number|null=null): EntityDefinition | null {
     const tolerance = options.tolerance ?? 6;
     if (!Number.isFinite(screen.x) || !Number.isFinite(screen.y) || !Number.isFinite(tolerance) || tolerance < 0 || tolerance > 64) throw new Error('Invalid screen position or pick tolerance.');
     if (!this.object3d.visible) return null;
@@ -118,13 +119,15 @@ export class EntityLayer implements GlobeSceneLayer {
     for (const item of this.rendered.values()) {
       if (!item.group.visible || this.entities.getById(item.definition.id)?.visible === false) continue;
       let hit = false;
+      const depth=-item.center.clone().applyMatrix4(camera.matrixWorldInverse).z;
+      const depthVisible=surfaceDepth===null||depth<=surfaceDepth+0.5;
       if (item.label?.mesh.visible) {
         const b = this.labelBox(item, camera);
-        hit = !!b && screen.x >= b[0] - tolerance && screen.y >= b[1] - tolerance && screen.x <= b[2] + tolerance && screen.y <= b[3] + tolerance;
+        hit = (depthVisible||!(item.label.mesh.material as THREE.ShaderMaterial).depthTest) && !!b && screen.x >= b[0] - tolerance && screen.y >= b[1] - tolerance && screen.x <= b[2] + tolerance && screen.y <= b[3] + tolerance;
       }
       const definition = item.definition;
       const geometryVisible=definition.type!=='label' && (definition.symbol?.opacity ?? 1)>0;
-      if (definition.type === 'point' && geometryVisible) {
+      if (definition.type === 'point' && geometryVisible && (depthVisible||definition.symbol?.occlusion==='overlay')) {
         const p = this.project(item.center, camera);
         const dx=p ? Math.abs(screen.x-p.x) : Infinity,dy=p ? Math.abs(screen.y-p.y) : Infinity;
         const shape=definition.symbol?.shape ?? 'circle',distance=shape==='square'?Math.max(dx,dy):shape==='diamond'?dx+dy:Math.hypot(dx,dy);
@@ -223,11 +226,11 @@ export class EntityLayer implements GlobeSceneLayer {
     return item;
   }
   private world(p: EntityPosition): THREE.Vector3 { return this.ellipsoid.cartographicToCartesian({ longitude: p[0], latitude: p[1], height: p[2] ?? 30 }); }
-  private material(item: Rendered, vertexShader: string, fragmentShader: string, uniforms: Record<string, THREE.IUniform>): THREE.ShaderMaterial {
+  private material(item: Rendered, vertexShader: string, fragmentShader: string, uniforms: Record<string, THREE.IUniform>,depthTest=true): THREE.ShaderMaterial {
     const high = new THREE.Vector3(), low = new THREE.Vector3(); split(item.center, high, low);
     const result = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: {
       originHigh: { value: high }, originLow: { value: low }, eyeHigh: { value: this.eyeHigh }, eyeLow: { value: this.eyeLow }, viewport: { value: this.viewport }, ...uniforms },
-      transparent: true, depthTest: true, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+      transparent: true, depthTest, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
     item.materials.push(result); return result;
   }
   private mesh(item: Rendered, geometry: THREE.BufferGeometry, material: THREE.ShaderMaterial, label = false): THREE.Mesh {
@@ -247,7 +250,7 @@ else{if (d > 1.0) discard; gl_FragColor = vec4(d > 1.0 - 2.0*outlineWidth/size ?
       image:{value:image?.texture??null},imageReady:ready,rotation,
       dimensions: { value: new THREE.Vector2(s.icon?.width??s.size??(s.icon?32:12),s.icon?.height??s.size??(s.icon?32:12)) }, offset: { value: new THREE.Vector2() }, size: { value: s.size ?? 12 },
       color: { value: new THREE.Color(s.color ?? (s.icon?'#ffffff':'#ffd166')) }, outlineColor: { value: new THREE.Color(s.outlineColor ?? '#ffffff') }, outlineWidth: { value: s.outlineWidth ?? 1 },
-      opacity: { value: s.opacity ?? 1 }, shape: { value: s.shape === 'square' ? 1 : s.shape === 'diamond' ? 2 : 0 } });
+      opacity: { value: s.opacity ?? 1 }, shape: { value: s.shape === 'square' ? 1 : s.shape === 'diamond' ? 2 : 0 } },s.occlusion!=='overlay');
     this.mesh(item, quad(), material);
   }
   private lines(item: Rendered, color: string, width: number, opacity: number, dash?: readonly [number, number],pattern?:LineTexture): void {
@@ -279,7 +282,7 @@ p.xy+=normal*side*width/viewport*p.w; gl_Position=p; vTravel=vec2(travel*p.w,p.w
 void main(){float distance=vTravel.x/max(vTravel.y,0.001); if(dash.y>0.0 && mod(distance,dash.x+dash.y)>dash.x) discard; gl_FragColor=vec4(color,opacity);
 if(imageReady==1)gl_FragColor*=texture2D(image,vec2(direction*(distance-phase)/period,(vSide+1.0)*0.5));if(gl_FragColor.a<0.01)discard;${fragmentEnd} }`, {
       image:{value:image?.texture??null},imageReady:ready,phase,period:{value:pattern?.length??64},direction:{value:pattern?.sourceDirection==='left'?-1:1},
-      width:{value:width}, color:{value:new THREE.Color(color)},opacity:{value:opacity},dash:{value:new THREE.Vector2(dash?.[0] ?? 1,dash?.[1] ?? 0)} });
+      width:{value:width}, color:{value:new THREE.Color(color)},opacity:{value:opacity},dash:{value:new THREE.Vector2(dash?.[0] ?? 1,dash?.[1] ?? 0)} },item.definition.type==='label'||item.definition.symbol?.occlusion!=='overlay');
     this.mesh(item, geometry, material);
   }
   private fill(item: Rendered, definition: Extract<EntityDefinition, { type: 'polygon' }>): void {
@@ -311,7 +314,7 @@ varying vec2 vUv;void main(){gl_Position=projectWorld(position);vUv=uv; #include
 void main(){gl_FragColor=vec4(color,opacity);vec2 p=vUv-0.5;float c=cos(rotation),s=sin(rotation);p=vec2(c*p.x-s*p.y,s*p.x+c*p.y)+0.5;
 if(imageReady==1)gl_FragColor*=texture2D(image,p*repeat-offset);if(gl_FragColor.a<0.01)discard;${fragmentEnd} }`,{
       image:{value:image?.texture??null},imageReady:ready,repeat:{value:new THREE.Vector2(...(pattern?.repeat??[1,1]))},offset,rotation:{value:THREE.MathUtils.degToRad(pattern?.rotation??0)},
-      color:{value:new THREE.Color(definition.symbol?.color ?? (pattern?'#ffffff':'#32e6a1'))},opacity:{value:definition.symbol?.opacity ?? 0.35} }));
+      color:{value:new THREE.Color(definition.symbol?.color ?? (pattern?'#ffffff':'#32e6a1'))},opacity:{value:definition.symbol?.opacity ?? 0.35} },definition.symbol?.occlusion!=='overlay'));
   }
   private northAngle(item:Rendered,camera:THREE.PerspectiveCamera):number {
     const p=entityAnchor(item.definition),lon=THREE.MathUtils.degToRad(p[0]),lat=THREE.MathUtils.degToRad(p[1]);
@@ -382,7 +385,8 @@ if(imageReady==1)gl_FragColor*=texture2D(image,p*repeat-offset);if(gl_FragColor.
     const offset=symbol.offset ?? [0,-22];
     const material=this.material(item,billboardVertex,`#include <logdepthbuf_pars_fragment>\nuniform sampler2D image; uniform float opacity; varying vec2 vUv;
 void main(){gl_FragColor=texture2D(image,vUv);gl_FragColor.a*=opacity;if(gl_FragColor.a<0.01)discard;${fragmentEnd}}`,{
-      image:{value:texture},rotation:{value:0},opacity:{value:symbol.opacity ?? 1},dimensions:{value:new THREE.Vector2(width,height)},offset:{value:new THREE.Vector2(...offset)} });
+      image:{value:texture},rotation:{value:0},opacity:{value:symbol.opacity ?? 1},dimensions:{value:new THREE.Vector2(width,height)},offset:{value:new THREE.Vector2(...offset)} },
+      (symbol.occlusion??(item.definition.type==='point'?item.definition.symbol?.occlusion:undefined))!=='overlay');
     item.label={mesh:this.mesh(item,quad(),material,true),width,height,offset};
   }
 }

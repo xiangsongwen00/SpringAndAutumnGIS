@@ -23,6 +23,7 @@ try{
    else{external.push(url.hostname);void command('Fetch.failRequest',{requestId:msg.params.requestId,errorReason:'BlockedByClient'});}
  }};
  await command('Page.enable');await command('Fetch.enable',{patterns:[{urlPattern:'*'}]});
+ await command('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:2,mobile:false});
  const evaluate=async expression=>{const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
    assert.ok(!result.result?.exceptionDetails, result.result?.exceptionDetails?.exception?.description??'Browser evaluation failed');return result.result?.result?.value;};
  const until=async(expression)=>{for(let i=0;i<300;i++){if(await evaluate(expression))return;await pause(100);}throw new Error('Root entity demo readiness timed out');};
@@ -58,6 +59,41 @@ try{
    const resize=await evaluate(`(async()=>{const c=window.__entityDemo.engine.renderer.domElement;c.style.transform='translate(35px,20px)';const r=c.getBoundingClientRect();
      const p=window.__entityDemo.engine.pickPositionDetailed({x:r.width*.42,y:r.height*.62});c.style.transform='';return p.errorPixels;})()`);
    assert.ok(resize<.001,'Canvas-offset CSS coordinates drifted');
+   const drawing=await evaluate(`(async()=>{
+     const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),click=(x,y)=>{
+       c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:43,clientX:r.left+x*r.width,clientY:r.top+y*r.height}));
+       c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:43,clientX:r.left+x*r.width,clientY:r.top+y*r.height}));
+     };
+     const before=h.entities.length;document.getElementById('entity-draw-line').click();const paused=!h.engine.controls.enabled;
+     click(.25,.58);click(.35,.65);document.getElementById('entity-draw-undo').click();const undo=h.draw.state.vertexCount;
+     click(.35,.65);document.getElementById('entity-draw-finish').click();const line=h.entities.getById(h.draw.state.lastEntityId);
+     document.getElementById('entity-draw-polygon').click();click(.25,.55);click(.36,.60);click(.27,.70);document.getElementById('entity-draw-finish').click();const polygon=h.entities.getById(h.draw.state.lastEntityId);
+     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+     const center=polygon.positions.reduce((sum,p)=>sum.map((v,i)=>v+p[i]/polygon.positions.length),[0,0,0]),world=h.engine.coordinates.geodeticToWorld({longitude:center[0],latitude:center[1],height:center[2]}).project(h.engine.camera),gl=c.getContext('webgl2'),rgba=new Uint8Array(4);
+     gl.readPixels(Math.floor((world.x+1)*gl.drawingBufferWidth/2),Math.floor((world.y+1)*gl.drawingBufferHeight/2),1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+     document.getElementById('entity-draw-line').click();click(.22,.57);document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+     return {paused,undo,lineType:line?.type,lineVertices:line?.positions.length,polygonType:polygon?.type,polygonVertices:polygon?.positions.length,
+       restored:h.engine.controls.enabled,active:h.draw.isActive,added:h.entities.length-before,filledPixel:[...rgba]};
+   })()`);
+   const {filledPixel,...drawState}=drawing;
+   assert.deepEqual(drawState,{paused:true,undo:1,lineType:'polyline',lineVertices:2,polygonType:'polygon',polygonVertices:3,restored:true,active:false,added:2});
+   assert.ok(filledPixel[0]>180&&filledPixel[1]<100&&filledPixel[2]>180,`Drawn polygon fill not visible: ${filledPixel}`);
+   if(terrain){
+     const occlusion=await evaluate(`(async()=>{
+       const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect();h.entities.clear();
+       const ground=h.engine.pickPositionDetailed({x:r.width*.35,y:r.height*.65}).position;
+       h.entities.add({id:'occluded',type:'point',position:[ground.longitude,ground.latitude,ground.height-300],symbol:{color:'#ff00ff',size:30,outlineWidth:0,occlusion:'depth'},label:{text:'置顶文字',fontSize:20,color:'#ffffff',offset:[0,-40],occlusion:'overlay'}});
+       const read=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{const gl=c.getContext('webgl2'),p=h.engine.coordinates.geodeticToWorld({longitude:ground.longitude,latitude:ground.latitude,height:ground.height-300}).project(h.engine.camera),x=(p.x+1)*r.width/2,y=(1-p.y)*r.height/2,rgba=new Uint8Array(4);
+         gl.readPixels(Math.floor(x*gl.drawingBufferWidth/r.width),Math.floor((r.height-y)*gl.drawingBufferHeight/r.height),1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);resolve([...rgba]);})));
+       const normal=await read();h.entities.update('occluded',{symbol:{occlusion:'overlay'}});const top=await read();
+       const original=h.entities.getById('occluded').position[2];
+       h.entities.clear();h.entities.add({id:'backside',type:'point',position:[ground.longitude>0?ground.longitude-180:ground.longitude+180,-ground.latitude,100],symbol:{color:'#ff00ff',size:100,occlusion:'overlay'}});
+       await read();return {normal,top,heightUnchanged:original===ground.height-300,backsideVisible:h.layer.object3d.children.some(group=>group.visible)};
+     })()`);
+     assert.ok(!(occlusion.normal[0]>180&&occlusion.normal[2]>180&&occlusion.normal[1]<100),'Normal-depth point must be terrain occluded');
+     assert.ok(occlusion.top[0]>180&&occlusion.top[2]>180&&occlusion.top[1]<100,'Overlay point must show above terrain');
+     assert.equal(occlusion.heightUnchanged,true);assert.equal(occlusion.backsideVisible,false);
+   }
    await evaluate(`document.getElementById('entity-close').click()`);assert.equal(await evaluate(`document.getElementById('entity-panel').hidden`),true);
    console.log(`Root index.html: objects/material controls, one canvas, terrain=${terrain}, clicked point reprojection ${report.error.toFixed(6)}px passed.`);
  }

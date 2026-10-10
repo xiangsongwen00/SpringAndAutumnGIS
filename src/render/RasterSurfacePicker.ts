@@ -29,8 +29,9 @@ export function intersectRasterSurface(ray:THREE.Ray,mesh:THREE.Mesh<THREE.Buffe
         let h=0;if(value<boolean>('hasTerrain')&&image){
           const x=THREE.MathUtils.clamp(offset.x+uv.getX(i)*scale.x,0,1)*(image.width-1),y=THREE.MathUtils.clamp(offset.y+uv.getY(i)*scale.y,0,1)*(image.height-1);
           const x0=Math.floor(x),y0=Math.floor(y),x1=Math.min(image.width-1,x0+1),y1=Math.min(image.height-1,y0+1),tx=x-x0,ty=y-y0;
-          h=THREE.MathUtils.lerp(THREE.MathUtils.lerp(image.data[y0*image.width+x0]!,image.data[y0*image.width+x1]!,tx),
-            THREE.MathUtils.lerp(image.data[y1*image.width+x0]!,image.data[y1*image.width+x1]!,tx),ty)*value<number>('terrainExaggeration');
+          h=(texture?.magFilter===THREE.NearestFilter?image.data[Math.min(image.height-1,Math.floor(y+.5))*image.width+Math.min(image.width-1,Math.floor(x+.5))]!:
+            THREE.MathUtils.lerp(THREE.MathUtils.lerp(image.data[y0*image.width+x0]!,image.data[y0*image.width+x1]!,tx),
+            THREE.MathUtils.lerp(image.data[y1*image.width+x0]!,image.data[y1*image.width+x1]!,tx),ty))*value<number>('terrainExaggeration');
           h-=g.getAttribute('skirt').getX(i)*value<number>('terrainSkirtDepth');
         }
         if(value<boolean>('sag_useLocalCoordinates')){
@@ -42,7 +43,7 @@ export function intersectRasterSurface(ray:THREE.Ray,mesh:THREE.Mesh<THREE.Buffe
       vertices.set([point.x,point.y,point.z],i*3);bounds.expandByPoint(point);
     }state={signature,vertices,bounds};cache.set(g,state);
   }
-  const boxHit=ray.intersectBox(state.bounds,new THREE.Vector3());if(!boxHit||ray.origin.distanceTo(boxHit)>maximumDistance)return null;
+  const boxHit=ray.intersectBox(state.bounds,new THREE.Vector3());if(!boxHit||!state.bounds.containsPoint(ray.origin)&&ray.origin.distanceTo(boxHit)>maximumDistance)return null;
   const a=new THREE.Vector3(),b=new THREE.Vector3(),c=new THREE.Vector3(),hit=new THREE.Vector3();let best:THREE.Vector3|null=null;
   const index=g.index;if(!index)return null;
   for(let i=0;i<index.count;i+=3){a.fromArray(state.vertices,index.getX(i)*3);b.fromArray(state.vertices,index.getX(i+1)*3);c.fromArray(state.vertices,index.getX(i+2)*3);

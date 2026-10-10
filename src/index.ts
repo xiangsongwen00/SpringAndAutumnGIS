@@ -179,6 +179,8 @@ export type {
 export { GlobeEngine } from './engine/GlobeEngine';
 export { Viewer, ViewerError } from './sdk/Viewer';
 export { EntityCollection, EntityError } from './sdk/EntityCollection';
+export { EntityDrawingController } from './sdk/EntityDrawingController';
+export type { EntityDrawOptions, EntityDrawState } from './sdk/EntityDrawingController';
 export { EntityLayer } from './render/EntityLayer';
 export type { EntityDefinition, EntitySnapshot, EntityPosition, EntityPatch, EntityMove, EntityQuery, EntityChange,
   EntityPickOptions, ScreenPosition, PointSymbol, LineSymbol, PolygonSymbol, LabelSymbol } from './sdk/EntityTypes';

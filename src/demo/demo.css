@@ -171,7 +171,7 @@ body.entity-panel-open .stats { right:438px; width:280px; }
 
 .level-debug {
   position: fixed;
-  top: 80px;
+  top: var(--map-controls-bottom,80px);
   right: 398px;
   z-index: 4;
   display: grid;
@@ -190,7 +190,7 @@ body.entity-panel-open .stats { right:438px; width:280px; }
 
 .business-layer-panel {
   position: fixed;
-  top: 80px;
+  top: var(--map-controls-bottom,80px);
   right: 28px;
   z-index: 5;
   width: min(354px, calc(100vw - 32px));
@@ -309,7 +309,7 @@ body.entity-panel-open .stats { right:438px; width:280px; }
   .map-switcher { top: 20px; right: 16px; }
   .map-switcher { max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: flex-end; }
   .level-debug { top: 122px; right: 16px; grid-template-columns: auto 100px 38px; }
-  .business-layer-panel { top: 168px; right: 16px; }
+  .business-layer-panel { top: var(--map-controls-bottom,168px); right: 16px; }
   .stats { right: 16px; bottom: 16px; }
   .attribution { right: 18px; bottom: 3px; }
   .hint { left: 20px; bottom: 176px; }

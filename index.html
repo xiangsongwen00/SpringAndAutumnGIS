@@ -49,6 +49,7 @@
     <aside id="entity-panel" class="entity-panel" hidden aria-label="点线面与标注测试">
       <div class="entity-panel__header"><strong>点线面 · 图标 · 标注</strong><button id="entity-close" type="button" aria-label="关闭对象测试">关闭</button></div>
       <p>复用当前地球，业务对象独立于底图。高度为椭球绝对米，示例1500米不是贴地；开地形时低于山体会被遮挡。</p>
+      <div class="entity-actions"><button id="entity-draw-point">绘制点</button><button id="entity-draw-line">绘制折线</button><button id="entity-draw-polygon">绘制面</button><button id="entity-draw-label">绘制标注</button><button id="entity-draw-finish">完成绘制（Enter）</button><button id="entity-draw-undo">撤销顶点</button><button id="entity-draw-cancel">取消绘制（Esc）</button></div>
       <div class="entity-actions"><button id="entity-samples">全部示例</button><button id="entity-sample-point">测试点／人物</button><button id="entity-sample-line">测试流动线</button><button id="entity-sample-polygon">测试纹理面</button><button id="entity-sample-label">测试标注</button></div>
       <label>选中对象<select id="entity-select"><option value="">未选中</option></select></label>
       <label class="entity-check"><input id="entity-all-visible" type="checkbox" checked>整个对象集合显示</label>
@@ -59,6 +60,7 @@
       <label>点形状<select id="entity-shape"><option value="circle">圆</option><option value="square">方</option><option value="diamond">菱形</option></select></label>
       <label class="entity-check"><input id="entity-fill" type="checkbox" checked>面填充</label>
       <label>标注文字（空则移除附属标注）<input id="entity-text" value="业务标注"></label><label>文字字号<input id="entity-font" type="number" value="16" min="6" max="96"></label>
+      <label>图形／图标／文字遮挡<select id="entity-occlusion"><option value="depth">正常深度遮挡（API默认）</option><option value="overlay">置顶表达（不改真实高度，保留背面剔除）</option></select></label>
       <details><summary>图标朝向／线面纹理／动画</summary>
         <label class="entity-check"><input id="entity-icon-enabled" type="checkbox">点使用图片图标</label><label>点图标URL<input id="entity-icon-url" value="/mylocation_up.png"></label>
         <div class="entity-pair"><label>目标朝向°<input id="entity-heading" type="number" value="0"></label><label>素材原朝向°<input id="entity-source-heading" type="number" value="0"></label></div>
@@ -76,6 +78,7 @@
       <label>鼠标拾取依据<select id="entity-pick-mode"><option value="surface">当前显示地表网格（默认）</option><option value="ellipsoid">参考椭球（诊断对照）</option><option value="absolute-height">表单绝对高度面</option></select></label>
       <label class="entity-check"><input id="entity-pick-diagnostics" type="checkbox" checked>记录拾取／椭球对照／回投误差</label>
       <label class="entity-check"><input id="entity-click-add" type="checkbox">单击新增点（采用拾取高度，不强加1500米）</label>
+      <details><summary>鼠标绘制说明</summary><p>点击上方绘制点／折线／面／标注开启对应模式；线至少2点、面至少3点，随后完成。支持鼠标预览、撤销、取消及Enter／Esc快捷键。绘制暂停相机拖拽，结束恢复。顶点取点击时显示地表高度，不是持续贴地；跨山脊的线面仍可能被遮挡。</p><button id="entity-draw-start">按“新增类型”开始绘制</button></details>
       <div id="entity-resource" class="entity-resource">0 个对象</div><div id="entity-message" role="status">点击示例按钮开始，点击地图可查询对象。</div><pre id="entity-output">尚未新增</pre>
     </aside>
     <label id="level-debug" class="level-debug">

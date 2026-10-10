@@ -1,6 +1,8 @@
 # SDK首版接口与开发计划
 
-日期：2026-10-02初始计划，2026-10-09更新。状态：A+B初版已实施，C仍待实施。独立地形LOD本阶段搁置，保留现有渲染/影像连续性策略。
+日期：2026-10-02初始计划，2026-10-10更新。状态：A+B与C1基础鼠标绘制已实施，高级编辑/测量/持续贴地待实施。独立地形LOD本阶段搁置，保留现有渲染/影像连续性策略。
+
+2026-10-10：按新增要求实现根index.html调试面板、viewer.draw.start/finish/undo/cancel/state/onChange、点/折线/面/标注独立模式、预览及导航冲突管理。修正“椭球拾取再强加1500米”的漂移路径；pickPosition默认显示地表网格，pickPositionDetailed提供来源/回投诊断，显式ellipsoid仍可对照。新增occlusion:depth/overlay，不改实际高程，置顶表达不等于贴地。现行API与边界以SDK使用说明§4.3为准；下文为历史草案，尤其原C待实施与椭球-only描述不再代表最新状态。
 
 **B版当前实现：** viewer.entities统一管理point/polyline/polygon/label，支持add/getById/has/values/query/update/move/setVisibleById/setVisible/remove/clear/onChange。真实填充面与孔洞、屏幕像素宽线、屏幕朝向标注；viewer.pick选择对象，pickPosition仅参考椭球。公共字段是symbol、positions、holes，不是本页早期草案的style/rings；省略高度现为30米以帮助无地形时显示，仍是绝对高度而非贴地。具体运行示例、限制和错误码以[SDK使用说明§4.1](SDK使用说明.md#41-b版点线面与标注对象)及dist类型声明为准。下文保留早期评估供追溯，不将过时示意代码当作现行API。
 

@@ -9,11 +9,12 @@ export type LineTexture = { url: string; length?: number;
 export type PolygonTexture = { url: string; repeat?: readonly [number, number]; offset?: readonly [number, number];
   rotation?: number; /** Pattern translation in normalized UV units/second. */ speed?: readonly [number, number] };
 export type PointSymbol = { color?: string; size?: number; shape?: 'circle' | 'square' | 'diamond'; outlineColor?: string; outlineWidth?: number; opacity?: number;
-  icon?: PointIcon | null; heading?: number; alignment?: 'map' | 'screen' };
-export type LineSymbol = { color?: string; width?: number; opacity?: number; dash?: readonly [onPixels: number, offPixels: number]; texture?: LineTexture | null };
-export type PolygonSymbol = { color?: string; opacity?: number; fill?: boolean; outlineColor?: string; outlineWidth?: number; texture?: PolygonTexture | null };
+  icon?: PointIcon | null; heading?: number; alignment?: 'map' | 'screen'; occlusion?: 'depth'|'overlay' };
+export type LineSymbol = { color?: string; width?: number; opacity?: number; dash?: readonly [onPixels: number, offPixels: number]; texture?: LineTexture | null; occlusion?:'depth'|'overlay' };
+export type PolygonSymbol = { color?: string; opacity?: number; fill?: boolean; outlineColor?: string; outlineWidth?: number; texture?: PolygonTexture | null; occlusion?:'depth'|'overlay' };
 export type LabelSymbol = { text: string; fontSize?: number; color?: string; haloColor?: string; haloWidth?: number;
-  offset?: readonly [xPixels: number, yPixels: number]; backgroundColor?: string; padding?: number; opacity?: number };
+  offset?: readonly [xPixels: number, yPixels: number]; backgroundColor?: string; padding?: number; opacity?: number;
+  /** depth by default; attached point labels inherit the point policy unless explicitly set. */ occlusion?:'depth'|'overlay' };
 type Common = { id: string; name?: string; visible?: boolean; properties?: Record<string, unknown>;
   /** Draw order below engine base annotations; 0..9000, default 500. */
   order?: number; label?: LabelSymbol };

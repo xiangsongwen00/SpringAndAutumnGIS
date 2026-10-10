@@ -89,7 +89,7 @@ main().catch(console.error);
 - engine：低层扩展入口，可复用GeoJsonLayer等，不要直接破坏SDK持有的base图层或__sdk_base_labels。
 - ViewerError.code：INVALID_OPTIONS、BASEMAP_LOAD_FAILED、ABORTED、TERRAIN_UNAVAILABLE、DESTROYED。公共加载错误不回显后端凭据URL；浏览器WebGL构造错误可能直接抛出。
 
-内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。旧GeoJsonLayer的面仍仅为边界；2026-10-09起新增entities填充面与标注，见下一节。完整鼠标线面绘制与独立地形LOD尚未实现。
+内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。旧GeoJsonLayer的面仍仅为边界；2026-10-09增加entities，2026-10-10增加基础鼠标绘制、显示地表拾取和置顶表达，见§4.1–4.3。独立地形LOD、持续贴地和高级编辑仍未实施。
 
 ## 4.1 B版：点线面与标注对象
 
@@ -142,18 +142,18 @@ unsubscribe();
 | remove(id)、clear() | 删除释放对象GPU资源；remove不存在ID返回false；clear不销毁集合 |
 | onChange(listener) | add/update/remove/clear/visibility，update带fields；返回取消订阅函数，观察者异常不打断其他订阅者 |
 | viewer.pick({x,y},{tolerance}) | canvas左上角为原点的CSS像素；返回最上层命中对象快照或null，默认容差6px |
-| viewer.pickPosition({x,y}) | 仅参考椭球交点；天空／画布外返回null，不是地形/模型深度拾取 |
+| viewer.pickPosition({x,y},options?) | 默认求当前显示地表网格交点；支持明确指定参考椭球或固定绝对高度面，详见§4.3 |
 
-示例点击查询：从event.clientX/clientY减去canvas.getBoundingClientRect()的left/top再传给pick，不乘devicePixelRatio。应用自行区分点击和导航拖动，独立demo已实现这一判断，并提供可选“单击新增点”。这不是C阶段的多点绘制、预览、撤销状态机。
+示例点击查询：从event.clientX/clientY减去canvas.getBoundingClientRect()的left/top再传给pick，不乘devicePixelRatio。单击新增点采用拾取位置及高度，不再取椭球经纬度后硬加1500米；多点绘制使用viewer.draw，详见§4.3。
 
 符号与高度边界：
 
-- 坐标WGS84度、第三维为椭球绝对高度米，省略时30米。默认30米是无地形时的显示抬高，不是采样地形。显式0仍为0；开地形不会自动抬高或贴地，低于山体会被遮挡。此版深度测试始终开启，没有用关闭深度伪装贴地。
+- 坐标WGS84度、第三维为椭球绝对高度米，省略时30米。默认30米是无地形时的显示抬高，不是采样地形。显式0仍为0；开启地形不会自动抬高或持续贴地。默认正常深度，低于山体会被遮挡；可选择occlusion:overlay置顶表达，明确不作为贴地。
 - 点circle/square/diamond或URL图标，size/outlineWidth为CSS像素；宽线为GPU屏幕挤出，不依赖原生WebGL线宽。线端为butt，连接仍为简化效果，不是完整制图级join/cap；纹理与虚线按可见路径屏幕长度累计。图标/流动纹理见§4.2；不支持自定义字体资源或建筑拉伸。
 - polygon是真实填充，支持凹外环、洞和轮廓；fill:false仅轮廓。闭合末点可省略；自交、相交/触碰环、洞在外部、嵌套洞、零面积拒绝。局部面经纬各跨度最多1度，支持局部跨日界线；区域/全国面优先使用已有瓦片图层。显式0高度和很长线段/复杂面仍可能受曲率及细分预算影响，不承诺任意全球曲面贴合精度。
 - 颜色CSS命名色或3/6位hex，透明度用opacity；尺寸/坐标输入、符号字段、几何规模均校验。EntityError.code为INVALID_ENTITY/DUPLICATE_ID/NOT_FOUND/DESTROYED，不能混同ViewerError。
 - 标注是GPU屏幕朝向文字，可配颜色、光晕、背景、字号、offset；offset正x向右、正y向下。几何附属标注锚在首顶点；需要另一个锚点时使用独立label对象。文字最多512字符，显示最多8行、宽度1024CSS px（超出裁切）；使用系统sans-serif，不是完整glyph/sprite/symbol-style兼容系统。
-- 标注有画布/椭球遮挡裁剪、32px网格碰撞及最多256个可见限制，高order优先占位；物理地形遮挡仍交给GPU。业务order范围0..9000，底图引擎注记仍在上层。pick使用屏幕几何与椭球遮挡，不读取地形深度，山体遮住的对象仍可能被几何拾取；精确地形拾取待后续地表快照接口。
+- 标注有画布/椭球遮挡裁剪、32px网格碰撞及最多256个可见限制，高order优先占位；正常模式地形遮挡交给GPU，overlay模式关闭符号深度测试但不改高度。业务order范围0..9000，底图引擎注记保持既有上层顺序。点／文字pick可用当前地表深度排除正常模式的遮挡对象；线面仍是屏幕几何近似，不是任意模型/透明材质深度拾取。
 - 默认最多5000对象、单几何10000输入点，线细分有界，面有曲率细分和规模限制；这是可编辑业务对象系统，不承诺数万密集对象60FPS。只重建脏对象，每帧最多8个/2ms软预算；一个任务不能被预算中途抢占。样式/几何跨帧生效，更新期间保留旧显示；remove/隐藏立即影响显示与拾取。
 - destroy释放集合、材质、纹理、几何和订阅；之后集合读写拒绝。不要手动移除__sdk_entities或调用其dispose后继续使用Viewer的entities。EntityCollection单独导出便于无WebGL管理/测试；EntityLayer是低层适配器。
 
@@ -194,6 +194,55 @@ viewer.retryEntityResources('person'); // 显式重试失败图片或纹理预�
 - PNG/JPEG/WebP，远程图片需要CORS；支持相对/HTTP(S)/blob及对应base64 data URL。不支持任意脚本URL。加载最多4并发、256个ready/loading共享图片，单图片≤8MiB且≤2048×2048；15秒超时，不影响地图瓦片队列。图片与文字纹理共同受64MiB估算RGBA上传预算约束（不含解码临时内存）；预算不足时可暂停新符号纹理/文字并报告error，不无限扩张显存。超限制/404/CORS失败暂显示简单几何，不冒充纹理已经就绪；公共状态不回显带凭据URL。修复服务或释放其他对象后调用retryEntityResources显式重试，不自动无限重试坏URL。
 - 按URL共享引用，样式更新先取得新引用再释放旧显示；最后一个使用者删除后取消请求、关闭ImageBitmap并释放GPU纹理。迟到图片不会覆盖已删除或新建对象。GPU上传前ImageBitmap显式翻转一次，方向回归覆盖上/下和顺时针旋转；这不改变底图XYZ/TMS约束。
 - 流动动画每帧仅修改相位/UV偏移uniform，不重建网格、标注或重复下载。stop暂停渲染，动画时间当前为实例墙钟，恢复时相位会追上当前时间；尚未提供暂停时间轴或动画完成事件。
+
+## 4.3 当前项目调试、显示地表拾取与基础鼠标绘制（2026-10-10）
+
+引擎根目录index.html也有测试入口，不只独立SDK demo。CMD：
+
+```bat
+cd /d E:\SpringAndAutumnGIS\SpringAndAutumnGIS
+npm run dev
+```
+
+打开终端实际地址的/index.html。此源码页依赖Vite转换TS，不能通过file://或Live Server直接运行；引擎dist仍只输出库，不改成网站。独立应用继续安装dist/tgz并用自身dev/preview。
+
+顶部“测试点线面”打开完整面板，默认加入四类示例；里面有明确的“绘制点／绘制折线／绘制面／绘制标注”按钮，不是只勾选单击加点。顶部“拾取调试”打开诊断面板，不强制定位。永远村和行政区GeoJSON快捷定位收进“业务图层”面板，数据源不删除；独立demo重复的旧合成GeoJSON点线面示例已移除。
+
+```js
+viewer.draw.start({ type: 'polyline', id: 'route-from-mouse',
+  symbol: { color: '#00ffff', width: 4, occlusion: 'overlay' }, pick: { mode: 'surface' } });
+// 逐点点击地图，鼠标移动时有线段预览；至少两点后：
+const line = viewer.draw.finish(); // 加入同一个viewer.entities，返回只读快照
+viewer.draw.start({ type: 'polygon', symbol: { color: '#32e6a1', opacity: 0.35, occlusion: 'overlay' } });
+viewer.draw.undo(); // 撤销当前最后一个顶点
+viewer.draw.cancel(); // 丢弃预览，不删除已提交对象
+viewer.draw.start({ type: 'point', symbol: { icon: { url: './mylocation_up.png' }, occlusion: 'overlay' } });
+// 点和标注单击自动提交；独立标注：type:'label', label:{text:'标注',occlusion:'overlay'}
+const unsubscribe = viewer.draw.onChange(state => console.log(state.active, state.type, state.vertexCount, state.lastEntityId));
+```
+
+绘制开始时取消未完成飞行并暂停相机输入，完成/取消/销毁后恢复此前导航状态；Enter完成，Esc取消，Backspace/Ctrl+Z撤销顶点（输入框内不抢占编辑）。切换模式取消旧预览；非法自交面或顶点不足不会提交，保留当前会话供撤销/修正。当前鼠标上限1000顶点；面只绘外环，孔洞可通过实体update后加。符号和拾取配置在start时捕获，结束后可继续编辑。高级捕捉、顶点拖拽、Redo、触屏绘制、测量和持续贴地尚未实施。
+
+鼠标绘制线/面在两个demo里默认选“置顶表达”，确保当前未持续贴地的阶段也能看清图形；完成后可改正常深度。API创建实体与未指定occlusion的draw仍默认正常深度。overlay是关闭指定对象材质的depthTest、保留depthWrite:false和既有绘制顺序；不修改经纬度/高程，不是伪造贴地。点与文字保留地球背面剔除和标注碰撞限制；线面采用保守包围体剔除，跨地平线的大图形并非逐像素精确遮挡。
+
+```js
+viewer.entities.update('station', {
+  symbol: { occlusion: 'overlay' }, label: { occlusion: 'overlay' }
+});
+// 改回正常深度：occlusion:'depth'。独立文字在label上设置。
+// 附属点标注未显式指定时继承点策略；显式label.occlusion可单独控制。
+const rect = viewer.engine.renderer.domElement.getBoundingClientRect();
+const screen = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+const actual = viewer.pickPositionDetailed(screen); // 默认mode:'surface'
+const reference = viewer.pickPositionDetailed(screen, { mode: 'ellipsoid' });
+const fixed = viewer.pickPositionDetailed(screen, { mode: 'absolute-height', height: 1500 });
+```
+
+默认拾取使用当前base影像／原生矢量的实际显示地表三角网格，复现现有shader的DEM采样（线性/最近邻）、XYZ UV绑定、局部高精度路径、曲率和公共边ECEF覆盖。不是拿“最新下载DEM”改高度，也不是把椭球交点垂直抬升。无可用base网格时明确返回source:ellipsoid，天空/画布外返回null。不会为拾取额外请求DEM，不改变瓦片/地形LOD；CPU顶点缓存按几何/纹理版本失效，在查询时懒制作，不每帧扫描网格。高频拾取/BVH和独立有效地表接口仍需后续性能工作。
+
+pickPositionDetailed提供position、source、tile、screen、reprojected、errorPixels、distance和viewDepth。诊断同时显示椭球对照；斜视时高度差会造成经纬度差，不能因“不看高度”就排除其影响。它是显示地图地表查询，不是建筑/模型/透明纹理任意深度缓冲拾取，也不是高度量测真值。拾取后顶点存绝对高度快照，DEM后续细化不自动改对象；测量与持续贴地需要后续明确高度参考及同代地表规则。
+
+验证：npm run test:picking与npm run test:entities:browser。后者显式entitySmoke=1使用本地合成栅格/DEM，在root index验证单canvas、DPR=2、页面偏移、地形开/关、GPU点击点像素、折线/面绘制、撤销/取消/导航恢复、置顶与背面剔除；阻断外部请求，不用真实服务压测。受控点击回投约0.000001px，不证明所有实景服务配准或FPS已验收。普通URL不启用合成回退。
 
 ## 5. 用户资源与凭据
 

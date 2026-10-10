@@ -2,6 +2,8 @@
 
 ## SDK公共入口（阶段A+B）
 
+2026-10-10新增C1基础鼠标绘制与显示地表拾取：根index.html顶部“测试点线面／拾取调试”，面板提供绘制点、折线、面、标注，完成／撤销／取消和置顶表达。通过本项目npm run dev运行源码页；SDK消费者继续在独立项目运行已安装dist，详见SDK使用说明§4.3。测量、持续贴地和高级编辑尚未实现。
+
 2026-10-08新增`Viewer.create(container, options)`，支持统一XYZ/TMS/provider/Style v8底图选择与异步切换、首帧地形开关、LOD经纬网显隐及幂等销毁。2026-10-09新增`viewer.entities`：点/图标朝向、宽线/方向流动纹理、局部填充面/孔洞/半透明滚动纹理、独立与附属标注，支持查询、修改符号/几何、移动、显隐、删除以及屏幕选择。低层GlobeEngine保留。用`npm pack`生成安装包，再在外部项目以ES模块import；未发布registry。对象暂为椭球绝对高度，不承诺地形贴地、完整鼠标绘制或全球多边形。
 
 完整接口、安装与行为边界见[SDK使用说明](./SDK使用说明.md)。本仓库只构建dist与验证库输出，`npm run test:sdk`不再安装临时消费者或启动服务。独立交互放在`E:\0-SpringGISNet`，以已安装SDK依赖提供TS/JS两种消费页面；普通使用只需该应用`npm run dev`或`npm run build && npm run preview`，不再用引擎demo:sdk启动。

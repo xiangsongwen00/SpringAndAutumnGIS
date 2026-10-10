@@ -8,6 +8,7 @@ import type { TerrainProvider } from '../core/terrain/TerrainProvider';
 import type { GlobeFlyToOptions } from '../engine/GlobeCameraController';
 import { EntityCollection } from './EntityCollection';
 import { EntityLayer } from '../render/EntityLayer';
+import { EntityDrawingController } from './EntityDrawingController';
 import type { EntitySnapshot, EntityPickOptions, ScreenPosition, EntityResourceState } from './EntityTypes';
 import type { Cartographic } from '../core/geo/Ellipsoid';
 import type { SurfacePickOptions, SurfacePickResult } from '../core/geo/SurfacePicker';
@@ -43,6 +44,7 @@ const SYMBOL_LAYER = '__sdk_base_labels';
 export class Viewer {
   readonly engine: GlobeEngine;
   readonly entities = new EntityCollection();
+  readonly draw:EntityDrawingController;
   private readonly entityLayer: EntityLayer;
   private readonly definitions = new Map<string, BaseMapDefinition>();
   private current: PreparedBaseMap | null = null;
@@ -59,6 +61,7 @@ export class Viewer {
       grid: { ...engineOptions.grid, visible: showLodGrid } });
     this.entityLayer = new EntityLayer(this.engine.ellipsoid, this.entities);
     this.engine.addSceneLayer('__sdk_entities', this.entityLayer);
+    this.draw=new EntityDrawingController(this.engine,this.entities,'__sdk_draw_preview');
   }
 
   static async create(container: string | HTMLElement, options: ViewerOptions = {}): Promise<Viewer> {
@@ -151,19 +154,26 @@ export class Viewer {
   /** CSS pixels relative to the canvas, not client coordinates or device pixels. */
   pick(screen: ScreenPosition, options: EntityPickOptions = {}): EntitySnapshot | null {
     this.assertAlive(); this.engine.camera.updateMatrixWorld();
-    return this.entityLayer.pick(screen, this.engine.camera, options);
+    const ground=this.engine.pickPositionDetailed(screen);
+    return this.entityLayer.pick(screen, this.engine.camera, options,ground?.source==='rendered-surface'?ground.viewDepth:null);
   }
   getEntityResourceState(id:string):EntityResourceState|null { this.assertAlive(); return this.entityLayer.getResourceState(id); }
   retryEntityResources(id:string):boolean { this.assertAlive(); return this.entityLayer.retryResources(id); }
   /** Defaults to the displayed raster/vector surface mesh. Explicit ellipsoid/height modes remain available. */
   pickPosition(screen: ScreenPosition,options:SurfacePickOptions={}): Cartographic | null { return this.pickPositionDetailed(screen,options)?.position??null; }
-  pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null { this.assertAlive();return this.engine.pickPositionDetailed(screen,options); }
+  pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null {
+    this.assertAlive();
+    if(!screen||![screen.x,screen.y].every(Number.isFinite))throw new ViewerError('INVALID_OPTIONS','Invalid screen position.');
+    if(options.mode&&!['surface','ellipsoid','absolute-height'].includes(options.mode)||options.mode==='absolute-height'&&(!Number.isFinite(options.height)||Math.abs(options.height!)>10000000))
+      throw new ViewerError('INVALID_OPTIONS','Invalid surface pick mode or height.');
+    return this.engine.pickPositionDetailed(screen,options);
+  }
   start(): void { this.assertAlive(); this.engine.start(); }
   stop(): void { this.assertAlive(); this.engine.stop(); }
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true; this.generation++; this.controller?.abort(); this.controller = null;
-    this.engine.dispose(); this.entities.dispose(); this.current?.dispose(); this.current = null;
+    this.draw.dispose();this.engine.dispose(); this.entities.dispose(); this.current?.dispose(); this.current = null;
   }
   private assertAlive(): void { if (this.destroyed) throw new ViewerError('DESTROYED', 'Viewer has been destroyed.'); }
 

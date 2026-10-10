@@ -1,11 +1,12 @@
 import * as THREE from 'three';
-import { EntityCollection, EntityError, EntityLayer, type GlobeEngine, type EntityDefinition, type EntityPatch,
+import { EntityCollection, EntityError, EntityLayer, EntityDrawingController, type GlobeEngine, type EntityDefinition, type EntityPatch,
   type EntityPosition, type EntityQuery, type PointSymbol, type LineSymbol, type PolygonSymbol } from '../index';
 
 /** Source-demo adapter: one engine, one independent entity overlay, no SDK consumer iframe. */
 export function attachEntityPlayground(engine: GlobeEngine): () => void {
   const entities = new EntityCollection(), layer = new EntityLayer(engine.ellipsoid, entities);
   const layerId = '__demo_entities'; engine.addSceneLayer(layerId, layer);
+  const draw=new EntityDrawingController(engine,entities,'__demo_draw_preview');
   const events = new AbortController(); let serial = 0, disposed = false;
   const el = <T extends HTMLElement>(id: string): T => {
     const value = document.getElementById(id); if (!value) throw new Error(`Missing entity control: ${id}`); return value as T;
@@ -34,6 +35,7 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
     updateResource();
   };
   const open = (shown: boolean): void => {
+    if(!shown)draw.cancel();
     panel.hidden=!shown;toggle.setAttribute('aria-expanded',String(shown));document.body.classList.toggle('entity-panel-open',shown);
     if(shown){el('business-layer-panel').hidden=true;el('business-layer-control').setAttribute('aria-expanded','false');updateResource();}
   };
@@ -55,6 +57,7 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
     select('shape').value=value.type==='point'?value.symbol?.shape??'circle':'circle';
     input('fill').checked=value.type==='polygon'?value.symbol?.fill!==false:true;
     input('text').value=value.label?.text??'';input('font').value=String(value.label?.fontSize??16);
+    select('occlusion').value=(value.type==='label'?value.label.occlusion:value.symbol?.occlusion??value.label?.occlusion)??'depth';
     const icon=value.type==='point'?value.symbol?.icon:undefined;
     input('icon-enabled').checked=!!icon;input('icon-url').value=icon?.url??'/mylocation_up.png';
     input('heading').value=String(value.type==='point'?value.symbol?.heading??0:0);input('source-heading').value=String(icon?.sourceHeading??0);
@@ -71,14 +74,15 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
   function symbol(type:'polygon'):PolygonSymbol;
   function symbol(type:'point'|'polyline'|'polygon'):PointSymbol|LineSymbol|PolygonSymbol;
   function symbol(type:'point'|'polyline'|'polygon'):PointSymbol|LineSymbol|PolygonSymbol {
-    const common={color:input('color').value,opacity:number('opacity',0,1)},outlineColor=input('outline').value;
+    const common={color:input('color').value,opacity:number('opacity',0,1),occlusion:select('occlusion').value as 'depth'|'overlay'},outlineColor=input('outline').value;
     if(type==='point')return {...common,outlineColor,outlineWidth:number('width',0,64),size:number('size',1,256),shape:select('shape').value as 'circle'|'square'|'diamond',
+      occlusion:select('occlusion').value as 'depth'|'overlay',
       heading:number('heading'),alignment:select('alignment').value as 'map'|'screen',icon:input('icon-enabled').checked?{url:input('icon-url').value.trim(),sourceHeading:number('source-heading')}:null};
     if(type==='polyline')return {...common,width:number('width',0,64),texture:input('texture-enabled').checked?{url:input('texture-url').value.trim(),length:number('line-period',1,2048),speed:number('line-speed',-4096,4096),sourceDirection:select('line-direction').value as 'left'|'right'}:null};
     return {...common,outlineColor,outlineWidth:number('width',0,64),fill:input('fill').checked,texture:input('texture-enabled').checked?{url:input('texture-url').value.trim(),
       repeat:[number('repeat-u',0.01,256),number('repeat-v',0.01,256)],speed:[number('speed-u',-1000,1000),number('speed-v',-1000,1000)],rotation:number('texture-rotation')}:null};
   }
-  const label = () => input('text').value?{text:input('text').value,fontSize:number('font',6,96),color:input('color').value,haloColor:input('outline').value}:undefined;
+  const label = () => input('text').value?{text:input('text').value,fontSize:number('font',6,96),color:input('color').value,haloColor:input('outline').value,occlusion:select('occlusion').value as 'depth'|'overlay'}:undefined;
   const positions = (type:'polyline'|'polygon'): readonly EntityPosition[] => {
     if(area('positions').value.trim())return JSON.parse(area('positions').value);
     const [x,y,h]=position();return type==='polyline'?[[x-.02,y-.01,h],[x,y,h],[x+.02,y+.01,h]]:[[x-.02,y-.02,h],[x+.02,y-.02,h],[x+.02,y+.02,h],[x-.02,y+.02,h]];
@@ -92,6 +96,14 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
     {id:'demo-polygon',type:'polygon',name:'半透明纹理面（有洞）',positions:[[106.51,29.63,1500],[106.57,29.63,1500],[106.57,29.67,1500],[106.51,29.67,1500]],holes:[[[106.53,29.64,1500],[106.55,29.64,1500],[106.55,29.66,1500],[106.53,29.66,1500]]],symbol:{color:'#ffffff',opacity:.5,outlineColor:'#ffffff',outlineWidth:2,texture:{url:'/Qianjin_left.png',repeat:[8,4],speed:[-.15,0]}}},
     {id:'demo-label',type:'label',name:'独立标注',position:[106.58,29.65,1500],label:{text:'独立标注\n绝对高度1500m',fontSize:18,color:'#ffffff',backgroundColor:'#173342',offset:[0,0]}}
   ];
+  const startDrawing=(type:EntityDefinition['type']):void=>{
+    select('type').value=type;input('id').value='';if(type==='label'&&!input('text').value)input('text').value='标注';
+    if(type==='polyline'||type==='polygon')select('occlusion').value='overlay';
+    const mode=select('pick-mode').value as 'surface'|'ellipsoid'|'absolute-height';
+    draw.start({type,name:input('name').value,properties:properties(),symbol:type==='label'?undefined:symbol(type),label:label(),pick:{mode,height:mode==='absolute-height'?number('height'):undefined}});open(true);
+  };
+  const unsubscribeDraw=draw.onChange(state=>{message(state.error??(state.active?`正在绘制 ${state.type} · ${state.vertexCount} 个顶点 · 完成/撤销/取消`:'绘制结束，相机操作已恢复'),!!state.error);
+    if(state.lastEntityId&&entities.has(state.lastEntityId)){select('select').value=state.lastEntityId;loadForm();}});
   const addSamples = (type?:EntityDefinition['type']):void => {
     const items=samples.filter(value=>!type||value.type===type);for(const value of items){entities.remove(value.id);entities.add(value);}
     entities.setVisible(true);select('select').value=items[0]!.id;loadForm();focus(items[0]!);open(true);
@@ -119,6 +131,9 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
   bind('entity-move',()=>{entities.move(selected().id,{longitude:number('dlon'),latitude:number('dlat'),height:number('dheight')});loadForm();});
   bind('entity-query',()=>{el('entity-output').textContent=JSON.stringify(entities.query(JSON.parse(area('query-json').value) as EntityQuery),null,2);});
   bind('entity-retry',()=>{layer.retryResources(selected().id);});
+  bind('entity-draw-start',()=>startDrawing(select('type').value as EntityDefinition['type']));
+  for(const type of ['point','polyline','polygon','label'] as const)bind(`entity-draw-${type==='polyline'?'line':type}`,()=>startDrawing(type));
+  bind('entity-draw-finish',()=>{draw.finish();});bind('entity-draw-cancel',()=>draw.cancel());bind('entity-draw-undo',()=>{draw.undo();});
   for(const id of ['business-layer-control','business-layer-test','geojson-test'])el(id).addEventListener('click',()=>open(false),{signal:events.signal});
   let pointer:{x:number;y:number;id:number}|undefined;
   const canvas=engine.renderer.domElement;
@@ -130,7 +145,9 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
       const rect=canvas.getBoundingClientRect(),screen={x:event.clientX-rect.left,y:event.clientY-rect.top};engine.camera.updateMatrixWorld();
       const mode=select('pick-mode').value as 'surface'|'ellipsoid'|'absolute-height';
       const picked=engine.pickPositionDetailed(screen,{mode,height:mode==='absolute-height'?number('height'):undefined});
-      const reference=engine.pickPositionDetailed(screen,{mode:'ellipsoid'}),hit=layer.pick(screen,engine.camera);
+      const reference=engine.pickPositionDetailed(screen,{mode:'ellipsoid'});
+      const ground=mode==='surface'?picked:engine.pickPositionDetailed(screen);
+      const hit=layer.pick(screen,engine.camera,{},ground?.source==='rendered-surface'?ground.viewDepth:null);
       if(hit){select('select').value=hit.id;loadForm();message(`选中 ${hit.id}`);}
       else if(input('click-add').checked&&picked){const p=picked.position;input('lon').value=String(p.longitude);input('lat').value=String(p.latitude);input('height').value=String(p.height);input('id').value='';select('type').value='point';el('entity-add').click();}
       if(input('pick-diagnostics').checked)el('entity-output').textContent=JSON.stringify({picked,referenceEllipsoid:reference?.position??null,selectedObject:hit?.id??null,
@@ -143,8 +160,8 @@ export function attachEntityPlayground(engine: GlobeEngine): () => void {
   const timer=window.setInterval(updateResource,500);refresh();
   // Explicit local-only browser regression hook. Absent in normal URLs.
   if(new URLSearchParams(location.search).get('entitySmoke')==='1'){
-    (window as Window & {__entityDemo?:unknown}).__entityDemo={entities,layer,engine};
+    (window as Window & {__entityDemo?:unknown}).__entityDemo={entities,layer,engine,draw};
     el('entity-message').dataset.smoke='ready';
   }
-  return ()=>{if(disposed)return;disposed=true;events.abort();unsubscribe();clearInterval(timer);observer.disconnect();engine.removeSceneLayer(layerId);entities.dispose();document.body.classList.remove('entity-panel-open');};
+  return ()=>{if(disposed)return;draw.dispose();disposed=true;events.abort();unsubscribe();unsubscribeDraw();clearInterval(timer);observer.disconnect();engine.removeSceneLayer(layerId);entities.dispose();document.body.classList.remove('entity-panel-open');};
 }
