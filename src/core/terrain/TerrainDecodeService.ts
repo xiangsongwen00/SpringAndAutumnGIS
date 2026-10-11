@@ -1,6 +1,7 @@
 import DecodeWorker from './TerrainDecodeWorker?worker&inline';
 import { SerialWorkerClient } from '../workers/SerialWorkerClient';
 import { convertTerrainPixels, type TerrainHeightField } from './TerrainHeightConversion';
+import {terrainTaskPriority} from './TerrainTaskPriority';
 
 /** Shared, bounded DEM worker. Releases its worker after 30s idle; layer/provider
  * lifetimes need not take ownership of another user's shared terrain provider.
@@ -23,7 +24,7 @@ export class TerrainDecodeService {
       signal?.throwIfAborted();
       const client = this.client ??= new SerialWorkerClient(() => new DecodeWorker(), 32);
       if (client.available) {
-        const result = await client.request<TerrainHeightField | { needsPixels: true }>({ blob, encoding }, signal);
+        const result = await client.request<TerrainHeightField | { needsPixels: true }>({ blob, encoding }, signal,[],()=>terrainTaskPriority(signal));
         if (!('needsPixels' in result)) { this.conversionMs = result.conversionMs; return result; }
       }
       const bitmap = await createImageBitmap(blob);
@@ -37,7 +38,7 @@ export class TerrainDecodeService {
       } finally { bitmap.close(); }
       signal?.throwIfAborted();
       if (client.available) {
-        const field = await client.request<TerrainHeightField>({ pixels, width, height, encoding }, signal, [pixels.buffer]);
+        const field = await client.request<TerrainHeightField>({ pixels, width, height, encoding }, signal, [pixels.buffer],()=>terrainTaskPriority(signal));
         this.conversionMs = field.conversionMs; return field;
       }
       console.warn('[Terrain] Worker unavailable; using cooperative conversion fallback');

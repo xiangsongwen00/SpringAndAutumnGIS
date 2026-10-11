@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransform';
+import { CoordinateTransform,WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransform';
+import {bindTerrainTaskPriority} from '../core/terrain/TerrainTaskPriority';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import { tileRequestUrgency, type SelectedTile } from '../core/lod/GlobeLodSelector';
 import type { SurfaceDisplacementBoundsSource } from '../core/lod/GlobeLodSelector';
@@ -20,6 +21,10 @@ import {
 export type TerrainTileLayerOptions = {
   /** Experimental transactional coverage. Not visually accepted; opt in only. */
   regionalCoverage?: boolean;
+  /** Schedules the existing LOD leaves; it does not change selection/DEM precision. */
+  requestPriority?:'camera-near'|'screen-error';
+  /** At most one safely covered far detail request per 750ms may yield a slot. */
+  preemptFarDetail?:boolean;
   segments?: number;
   maxConcurrentRequests?: number;
   maxCachedTiles?: number;
@@ -61,6 +66,8 @@ export type TerrainTileLayerStats = Readonly<{
   preparingPatches: number;
   prepareMs: number;
   timeouts: number;
+  requestPriority:'camera-near'|'screen-error';
+  preemptedRequests:number;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -108,6 +115,9 @@ type TerrainRecord = {
   attempts?: number;
   retryAt?: number;
   timeout?: ReturnType<typeof setTimeout>;
+  requestClass?:'coverage'|'detail';
+  dependencyKey?:string;
+  cameraDistance?:number;
 };
 type RenderTile = {
   mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
@@ -177,6 +187,19 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private readonly requestTimeoutMs: number;
   private readonly regionalCoverage: boolean;
   private timeouts = 0;
+  private readonly requestPriority:'camera-near'|'screen-error';
+  private readonly preemptFarDetail:boolean;
+  private readonly coordinates:CoordinateTransform;
+  private readonly priorityCamera=new THREE.Vector3();
+  private hasPriorityCamera=false;
+  private prioritySelection:readonly SelectedTile[]|null=null;
+  private prioritized:readonly SelectedTile[]=[];
+  private priorityRevision='';
+  private readonly requestDistances=new Map<string,number>();
+  private detailTurns=0;
+  private lastPreemption=-Infinity;
+  private preemptedRequests=0;
+  private nextNearRequest:string|null=null;
 
   constructor(
     ellipsoid: Ellipsoid,
@@ -184,6 +207,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
     options: TerrainTileLayerOptions = {}
   ) {
     this.ellipsoid = ellipsoid;
+    this.coordinates=new CoordinateTransform(ellipsoid);
+    if(options.requestPriority&&!['camera-near','screen-error'].includes(options.requestPriority))throw new Error('Invalid terrain request priority.');
+    this.requestPriority=options.requestPriority??'camera-near';this.preemptFarDetail=options.preemptFarDetail!==false;
     this.provider = provider;
     this.baseSegments = Math.max(16, Math.round(options.segments ?? 64));
     this.maxConcurrentRequests = Math.max(1, Math.round(options.maxConcurrentRequests ?? 6));
@@ -234,7 +260,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       displayed: this.displayKeys.size, waitingRegions: this.waitingRegions,
       qualityLimitedRegions: this.qualityLimitedRegions, displayGeneration: this.displayGeneration,
       preparingPatches: this.preparation ? this.preparation.ordered.length - this.preparation.index : 0,
-      prepareMs: this.prepareMs, timeouts: this.timeouts
+      prepareMs: this.prepareMs, timeouts: this.timeouts,requestPriority:this.useNearPriority?'camera-near':'screen-error',preemptedRequests:this.preemptedRequests
     };
   }
 
@@ -245,9 +271,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
     if (!this._enabled) return this.stats;
-    if (!this.regionalCoverage) return this.updateLegacy(selection);
+    const priorityChanged=this.refreshPriorityCamera(cameraPosition);
+    if (!this.regionalCoverage) return this.updateLegacy(selection,priorityChanged);
     this.prepareMs = 0;
     const selectionChanged = selection !== this.lastSelection;
+    if(priorityChanged)this.pressureBlockedRegions.clear();
     if (selectionChanged) {
       if (this.preparation && (selection.length !== this.preparation.selectionKeys.size ||
           selection.some(tile => !this.preparation!.selectionKeys.has(tileKey(tile.id))))) this.cancelPreparation();
@@ -258,10 +286,11 @@ export class TerrainTileLayer implements TerrainHeightSource {
       if (this.showDebugSurface) this.syncRenderTiles(selection);
       this.queueVisibleTiles(selection);
     }
+    else if(priorityChanged){this.pressureBlockedRegions.clear();this.queueVisibleTiles(selection);}
     this.commitPending();
     if ([...this.records.values()].some(record => record.state === 'error' && this.visibleKeys.has(record.key) &&
         (record.attempts ?? 0) < 3 && (record.retryAt ?? Infinity) <= performance.now())) this.schedulerDirty = true;
-    if (selectionChanged || this.committed) this.needsPublication = true;
+    if (selectionChanged || priorityChanged || this.committed) this.needsPublication = true;
     const generation = this.displayGeneration;
     this.publishRegions(selection);
     if (selectionChanged || this.committed || generation !== this.displayGeneration || this.schedulerDirty) {
@@ -495,27 +524,55 @@ export class TerrainTileLayer implements TerrainHeightSource {
     return geometry;
   }
 
+  private get useNearPriority():boolean{return this.requestPriority==='camera-near'&&this.hasPriorityCamera;}
+  private refreshPriorityCamera(position?:THREE.Vector3):boolean{
+    if(!position||!Number.isFinite(position.lengthSq())||position.lengthSq()<1)return false;
+    const height=this.coordinates.worldToGeodetic(position).height,threshold=Math.max(5,Math.max(0,height)*.002);
+    if(this.hasPriorityCamera&&this.priorityCamera.distanceToSquared(position)<threshold*threshold)return false;
+    this.priorityCamera.copy(position);this.hasPriorityCamera=true;this.prioritySelection=null;return this.requestPriority==='camera-near';
+  }
+  private orderSelection(selection:readonly SelectedTile[]):readonly SelectedTile[]{
+    const revision=`${this._revision}/${this.displayGeneration}/${this.useNearPriority}`;
+    if(selection===this.prioritySelection&&revision===this.priorityRevision)return this.prioritized;
+    this.requestDistances.clear();
+    const fallback=(a:SelectedTile,b:SelectedTile)=>tileRequestUrgency(b)-tileRequestUrgency(a)||a.viewCenterDistance-b.viewCenterDistance||b.id.level-a.id.level;
+    if(!this.useNearPriority)this.prioritized=[...selection].sort(fallback);
+    else{
+      const camera=this.coordinates.worldToGeodetic(this.priorityCamera),ground=this.sampleHeight(camera.longitude,camera.latitude)??0;
+      const band=Math.max(50,Math.max(0,camera.height-ground)*.05),point=new THREE.Vector3();
+      const decorated=selection.map(tile=>{
+        const r=tile.rectangle,west=r.west,east=r.east<west?r.east+360:r.east;let longitude=west,best=Infinity;
+        // Use the nearest point of the FOOTPRINT, not the tile centre (which
+        // penalizes large near-camera patches), and handle the date line.
+        for(const shift of [-360,0,360]){const lon=camera.longitude+shift,q=Math.max(west,Math.min(east,lon)),delta=Math.abs(q-lon);if(delta<best){best=delta;longitude=q;}}
+        const latitude=Math.max(r.south,Math.min(r.north,camera.latitude)),height=this.sampleHeight(longitude,latitude)??0;
+        this.ellipsoid.cartographicToCartesian({longitude,latitude,height},point);const distance=point.distanceTo(this.priorityCamera);
+        this.requestDistances.set(tileKey(tile.id),distance);return {tile,distance,band:Math.floor(distance/band)};
+      });
+      decorated.sort((a,b)=>a.band-b.band||fallback(a.tile,b.tile)||a.distance-b.distance);
+      this.prioritized=decorated.map(v=>v.tile);
+    }
+    this.prioritySelection=selection;this.priorityRevision=revision;return this.prioritized;
+  }
+
   private queueVisibleTiles(selection: readonly SelectedTile[]): void {
     this.visibleKeys.clear();
     for (const record of this.records.values()) {
-      if (record.state === 'queued' || record.state === 'pending') record.priority = Number.POSITIVE_INFINITY;
+      record.priority=Infinity;record.cameraDistance=Infinity;record.requestClass=undefined;record.dependencyKey=undefined;
     }
-    const prioritized = [...selection].sort(
-      (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
-        a.viewCenterDistance - b.viewCenterDistance || b.id.level - a.id.level
-    );
+    const prioritized = this.orderSelection(selection);
     // Protect the actual displayed sources and their boundary bases, not all
     // desired fine resources. Desired coverage can be much larger than RAM.
     for (const key of this.displayKeys) this.visibleKeys.add(key);
     if (this.preparation) for (const key of this.preparation.keys) this.visibleKeys.add(key);
-    const roots = new Map<string, TileId>();
+    const roots = new Map<string, {id:TileId;rank:number;distance:number}>();
     for (const tile of prioritized) if (tile.id.level >= this.provider.minLevel) {
       const root = ancestorAtLevel(tile.id, this.provider.minLevel);
-      roots.set(tileKey(root), root);
+      if(!roots.has(tileKey(root)))roots.set(tileKey(root),{id:root,rank:prioritized.indexOf(tile),distance:this.requestDistances.get(tileKey(tile.id))??Infinity});
     }
     let rank = 0;
     for (const root of roots.values()) {
-      this.visibleKeys.add(tileKey(root)); this.queueTile(root, -100000 + rank++);
+      this.visibleKeys.add(tileKey(root.id)); this.queueTile(root.id,this.useNearPriority?root.rank-.75:-100000+rank++,'coverage',undefined,root.distance);
     }
     const limited = new Set(this.pressureBlockedRegions);
     // Admit complete, bounded regional cohorts. Missing coarse coverage gets
@@ -546,10 +603,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
         continue; // Keep the committed parent. No permanently blocked target queue.
       }
       this.visibleKeys.add(coarseKey);
-      this.queueTile(region.parent, covered ? region.rank - .25 : -50000 + region.rank);
+      const root=ancestorAtLevel(region.parent,this.provider.minLevel),distance=this.requestDistances.get(tileKey(prioritized[region.rank]!.id))??Infinity;
+      this.queueTile(region.parent,this.useNearPriority?region.rank-.25:covered?region.rank-.25:-50000+region.rank,
+        covered?'detail':'coverage',this.useNearPriority&&region.parent.level>root.level?tileKey(root):undefined,distance);
       for (const target of region.targets.values()) {
         this.visibleKeys.add(tileKey(target));
-        this.queueTile(target, region.rank);
+        this.queueTile(target,region.rank,'detail',this.useNearPriority&&target.level>region.parent.level?tileKey(region.parent):undefined,distance);
       }
     }
     this.qualityLimitedRegions = limited.size;
@@ -561,13 +620,15 @@ export class TerrainTileLayer implements TerrainHeightSource {
     }
   }
 
-  private updateLegacy(selection: readonly SelectedTile[]): TerrainTileLayerStats {
+  private updateLegacy(selection: readonly SelectedTile[],priorityChanged=false): TerrainTileLayerStats {
     const changed = selection !== this.lastSelection;
     if (changed) {
       this.frame++; this.lastSelection = selection;
       if (this.showDebugSurface) this.syncRenderTiles(selection);
       this.queueLegacyTiles(selection);
     }
+    else if(priorityChanged||this.schedulerDirty)this.queueLegacyTiles(selection);
+    this.schedulerDirty=false;
     this.commitPending();
     if (this.committed) this.queueLegacyTiles(selection);
     if (changed || this.materialsDirty) {
@@ -584,31 +645,35 @@ export class TerrainTileLayer implements TerrainHeightSource {
   private queueLegacyTiles(selection: readonly SelectedTile[]): void {
     this.visibleKeys.clear();
     for (const record of this.records.values()) {
-      if (record.state === 'queued' || record.state === 'pending') record.priority = Number.POSITIVE_INFINITY;
+      record.priority=Infinity;record.cameraDistance=Infinity;record.requestClass=undefined;record.dependencyKey=undefined;
     }
-    const prioritized = [...selection].sort(
-      (a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
-        a.viewCenterDistance - b.viewCenterDistance || b.id.level - a.id.level
-    );
+    const prioritized = this.orderSelection(selection);
     for (let rank = 0; rank < prioritized.length; rank += 1) {
       const selected = prioritized[rank];
       if (!selected) continue;
       const maximumLevel = Math.min(selected.id.level, this.provider.maxLevel);
       if (maximumLevel < this.provider.minLevel) continue;
       const coarseLevel = Math.max(this.provider.minLevel, maximumLevel - 2);
-      // Establish a complete low-detail surface before requesting the target
-      // DEM. Absolute level is the primary priority so a wide viewport cannot
-      // start isolated high mountains while neighbouring parents are missing.
+      // Missing patches establish their local coarse cover first. Once ready,
+      // near mode requests the original full-detail target directly; no new LOD.
       const ready = this.findReadyAncestor(selected.id);
       // Once an ancestor covers this patch, request the target directly.
       // Loading every intervening DEM adds decode/upload/revision work while
       // contributing no missing coverage. Retain the currently bound parent.
-      for (let level = ready ? maximumLevel : coarseLevel; level <= maximumLevel; level += 1) {
+      let firstRequested=ready?maximumLevel:coarseLevel;
+      // Some services have missing coarse coverage but valid finer tiles. A
+      // failed cover must not permanently block that patch's entire pyramid.
+      if(this.useNearPriority&&!ready)while(firstRequested<maximumLevel&&this.records.get(tileKey(ancestorAtLevel(selected.id,firstRequested)))?.state==='error'){
+        this.visibleKeys.add(tileKey(ancestorAtLevel(selected.id,firstRequested)));firstRequested++;
+      }
+      const lastRequested=this.useNearPriority&&!ready?firstRequested:maximumLevel;
+      for (let level = firstRequested; level <= lastRequested; level += 1) {
         const requested = ancestorAtLevel(selected.id, level);
         this.visibleKeys.add(tileKey(requested));
         this.queueTile(
           requested,
-          (level - this.provider.minLevel) * prioritized.length + rank
+          this.useNearPriority?rank:(level-this.provider.minLevel)*prioritized.length+rank,
+          ready?'detail':'coverage',undefined,this.requestDistances.get(tileKey(selected.id))??Infinity
         );
       }
       if (ready) {
@@ -667,8 +732,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       const rootKey = tileKey(ancestorAtLevel(tile.id, this.provider.minLevel));
       if (this.records.get(rootKey)?.state === 'ready') candidate.add(rootKey);
     }
-    const prioritized = [...selection].sort((a, b) => tileRequestUrgency(b) - tileRequestUrgency(a) ||
-      a.viewCenterDistance - b.viewCenterDistance || b.id.level - a.id.level);
+    const prioritized = this.orderSelection(selection);
     for (const [key, region] of this.regions(prioritized)) {
       if (this.pressureBlockedRegions.has(key)) continue;
       const coarse = this.records.get(tileKey(region.parent));
@@ -708,7 +772,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       !this.displaySignatures.get(key)?.startsWith(`${this.records.get(key)?.data?.texture.uuid}/`));
     if (!changed) return;
     this.preparation = { keys: candidate, ordered: [...candidate].sort((a, b) =>
-      this.records.get(a)!.id.level - this.records.get(b)!.id.level), index: 0,
+      this.records.get(a)!.id.level - this.records.get(b)!.id.level||this.records.get(a)!.priority-this.records.get(b)!.priority), index: 0,
       regionKey,
       selectionKeys: new Set(selection.map(tile => tileKey(tile.id))),
       data: new Map(), signatures: new Map() };
@@ -810,12 +874,14 @@ export class TerrainTileLayer implements TerrainHeightSource {
     this.preparation = null;
   }
 
-  private queueTile(id: TileId, priority: number): void {
+  private queueTile(id: TileId, priority: number,requestClass:'coverage'|'detail'='detail',dependencyKey?:string,cameraDistance=Infinity): void {
     const key = tileKey(id);
     const existing = this.records.get(key);
     if (existing) {
       existing.lastUsedFrame = this.frame;
-      if (existing.state === 'queued' || existing.state === 'pending') existing.priority = Math.min(existing.priority, priority);
+      existing.priority=Math.min(existing.priority,priority);existing.cameraDistance=Math.min(existing.cameraDistance??Infinity,cameraDistance);
+      if(requestClass==='coverage'||!existing.requestClass)existing.requestClass=requestClass;
+      if(dependencyKey&&dependencyKey!==key)existing.dependencyKey=dependencyKey;
       if (existing.state === 'error' && (existing.attempts ?? 0) < 3 && (existing.retryAt ?? Infinity) <= performance.now()) {
         existing.state = 'queued'; existing.priority = priority;
       }
@@ -829,12 +895,42 @@ export class TerrainTileLayer implements TerrainHeightSource {
       lastUsedFrame: this.frame,
       data: null,
       controller: null,
-      active: false
+      active: false,
+      requestClass,dependencyKey:dependencyKey===key?undefined:dependencyKey,cameraDistance
     });
+  }
+
+  private eligible(record:TerrainRecord):boolean{
+    return record.state==='queued'&&Number.isFinite(record.priority)&&(!record.dependencyKey||this.records.get(record.dependencyKey)?.state==='ready');
+  }
+  private chooseRequest():TerrainRecord|undefined{
+    if(this.nextNearRequest){const preferred=this.records.get(this.nextNearRequest);this.nextNearRequest=null;if(preferred&&this.eligible(preferred)){this.detailTurns++;return preferred;}}
+    const queued=[...this.records.values()].filter(record=>this.eligible(record)).sort((a,b)=>a.priority-b.priority);
+    if(!this.useNearPriority)return queued[0];
+    const coverage=queued.find(r=>r.requestClass==='coverage'),detail=queued.find(r=>r.requestClass==='detail');
+    // Preserve the existing safe bootstrap: before the first trustworthy
+    // viewport cover, missing coarse patches still outrank refinements.
+    if(coverage&&!this.hasInitialCoverage&&!this.coverageReady){this.detailTurns=0;return coverage;}
+    if(coverage&&detail){if(this.detailTurns>=3){this.detailTurns=0;return coverage;}this.detailTurns++;return detail;}
+    if(coverage){this.detailTurns=0;return coverage;}if(detail)this.detailTurns=0;return detail;
+  }
+  private preemptDistantDetail():void{
+    if(!this.useNearPriority||!this.hasInitialCoverage||!this.preemptFarDetail||this.activeRequests<this.maxConcurrentRequests||performance.now()-this.lastPreemption<750)return;
+    const best=[...this.records.values()].filter(r=>this.eligible(r)&&r.requestClass==='detail').sort((a,b)=>a.priority-b.priority)[0];
+    if(!best||!Number.isFinite(best.cameraDistance))return;
+    const worst=[...this.records.values()].filter(r=>r.state==='loading'&&r.requestClass==='detail'&&r.active&&
+      r.priority>=best.priority+Math.max(1,(this.lastSelection?.length??0)*.1)&&
+      (r.cameraDistance??0)>Math.max(1,best.cameraDistance!)*2&&
+      Boolean(this.regionalCoverage?this.findDisplayAncestor(r.id):this.findReadyAncestor(r.id))).sort((a,b)=>b.priority-a.priority)[0];
+    if(!worst)return;
+    this.cancelRequest(worst);worst.state='queued';worst.attempts=Math.max(0,(worst.attempts??1)-1);
+    this.nextNearRequest=best.key;
+    this.lastPreemption=performance.now();this.preemptedRequests++;
   }
 
   private pumpQueue(): void {
     if (!this.enabled || this.suspended || this.disposed) return;
+    this.preemptDistantDetail();
     while (this.activeRequests < this.maxConcurrentRequests) {
       this.makeRequestRoom();
       if (this.residentResourceBytes() + (this.activeRequests + 1) * this.estimatedTileBytes > this.maxResourceBytes) return;
@@ -842,11 +938,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       let pending = 0;
       for (const record of this.records.values()) if (record.state === 'pending') pending++;
       if (pending + this.activeRequests >= this.maxConcurrentRequests) return;
-      let next: TerrainRecord | undefined;
-      for (const record of this.records.values()) {
-        if (record.state !== 'queued') continue;
-        if (!next || record.priority < next.priority) next = record;
-      }
+      const next=this.chooseRequest();
       if (!next) return;
       this.load(next);
     }
@@ -856,6 +948,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
     record.state = 'loading';
     record.controller = new AbortController();
     const controller = record.controller;
+    bindTerrainTaskPriority(controller.signal,()=>record.priority);
     record.attempts = (record.attempts ?? 0) + 1;
     record.active = true;
     this.activeRequests += 1;
@@ -892,7 +985,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
         if (record.timeout) clearTimeout(record.timeout);
         this.releaseActiveRequest(record);
         record.controller = null;
-        if (!this.disposed && this.records.get(record.key) === record) record.state = 'error';
+        if (!this.disposed && this.records.get(record.key) === record) {record.state='error';this.schedulerDirty=true;}
         this.pumpQueue();
       }
     );
@@ -920,6 +1013,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
       } catch (error) {
         this.workBudget?.spend(performance.now() - taskStarted);
         this.releaseTexture(data.texture); record.data = null; record.state = 'error';
+        this.schedulerDirty=true;
         console.warn(`[Terrain ${this.provider.id}] DEM upload failed`, error);
         break;
       }

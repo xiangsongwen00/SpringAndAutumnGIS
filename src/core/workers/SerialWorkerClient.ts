@@ -1,6 +1,6 @@
 type Task = { id: number; message: () => object; transfer: Transferable[];
   resolve: (value: unknown) => void; reject: (reason: unknown) => void;
-  signal?: AbortSignal; abort: () => void; cancelled: boolean; queuedAt: number; startedAt: number };
+  signal?: AbortSignal; priority?:()=>number;abort: () => void; cancelled: boolean; queuedAt: number; startedAt: number };
 
 /** One active message: queued payloads are not cloned until needed. Cancellation
  * removes queued work immediately; indivisible active worker work finishes off
@@ -15,6 +15,7 @@ export class SerialWorkerClient {
   private lastQueueMs = 0;
   private lastRoundTripMs = 0;
   private lastPostMs = 0;
+  private priorityDispatches=0;
   constructor(factory: () => Worker, readonly maxQueued = 32) {
     if (typeof Worker === 'undefined') return;
     try { this.worker = factory(); } catch { return; }
@@ -35,13 +36,13 @@ export class SerialWorkerClient {
   get available(): boolean { return this.worker !== null && !this.disposed; }
   get pending(): number { return this.queue.length + (this.active ? 1 : 0); }
   get stats() { return { pending: this.pending, queueMs: this.lastQueueMs, roundTripMs: this.lastRoundTripMs, postMs: this.lastPostMs }; }
-  request<T>(message: object | (() => object), signal?: AbortSignal, transfer: Transferable[] = []): Promise<T> {
+  request<T>(message: object | (() => object), signal?: AbortSignal, transfer: Transferable[] = [],priority?:()=>number): Promise<T> {
     if (!this.available) return Promise.reject(new Error('Worker unavailable or disposed'));
     if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.pending >= this.maxQueued) return Promise.reject(new Error('Worker queue capacity exceeded'));
     return new Promise<T>((resolve, reject) => {
       const task: Task = { id: ++this.nextId, message: typeof message === 'function' ? message as () => object : () => message,
-        transfer, resolve: value => resolve(value as T), reject, signal, cancelled: false,
+        transfer, resolve: value => resolve(value as T), reject, signal,priority,cancelled: false,
         queuedAt: performance.now(), startedAt: 0, abort: () => {
           task.cancelled = true;
           const index = this.queue.indexOf(task);
@@ -56,6 +57,13 @@ export class SerialWorkerClient {
   dispose(): void { this.disposed = true; this.fail(new Error('Worker client disposed')); }
   private pump(): void {
     if (this.active || !this.worker) return;
+    if(this.queue.some(task=>task.priority)){
+      const oldest=this.queue.reduce((a,b)=>a.id<b.id?a:b);this.queue.sort((a,b)=>(a.priority?.()??0)-(b.priority?.()??0)||a.id-b.id);
+      // Pending near DEMs win, but one FIFO turn in four avoids starving a
+      // still-needed older coverage task. Active work is never restarted.
+      if(this.priorityDispatches>=3&&this.queue[0]!==oldest){this.queue.splice(this.queue.indexOf(oldest),1);this.queue.unshift(oldest);this.priorityDispatches=0;}
+      else if(this.queue[0]!==oldest)this.priorityDispatches++;else this.priorityDispatches=0;
+    }
     const task = this.queue.shift(); if (!task) return;
     this.active = task;
     task.startedAt = performance.now(); this.lastQueueMs = task.startedAt - task.queuedAt;

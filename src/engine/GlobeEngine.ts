@@ -695,7 +695,7 @@ export class GlobeEngine {
       : 'none';
     const roundedCameraLevel = Math.round(cameraLevel * 10) / 10;
     const terrainSignature = terrain
-      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.pending},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges},${terrain.coverageReady}`
+      ? `${terrain.ready},${terrain.loading},${terrain.queued},${terrain.pending},${terrain.errors},${terrain.fallbacks},${terrain.resourceBytes},${terrain.stitchedEdges},${terrain.coverageReady},${terrain.requestPriority},${terrain.preemptedRequests}`
       : 'none';
     const vectorLayers = new Map(
       [...this.vectorLayers].map(([id, layer]) => [id, layer.stats] as const)
