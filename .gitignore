@@ -19,7 +19,7 @@ bin-release/
 
 # Node / Vite
 node_modules/
-dist/
+# dist/
 dist-js/
 .vite/
 .cache/

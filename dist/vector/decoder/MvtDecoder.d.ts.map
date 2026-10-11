@@ -1,0 +1,1 @@
+{"version":3,"file":"MvtDecoder.d.ts","sourceRoot":"","sources":["../../../src/vector/decoder/MvtDecoder.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAEV,iBAAiB,EAClB,MAAM,2BAA2B,CAAC;AAEnC,qEAAqE;AACrE,qBAAa,UAAU;IACrB,MAAM,CACJ,KAAK,EAAE,WAAW,EAClB,eAAe,CAAC,EAAE,WAAW,CAAC,MAAM,CAAC,GACpC,iBAAiB;CAoBrB"}

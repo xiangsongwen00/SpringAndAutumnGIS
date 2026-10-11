@@ -1,0 +1,1 @@
+{"version":3,"file":"VectorStyleTileProvider.d.ts","sourceRoot":"","sources":["../../../src/core/tiles/VectorStyleTileProvider.ts"],"names":[],"mappings":"AAAA,OAAO,EACL,0BAA0B,EAC1B,KAAK,iCAAiC,EACvC,MAAM,8BAA8B,CAAC;AAEtC,wFAAwF;AACxF,qBAAa,uBAAwB,SAAQ,0BAA0B;gBACzD,OAAO,EAAE,8BAA8B;CAGpD;AAED,yDAAyD;AACzD,MAAM,MAAM,8BAA8B,GAAG,iCAAiC,CAAC"}
