@@ -141,7 +141,7 @@ export class GlobeLodSelector {
     this.geometricError = options.geometricError;
     this.targetPixels = Math.max(this.geometricError ? 0.25 : 24, options.targetPixels ?? 150);
     this.collapseFactor = THREE.MathUtils.clamp(options.collapseFactor ?? 0.72, 0.1, 0.99);
-    this.maxTiles = Math.max(8, Math.round(options.maxTiles ?? 384));
+    this.maxTiles = Math.max(this.geometricError ? 1 : 8, Math.round(options.maxTiles ?? 384));
     this.maximumSurfaceDisplacement = Math.max(
       0,
       options.maximumSurfaceDisplacement ?? 0

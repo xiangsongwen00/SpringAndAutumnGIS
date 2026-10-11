@@ -392,26 +392,36 @@ coverage表示边缘环的经度样本覆盖比例，不是极地影像或DEM覆
 
 这是按底图自适应预制的显示补圈，不是发布包内预置所有厂商真实极地图像；每个消费者使用自己的资源配置生成。真实极地海冰/地貌/影像和DEM仍需要相应数据及投影适配，approximation:polar-cap和DEM域外null保持不变。测试以受控数据检查不同地图/样式的整圈像素、缓存隔离、透明无数据、纹理方向和GPU读回；不宣称真实Google/天地图/Esri服务已逐一通过权限/配额验收。
 
-## 6.5 地形近景优先推进，不改变LOD（2026-10-11）
+## 6.5 地形独立LOD初版与近景推进（2026-10-11）
 
-默认TerrainTileLayerOptions.requestPriority为camera-near。只对已有可见LOD叶子安排请求/解码/上传/显示提交先后，不修改叶子、DEM目标级别、屏幕误差阈值或最大瓦片数量；俯视不会被强制降级，水平视角的远景主动降低DEM层级仍留待独立地形LOD。
+GlobeEngine/Viewer在Web Mercator网格下默认启用独立DEM选择，`terrainLod:false`恢复共享选择用于对照；不支持的其他网格目前保留共享路径。单独使用TerrainTileLayer仍默认接收调用方叶子，不自动建立相机选择器。requestPriority默认camera-near，负责请求/解码/上传顺序，与选择层级分开。
 
 ```ts
 const viewer=await Viewer.create('map', {
   ...yourOptions,
-  terrainLayer:{requestPriority:'camera-near',preemptFarDetail:true}
+  terrainLod:{maximumScreenSpaceError:3,maxTiles:96,maxSurfaceTiles:512,
+    samplesPerTile:256,estimatedSlope:0.25,updateIntervalMs:100},
+  terrainLayer:{requestPriority:'camera-near',preemptFarDetail:false}
 });
 console.log(viewer.engine.terrain?.stats.requestPriority);
 console.log(viewer.engine.terrain?.stats.preemptedRequests);
-// requestPriority:'screen-error' 可做对照；preemptFarDetail:false可关闭远景让位。
+// terrainLod:false 对照旧共享选择；preemptFarDetail默认关闭。
 ```
 
 排序用相机到可见瓦片地理范围最近点的估算距离（包括已加载高程），不是只看视口中心或瓦片中心。距离分带后结合screenPixels/中心偏好，减少小幅抖动；相机移动超过小阈值后更新，即使LOD选择数组仍是同一个引用也重新排序。数据上传和区域发布消费同一近景排序；共享DEM Worker在下一项解码开始时读取实时优先级，不重启正在运行的不可分割任务。未指定Worker优先级的矢量等其他客户端保持FIFO。
 
-默认祖先路径：尚无覆盖时先请求本地必要粗片，有有效祖先后直接请求原目标DEM，不按绝对层级让远处低级细节长期压住近处高级细节。必要粗片失败时逐级尝试可用更细片，避免本地金字塔永久卡住；不生成假0高度。首次可信视口粗覆盖仍是显示的安全前提，不强行显示孤立高山。已有覆盖后，近景细节最多3次启动机会，再给必要补覆盖1次，避免前景长期等全局外围粗片、也避免远景完全饿死。
+独立选择用几何误差米数投影到屏幕，不把影像的掠射角清晰度梯度直接作用于垂直高程误差。TerrainProvider可提供geometricError(tile)返回数据集误差米数；没有时采用显式分辨率/坡度估算和椭球网格弦高，不是经测绘认证的误差上界。DEM样本密度/坡度要匹配自己的服务；maxTiles是DEM目标预算，不是影像数量。实际准入还按已观察的单DEM CPU/GPU字节数收紧，预留父覆盖与在途空间，不靠把缓存塞满追求精度。接近俯视不施加固定层级降级；接近水平按距离/误差自然形成梯度。provider.maxLevel仍是数据源真实上限，不能用过缩放凭空增加高程细节。
+
+独立路径先取得真实数据集根覆盖，有有效祖先后近景直达自己的目标DEM，覆盖/细节3:1公平启动。根404时转入局部粗片再细化；错误/缺数据不伪造0高度，未覆盖patch隐藏。首次覆盖与目标达标分开统计。共享旧路径仍沿用原整体冷启动覆盖门槛。重选后仍与新视口相交的loading/pending允许完成，不因为目标换一级就反复取消；完全离开的未就绪资源仍清理。
+
+栅格及GPU制图底图拆开请求覆盖与绘制覆盖：先按原影像叶子请求，再以已就绪DEM细分公共地表网格，子网格采样原影像祖先UV，不增加影像请求zoom。复用共享ECEF边界、GPU高程绑定与实际地表拾取，避免父子重复绘制。maxSurfaceTiles限制网格放大；统计terrainSurfaceLimited报告已就绪DEM因公共地表预算尚不能完整表达的数量。surfaceTiles不是DEM请求数，也不是原影像selected数。原生业务MVT的粗源几何仍使用现有单DEM绑定，跨多个更细DEM的业务几何分块/atlas还需下一阶段，不能宣称本轮已经彻底完成所有矢量贴地精度解耦。
 
 实验regionalCoverage路径仍须显式启用，默认不改：根/父依赖继承最近可见后代优先级；根就绪后父片推进，父片就绪后请求子片。齐备的近景局部事务先发布，事务内父字段先于子字段准备、已有一致提交跨帧续作不因每次移动重启。既有邻接边带/CPU-GPU同代发布约束保持，不将纯排序修复等同接边算法全面修复。
 
-远景让位有界：首次可信覆盖后，仅当槽位全满、近景可启动的覆盖/细节明显更重要且已有父覆盖的远景距离超过其两倍时，最多每750ms取消1个远景细节请求。根/必要粗覆盖不取消，保留其已显示父地表；优先启动近景，不将这次让位计入错误重试次数。迟到/忽略取消的数据销毁，不污染新请求或已显示地形。不能强制中断已在Worker里运行的原子解码。
+远景让位现默认关闭：上一轮每次pumpQueue都可触发取消，慢网络时存在静止反复重启的风险。显式preemptFarDetail:true时，仅有实际位置移动才能重新允许一次让位，同时保留750ms冷却、可信父覆盖和距离门槛；静止时响应/上传完成不重新授权取消。不能强制中断Worker内的原子解码。迟到数据释放，真实请求超时仍有限重试；TileJSON动态揭示较低maxzoom时，祖先响应按真实id入库，不能冒充子瓦片坐标。
+
+源码页直接使用新默认；`?terrainLod=shared`对照旧选择，`?terrainPriority=screen-error`仅对照排队顺序。面板增加LOD模式、DEM目标/达标数与目标层级、DEM源级别、公共地表网格/限精度数。API同字段位于onStats的terrain、surfaceTiles和terrainSurfaceLimited。terrain.sourceMinimumLevel/sourceMaximumLevel是当前目标可解析的DEM源范围，不能误读成影像zoom或全部mesh均已达标。不要用60FPS或coverageReady代替readyTargets达标。
+
+验收：npm run build后运行npm run test:terrain:independent及npm run test:terrain:priority。受控257×257慢DEM、每请求模拟1.6s，19目标+1根在9.64s模拟时钟完成，无取消、无重复、队列归零；这不是实际网络加载时间保证。4km合成地表、相机离地1km，俯视/45°/80°/87°的DEM目标为11/16/26/25，近范围z14/z14/z14/z13；不等于真实珠峰数据验证。root失败、源上限动态变化、影像请求/网格层级分离和预算均有回归。实际用户山地轨迹、刀片的动态视觉验收、可靠父子一致发布与实测残差误差元数据仍保持开放，不能宣称“一劳永逸”。
 
 源码demo默认开启，可用URL的terrainPriority=screen-error对照；terrainCoverage=regional仍单独控制实验接边策略。状态面板显示调度模式和“远景让位”计数。受控测试覆盖近景高层级/远景低层级、父覆盖、粗片缺失、同引用相机移动、上传顺序、区域齐备提交、日期变更线、大瓦片最近范围、Worker动态排序/公平和迟到清理。网络/解码延迟、缓存容量不足或接边依赖未齐仍可导致等待，本轮不承诺实景3–20秒地形更新或刀片问题全部消失。

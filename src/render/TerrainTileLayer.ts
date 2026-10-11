@@ -76,6 +76,9 @@ export type TerrainTileLayerStats = Readonly<{
   targetMinimumLevel: number | null;
   targetMaximumLevel: number | null;
   readyTargets: number;
+  /** Resolved DEM source levels for current targets (not mesh/request levels). */
+  sourceMinimumLevel: number | null;
+  sourceMaximumLevel: number | null;
 }>;
 
 export type TerrainTextureBinding = Readonly<{
@@ -249,6 +252,12 @@ export class TerrainTileLayer implements TerrainHeightSource {
     return this._enabled;
   }
 
+  /** Reserve space for parents/in-flight work rather than pinning a full cache. */
+  get targetCapacity(): number {
+    const copies = this.regionalCoverage ? 2 : 1;
+    return Math.max(1, Math.floor(this.maxResourceBytes * .65 / (Math.max(1, this.estimatedTileBytes) * copies)));
+  }
+
   /** Actual loaded/displayed footprints for common surface tessellation. */
   surfaceTiles(): readonly SelectedTile[] {
     const result = new Map<string, SelectedTile>(), scheme = new WebMercatorTilingScheme();
@@ -272,6 +281,8 @@ export class TerrainTileLayer implements TerrainHeightSource {
     }
     const targets = this.lastSelection ?? [];
     const levels = targets.map(t => Math.min(t.id.level, this.provider.maxLevel));
+    const sources = targets.map(t => this.regionalCoverage ? this.findDisplayAncestor(t.id) : this.findReadyAncestor(t.id));
+    const sourceLevels = sources.filter((r): r is TerrainRecord => r !== undefined).map(r => r.id.level);
     return {
       ...counts,
       fallbacks: this.fallbackCount,
@@ -288,7 +299,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
       lodMode: this.independentSelection ? 'independent' : 'shared', targetTiles: targets.length,
       targetMinimumLevel: levels.length ? Math.min(...levels) : null,
       targetMaximumLevel: levels.length ? Math.max(...levels) : null,
-      readyTargets: targets.filter(t => (this.regionalCoverage ? this.findDisplayAncestor(t.id) : this.findReadyAncestor(t.id))?.id.level === Math.min(t.id.level, this.provider.maxLevel)).length
+      readyTargets: targets.filter((t, i) => sources[i]?.id.level === Math.min(t.id.level, this.provider.maxLevel)).length,
+      sourceMinimumLevel: sourceLevels.length ? Math.min(...sourceLevels) : null,
+      sourceMaximumLevel: sourceLevels.length ? Math.max(...sourceLevels) : null
     };
   }
 
@@ -694,8 +707,10 @@ export class TerrainTileLayer implements TerrainHeightSource {
       // Loading every intervening DEM adds decode/upload/revision work while
       // contributing no missing coverage. Retain the currently bound parent.
       let firstRequested=ready?maximumLevel:coarseLevel;
-      if (this.independentSelection && !ready && this.records.get(tileKey(ancestorAtLevel(selected.id, coarseLevel)))?.state === 'error')
+      if (this.independentSelection && !ready && this.records.get(tileKey(ancestorAtLevel(selected.id, coarseLevel)))?.state === 'error') {
+        this.visibleKeys.add(tileKey(ancestorAtLevel(selected.id, coarseLevel)));
         firstRequested = Math.max(coarseLevel, maximumLevel - 2);
+      }
       // Some services have missing coarse coverage but valid finer tiles. A
       // failed cover must not permanently block that patch's entire pyramid.
       if(this.useNearPriority&&!ready)while(firstRequested<maximumLevel&&this.records.get(tileKey(ancestorAtLevel(selected.id,firstRequested)))?.state==='error'){
@@ -1013,6 +1028,18 @@ export class TerrainTileLayer implements TerrainHeightSource {
         record.controller = null;
         if (this.disposed || this.records.get(record.key) !== record) {
           this.releaseTexture(data.texture);
+        } else if (tileKey(data.id) !== record.key) {
+          // TileJSON may reveal a lower source maxzoom while a request is in
+          // flight. An ancestor DEM must never masquerade as the child's UVs.
+          const actualKey = tileKey(data.id), actual = this.records.get(actualKey);
+          this.records.delete(record.key);
+          if (actual?.data) this.releaseTexture(data.texture);
+          else {
+            if (actual) this.cancelRequest(actual);
+            this.records.set(actualKey, { ...record, id: data.id, key: actualKey, data, state: 'pending', controller: null, active: false });
+            this.estimatedTileBytes = Math.max(terrainResourceBytes(data), 1);
+          }
+          this.schedulerDirty = true;
         } else {
           record.data = data;
           this.estimatedTileBytes = Math.max(terrainResourceBytes(data), 1);

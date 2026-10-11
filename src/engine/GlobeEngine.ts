@@ -408,7 +408,7 @@ export class GlobeEngine {
       const selection = this.lodSelection!;
       const terrainStartedAt = performance.now();
       const terrainSelection = this.terrainLod && this.terrain?.enabled
-        ? this.terrainLod.select(this.camera, viewportHeight, now).tiles : selection.tiles;
+        ? this.terrainLod.select(this.camera, viewportHeight, now, this.terrain.targetCapacity).tiles : selection.tiles;
       const terrainStats = this.terrain?.update(terrainSelection, this.camera.position) ?? null;
       if (this.terrainLod && this.terrain?.enabled) {
         const ready = this.terrain.surfaceTiles();

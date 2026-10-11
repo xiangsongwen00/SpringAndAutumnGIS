@@ -35,8 +35,10 @@ const surface = { revision: 0, maximumHeight: () => 4002, sampleHeight: () => 40
   tileHeightSampler: () => ({ key: 'terrain', sample: () => 4000 }) };
 const provider = { id: 'synthetic-independent', minLevel: 0, maxLevel: 14, loadTile: async id => field(id) };
 const lod = new TerrainLodSelector(provider, surface);
+let selectionTime = 100000;
 for (const angle of [0, 45, 80, 87, 0]) {
-  const camera = pose(angle), result = lod.select(camera, 926, angle * 1000 + 100000);
+  selectionTime += 1000;
+  const camera = pose(angle), result = lod.select(camera, 926, selectionTime);
   assert.ok(result.tiles.length <= 96 && result.tiles.length > 0);
   const nearest = [...result.tiles].sort((a, b) => {
     const d = t => { const r = t.rectangle, lon = Math.max(r.west, Math.min(r.east, 103.43968)), lat = Math.max(r.south, Math.min(r.north, 32.04231));
@@ -44,7 +46,7 @@ for (const angle of [0, 45, 80, 87, 0]) {
     return d(a) - d(b);
   });
   assert.ok(nearest[0].id.level >= 12, `Foreground too coarse at ${angle}: ${nearest[0].id.level}`);
-  assert.equal(lod.select(camera, 926, 200000).tiles, result.tiles, 'Stationary terrain target IDs preserve queue identity');
+  assert.equal(lod.select(camera, 926, selectionTime + 200).tiles, result.tiles, 'Stationary terrain target IDs preserve queue identity');
   console.log(`Independent terrain tilt ${angle}: ${result.tiles.length} targets; nearest z${nearest[0].id.level}`);
 }
 // Delayed 257x257 DEM + repeated frames: the old per-pump preemption could
@@ -94,6 +96,27 @@ try {
   assert.equal(bounded.stats.preemptedRequests, 1, 'Static view cannot re-arm cancellation'); bounded.dispose();
 } finally { globalThis.performance = nativePerformance; }
 
+const missingCalls = [], missingRoot = new TerrainTileLayer(e, { ...provider, loadTile: async id => {
+  missingCalls.push(id.level); if (id.level === 0 || id.level === 12) throw new Error('HTTP 404'); return field(id);
+} }, { independentSelection: true, maxConcurrentRequests: 1 });
+const local = [selected(idAt(103.43968, 32.04231, 14))];
+for (let i = 0; i < 14; i++) { missingRoot.update(local, pose(0).position); await tick(); }
+assert.deepEqual(missingCalls, [0, 12, 13, 14], 'Absent root is not repeatedly deleted and retried');
+assert.equal(missingRoot.stats.readyTargets, 1); missingRoot.dispose();
+
+const remapped = new TerrainTileLayer(e, { ...provider, loadTile: async id => field({ level: id.level - 2,
+  x: Math.floor(id.x / 4), y: Math.floor(id.y / 4) }) }, { maxConcurrentRequests: 1 });
+remapped.hasInitialCoverage = remapped.coverageReady = true;
+const target = local[0].id;
+remapped.queueTile(target, 0); remapped.pumpQueue(); await tick(); remapped.commitPending();
+assert.equal(remapped.records.has(key(target)), false, 'Ancestor response must not inherit child coordinate key');
+assert.equal(remapped.resolveTexture(target).sourceLevel, 12); assert.equal(remapped.resolveTexture(target).scale, .25);
+remapped.dispose();
+
+const constrained = new TerrainLodSelector(provider, surface);
+assert.ok(constrained.select(pose(80), 926, 0, 12).tiles.length <= 12, 'Target admission respects resident DEM capacity');
+assert.ok(constrained.select(pose(80), 926, 200, 4).tiles.length <= 4, 'Small memory capacity must not be clamped back up to eight targets');
+
 // Fine ready DEM refines a coarse imagery mesh without increasing fetch zoom.
 const coarse = idAt(103.43968, 32.04231, 8), fine = idAt(103.43968, 32.04231, 12);
 const imageTargets = [selected(coarse)], terrainTargets = [selected(fine)];
@@ -105,11 +128,19 @@ assert.equal(area, 1, 'Nonoverlapping complete parent footprint');
 assert.ok(refineSurfaceCover(imageTargets, terrainTargets, 8).length <= 8);
 const loads = [], imageProvider = new UrlTemplateRasterProvider({ urlTemplate: 'fixture://{z}/{x}/{y}', maxLevel: 20, levelOffset: 0 });
 imageProvider.loadTexture = async id => { loads.push(id.level); return new THREE.Texture({ width: 2, height: 2 }); };
-const raster = new RasterTileLayer(e, imageProvider);
+const fineTerrain = new TerrainTileLayer(e, provider, { independentSelection: true });
+for (const data of [field({ level: 0, x: 0, y: 0 }), field(fine, 6000)])
+  fineTerrain.records.set(key(data.id), { id: data.id, key: key(data.id), data, state: 'ready', priority: 0,
+    lastUsedFrame: 0, active: false, controller: null });
+fineTerrain.update(terrainTargets, pose(0).position);
+const raster = new RasterTileLayer(e, imageProvider, { terrain: fineTerrain });
 for (let i = 0; i < 5; i++) { raster.update(imageTargets, undefined, cover); await tick(); }
 assert.ok(loads.every(z => z <= 8), `Mesh-only refinement leaked image zoom: ${loads}`);
 assert.equal(raster.renderTiles.size, 13); assert.equal(raster.stats.displayedMaximumLevel, 8);
 const fineMesh = raster.renderTiles.get(key(fine));
-assert.equal(fineMesh.mesh.material.uniforms.textureUvScale.value.x, 1 / 16);
-raster.dispose();
+assert.equal(fineMesh.mesh.material.uniforms.uvScale.value.x, 1 / 16);
+assert.equal(fineMesh.mesh.material.uniforms.terrainUvScale.value.x, 1);
+assert.equal(fineMesh.mesh.material.uniforms.terrainTexture.value, fineTerrain.resolveTexture(fine).texture);
+assert.equal(fineTerrain.sampleTileHeight(fine, .5, .5), 6000, 'Fine mesh consumes fine DEM, not root coverage');
+raster.dispose(); fineTerrain.dispose();
 console.log('Independent geometric LOD, slow queue convergence, bounded motion-only cancellation and image/surface separation passed.');

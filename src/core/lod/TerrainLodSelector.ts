@@ -23,6 +23,7 @@ export type TerrainLodOptions = {
 export class TerrainLodSelector {
   private selector: GlobeLodSelector | null = null;
   private level = -1;
+  private capacity = -1;
   private result: { tiles: readonly SelectedTile[]; stats: GlobeLodStats } | null = null;
   private readonly position = new THREE.Vector3();
   private readonly quaternion = new THREE.Quaternion();
@@ -38,15 +39,17 @@ export class TerrainLodSelector {
     this.interval = Math.max(0, options.updateIntervalMs ?? 100);
   }
 
-  select(camera: THREE.PerspectiveCamera, viewportHeight: number, now = performance.now()) {
-    if (!this.selector || this.level !== this.provider.maxLevel) {
+  select(camera: THREE.PerspectiveCamera, viewportHeight: number, now = performance.now(), residentTargetCapacity = Infinity) {
+    const capacity = Math.max(1, Math.min(Math.round(this.options.maxTiles ?? 96), Math.floor(residentTargetCapacity)));
+    if (!this.selector || this.level !== this.provider.maxLevel || this.capacity !== capacity) {
       this.level = this.provider.maxLevel;
+      this.capacity = capacity;
       const samples = Math.max(2, this.options.samplesPerTile ?? 256);
       const slope = Math.max(0, this.options.estimatedSlope ?? .25);
       this.selector = new GlobeLodSelector({ tilingScheme: new WebMercatorTilingScheme(),
         minLevel: this.provider.minLevel, maxLevel: this.provider.maxLevel,
         targetPixels: this.options.maximumScreenSpaceError ?? 3,
-        maxTiles: this.options.maxTiles ?? 96, collapseFactor: .7,
+        maxTiles: capacity, collapseFactor: .7,
         maximumSurfaceDisplacement: 12000 * this.exaggeration,
         geometricError: (id, rectangle) => {
           const supplied = this.provider.geometricError?.(id);
