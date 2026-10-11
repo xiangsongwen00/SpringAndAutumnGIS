@@ -20,6 +20,8 @@ export interface TerrainProvider {
   readonly minLevel: number;
   readonly maxLevel: number;
   readonly attribution?: string;
+  /** Dataset geometric error in metres. Omit to use the explicit LOD estimate. */
+  geometricError?(tile: TileId): number;
   loadTile(tile: TileId, signal?: AbortSignal): Promise<TerrainTileData>;
 }
 

@@ -44,6 +44,8 @@ export type GlobeLodSelectorOptions = {
   /** Conservative positive GPU surface displacement used by culling, in metres. */
   maximumSurfaceDisplacement?: number;
   tilingScheme?: TilingScheme;
+  /** Optional geometric error in metres; absent preserves imagery pixel LOD. */
+  geometricError?: (id: TileId, rectangle: Rectangle) => number;
 };
 
 export interface SurfaceDisplacementBoundsSource {
@@ -84,6 +86,7 @@ export class GlobeLodSelector {
 
   private readonly horizonPaddingRadians: number;
   private readonly minimumHorizonDetailFactor: number;
+  private readonly geometricError?: GlobeLodSelectorOptions['geometricError'];
   private readonly previousSplits = new Set<string>();
   private readonly boundsCache = new Map<string, { sphere: THREE.Sphere; minimumHeight: number; maximumHeight: number; box?: {
     center: THREE.Vector3; axes: THREE.Vector3[]; halfSize: THREE.Vector3
@@ -135,7 +138,8 @@ export class GlobeLodSelector {
     // level 27. Keep a little headroom for future data sources while making 27
     // a first-class supported level today.
     this.maxLevel = clampInteger(options.maxLevel ?? 27, this.minLevel, 30);
-    this.targetPixels = Math.max(24, options.targetPixels ?? 150);
+    this.geometricError = options.geometricError;
+    this.targetPixels = Math.max(this.geometricError ? 0.25 : 24, options.targetPixels ?? 150);
     this.collapseFactor = THREE.MathUtils.clamp(options.collapseFactor ?? 0.72, 0.1, 0.99);
     this.maxTiles = Math.max(8, Math.round(options.maxTiles ?? 384));
     this.maximumSurfaceDisplacement = Math.max(
@@ -389,6 +393,20 @@ export class GlobeLodSelector {
           viewCenterDistance = Math.min(viewCenterDistance, screenDistance);
         }
       }
+    }
+    if (this.geometricError) {
+      // Geometry error is not texture footprint size. In particular, vertical
+      // error must not be suppressed by the imagery grazing-angle gradient.
+      const lon = closestLongitudeInRectangle(this.cameraLongitude, rectangle.west, rectangle.east);
+      const lat = THREE.MathUtils.clamp(this.cameraLatitude, rectangle.south, rectangle.north);
+      const height = this.surfaceDisplacementSource?.sampleHeight?.(lon, lat) ?? 0;
+      this.ellipsoid.cartographicToCartesian({ longitude: lon, latitude: lat, height }, this.detailPoint);
+      let distance = Math.max(1, this.cameraPosition.distanceTo(this.detailPoint));
+      for (const sample of this.viewSurfaceSamples) {
+        if (rectangleContains(rectangle, sample.longitude, sample.latitude))
+          distance = Math.min(distance, Math.max(1, this.cameraPosition.distanceTo(sample.point)));
+      }
+      screenPixels = Math.max(0, this.geometricError(id, rectangle)) * this.focalPixels / distance;
     }
     return { id, rectangle, screenPixels, viewCenterDistance, canSplit: true };
   }

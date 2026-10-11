@@ -147,6 +147,8 @@ export type {
 } from './core/terrain/TerrainProvider';
 
 export { GlobeLodSelector, tileRequestUrgency } from './core/lod/GlobeLodSelector';
+export { TerrainLodSelector } from './core/lod/TerrainLodSelector';
+export type { TerrainLodOptions } from './core/lod/TerrainLodSelector';
 export { terrainSurfaceEdges } from './core/terrain/TerrainSurfaceEdges';
 export type {
   GlobeLodSelectorOptions,

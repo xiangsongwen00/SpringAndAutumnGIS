@@ -11,6 +11,7 @@ import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
 import { terrainSurfaceEdges } from '../core/terrain/TerrainSurfaceEdges';
+import { containingTile } from '../core/lod/SurfaceCover';
 import { intersectRasterSurface, rasterSurfaceGeometry } from './RasterSurfacePicker';
 import type { GroundBounds, GroundPatch } from './EntityGroundSurface';
 import type { SurfaceRayHit } from '../core/geo/SurfacePicker';
@@ -164,6 +165,8 @@ export class RasterTileLayer {
   private fallbackCount = 0;
   private suspended = false;
   private lastSelection: readonly SelectedTile[] | null = null;
+  private lastSurfaceSelection: readonly SelectedTile[] | null = null;
+  private readonly surfaceSourceLevels = new Map<string, number>();
   private edgeSelection: readonly SelectedTile[] | null = null;
   private edgeRevision = -1;
   private edgeTileSignature = '';
@@ -248,11 +251,22 @@ export class RasterTileLayer {
 
   update(
     selection: readonly SelectedTile[],
-    cameraPosition?: THREE.Vector3
+    cameraPosition?: THREE.Vector3,
+    surfaceSelection: readonly SelectedTile[] = selection
   ): RasterTileLayerStats {
     if (this.disposed) return this.stats;
     if (cameraPosition) splitVector3(cameraPosition, this.cameraHigh, this.cameraLow);
     const selectionChanged = selection !== this.lastSelection;
+    const surfaceChanged = surfaceSelection !== this.lastSurfaceSelection;
+    if (selectionChanged || surfaceChanged) {
+      this.surfaceSourceLevels.clear();
+      const requests = new Map(selection.map(t => [tileKey(t.id), t]));
+      for (const tile of surfaceSelection) {
+        const parent = containingTile(tile.id, requests);
+        if (parent && parent.id.level < tile.id.level) this.surfaceSourceLevels.set(tileKey(tile.id), parent.id.level);
+      }
+      this.lastSurfaceSelection = surfaceSelection;
+    }
     const terrainRevision = this.terrain?.revision ?? -1;
     const terrainChanged = terrainRevision !== this.observedTerrainRevision;
     const providerRevision = this.provider.revision ?? 0;
@@ -264,18 +278,18 @@ export class RasterTileLayer {
     if (explicitOffsetChanged) this.continuity.clear();
     // Provider revision also advances on ordinary camera/source zoom changes.
     // Those are precisely the changes that need a display handoff, not invalidation.
-    if ((selectionChanged || sourceLevelsChanged) && !explicitOffsetChanged) this.captureContinuity(selection);
-    if (selectionChanged || sourceLevelsChanged || coverageExpired || this.materialsDirty) this.pruneContinuity(selection);
+    if ((selectionChanged || surfaceChanged || sourceLevelsChanged) && !explicitOffsetChanged) this.captureContinuity(surfaceSelection);
+    if (selectionChanged || surfaceChanged || sourceLevelsChanged || coverageExpired || this.materialsDirty) this.pruneContinuity(surfaceSelection);
+    if (surfaceChanged) this.syncRenderTiles(surfaceSelection);
     if (selectionChanged || sourceLevelsChanged) {
       this.frame += 1;
       this.lastSelection = selection;
       this.observedProviderRevision = providerRevision;
-      if (selectionChanged) this.syncRenderTiles(selection);
       this.queueVisibleTextures(selection);
     }
-    if (selectionChanged || sourceLevelsChanged || terrainChanged || this.materialsDirty || coverageExpired) {
+    if (selectionChanged || surfaceChanged || sourceLevelsChanged || terrainChanged || this.materialsDirty || coverageExpired) {
       this.observedTerrainRevision = terrainRevision;
-      this.syncMaterials(selection);
+      this.syncMaterials(surfaceSelection);
       this.evictTextures();
       this.materialsDirty = false;
     }
@@ -1238,12 +1252,7 @@ export class RasterTileLayer {
   }
 
   private findReadyAncestor(id: TileId): TextureRecord | undefined {
-    const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
-    const maximumSourceLevel = Math.min(
-      this.provider.maximumSourceLevel?.(id.level) ?? id.level + levelOffset,
-      this.provider.maxLevel,
-      id.level
-    );
+    const maximumSourceLevel = this.maximumSourceLevel(id);
     for (
       let level = maximumSourceLevel;
       level >= this.provider.minLevel;
@@ -1341,8 +1350,9 @@ export class RasterTileLayer {
 
   private maximumSourceLevel(id: TileId): number {
     const levelOffset = Math.min(0, Math.round(this.provider.levelOffset ?? 0));
+    const requestLevel = this.surfaceSourceLevels.get(tileKey(id)) ?? id.level;
     return Math.min(
-      this.provider.maximumSourceLevel?.(id.level) ?? id.level + levelOffset,
+      this.provider.maximumSourceLevel?.(requestLevel) ?? requestLevel + levelOffset,
       this.provider.maxLevel,
       id.level
     );

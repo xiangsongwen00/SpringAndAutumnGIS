@@ -15,6 +15,10 @@ import { PolarSurfaceLayer,type PolarSurfaceLayerOptions } from '../render/Polar
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
 import { TileStateMachine } from '../core/tiles/TileStateMachine';
 import { WebMercatorTilingScheme } from '../core/tiling/WebMercatorTilingScheme';
+import { TerrainLodSelector, type TerrainLodOptions } from '../core/lod/TerrainLodSelector';
+import { refineSurfaceCover } from '../core/lod/SurfaceCover';
+import { tileKey } from '../core/tiling/GeographicTilingScheme';
+import type { SelectedTile } from '../core/lod/GlobeLodSelector';
 import {
   RasterTileLayer,
   type RasterTileLayerOptions,
@@ -46,6 +50,8 @@ export type GlobeEngineStats = GlobeLodStats & Readonly<{
   cameraLevel: number;
   imagery: RasterTileLayerStats | null;
   terrain: TerrainTileLayerStats | null;
+  surfaceTiles: number;
+  terrainSurfaceLimited: number;
   vectorLayers: ReadonlyMap<string, MvtVectorLayerStats>;
   performance: GlobeFramePerformance;
 }>;
@@ -91,6 +97,8 @@ export type GlobeEngineOptions = {
   /** Configure a provider while disabling DEM requests from the first frame. */
   terrainEnabled?: boolean;
   terrainLayer?: TerrainTileLayerOptions;
+  /** Independent DEM error LOD (Mercator). false restores shared selection. */
+  terrainLod?: false | TerrainLodOptions;
   /** Mercator-domain completion, not genuine polar imagery/DEM. Enabled by default for Mercator grids. */
   polarSurface?:boolean|PolarSurfaceLayerOptions;
   initialView?: {
@@ -133,6 +141,11 @@ export class GlobeEngine {
   private _imagery: RasterTileLayer | null = null;
   get imagery(): RasterTileLayer | null { return this._imagery; }
   readonly terrain: TerrainTileLayer | null;
+  readonly terrainLod: TerrainLodSelector | null;
+  private surfaceSelection: readonly SelectedTile[] = [];
+  private surfaceSignature = '';
+  private readonly maxSurfaceTiles: number;
+  private terrainSurfaceLimited = 0;
   private readonly polarSurface:PolarSurfaceLayer|null;
   /** Shared per-content lifecycle registry for all raster surface layers. */
   readonly tileStateMachine = new TileStateMachine();
@@ -207,6 +220,9 @@ export class GlobeEngine {
       tiltSpeed: Math.max(0.05, options.navigation?.tiltSpeed ?? 1)
     };
     const tilingScheme = options.lod?.tilingScheme ?? new WebMercatorTilingScheme();
+    const independentTerrain = options.terrainLod !== false && tilingScheme.id === 'web-mercator';
+    this.maxSurfaceTiles = Math.max(options.lod?.maxTiles ?? 384,
+      options.terrainLod ? options.terrainLod.maxSurfaceTiles ?? 512 : 512);
     this.polarSurface=options.polarSurface!==false&&tilingScheme.id==='web-mercator'?new PolarSurfaceLayer(this.ellipsoid,typeof options.polarSurface==='object'?options.polarSurface:{}):null;
     if(this.polarSurface)this.scene.add(this.polarSurface.object3d);
     const terrainExaggeration = Math.max(0, options.terrainLayer?.exaggeration ?? 1);
@@ -224,9 +240,12 @@ export class GlobeEngine {
       ? null
       : new TerrainTileLayer(this.ellipsoid, options.terrain, {
         ...options.terrainLayer,
+        independentSelection: independentTerrain,
         workBudget: options.terrainLayer?.workBudget ?? this.backgroundWorkBudget,
         prepareTexture: options.terrainLayer?.prepareTexture ?? ((texture) => this.renderer.initTexture(texture))
       });
+    this.terrainLod = this.terrain && independentTerrain
+      ? new TerrainLodSelector(this.terrain.provider, this.terrain, options.terrainLod || {}, terrainExaggeration) : null;
     this.lod.setSurfaceDisplacementSource(this.terrain ?? undefined);
     if (options.terrainEnabled === false) this.terrain?.setEnabled(false);
     this.grid = new GlobeGridRenderer(this.ellipsoid, {
@@ -388,12 +407,25 @@ export class GlobeEngine {
       }
       const selection = this.lodSelection!;
       const terrainStartedAt = performance.now();
-      const terrainStats = this.terrain?.update(selection.tiles, this.camera.position) ?? null;
+      const terrainSelection = this.terrainLod && this.terrain?.enabled
+        ? this.terrainLod.select(this.camera, viewportHeight, now).tiles : selection.tiles;
+      const terrainStats = this.terrain?.update(terrainSelection, this.camera.position) ?? null;
+      if (this.terrainLod && this.terrain?.enabled) {
+        const ready = this.terrain.surfaceTiles();
+        const signature = `${selection.tiles.map(t => tileKey(t.id)).join(';')}|${ready.map(t => tileKey(t.id)).join(';')}`;
+        if (signature !== this.surfaceSignature) {
+          this.surfaceSignature = signature;
+          this.surfaceSelection = refineSurfaceCover(selection.tiles, ready, this.maxSurfaceTiles);
+          this.terrainSurfaceLimited = ready.filter(t => this.surfaceSelection.some(s => s.id.level < t.id.level &&
+            Math.floor(t.id.x / 2 ** (t.id.level - s.id.level)) === s.id.x &&
+            Math.floor(t.id.y / 2 ** (t.id.level - s.id.level)) === s.id.y)).length;
+        }
+      } else { this.surfaceSelection = selection.tiles; this.surfaceSignature = ''; this.terrainSurfaceLimited = 0; }
       const surfaceStartedAt = performance.now();
       let imageryStats: RasterTileLayerStats | null = null;
       for (const layer of this.imageryLayers.values()) {
         if (!layer.visible) continue;
-        const stats = layer.update(selection.tiles, this.camera.position);
+        const stats = layer.update(selection.tiles, this.camera.position, this.surfaceSelection);
         if (layer === this.imagery) imageryStats = stats;
       }
       const featureStartedAt = performance.now();
@@ -409,7 +441,7 @@ export class GlobeEngine {
       for (const layer of this.sceneLayers.values()) {
         if (layer.object3d.visible) layer.update(this.camera, viewportWidth, viewportHeight);
       }
-      if (this.grid.object3d.visible) this.grid.update(selection.tiles, this.camera.position);
+      if (this.grid.object3d.visible) this.grid.update(this.surfaceSelection, this.camera.position);
       const renderStartedAt = performance.now();
       this.gpuTimer.begin();
       this.renderer.render(this.scene, this.camera);
@@ -706,6 +738,7 @@ export class GlobeEngine {
     const signature = `${Math.floor(performance.now() / 500)}|${stats.selected}|${stats.visited}|${stats.horizonCulled}|${stats.frustumCulled}|${[...stats.levels].join(';')}|${imagerySignature}|${terrainSignature}|${vectorSignature}|${roundedCameraLevel}`;
     if (signature === this.lastStatsSignature) return;
     this.lastStatsSignature = signature;
-    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers, performance: this.framePerformance });
+    this.onStats({ ...stats, cameraLevel: roundedCameraLevel, imagery, terrain, vectorLayers, performance: this.framePerformance,
+      surfaceTiles: this.surfaceSelection.length, terrainSurfaceLimited: this.terrainSurfaceLimited });
   }
 }

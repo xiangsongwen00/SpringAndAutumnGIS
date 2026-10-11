@@ -36,11 +36,13 @@ for(const id of [near,far])uploads.layer.records.set(key(id),{id,key:key(id),sta
 uploads.layer.update(selection,camera(105.8));assert.equal(uploads.layer.stats.committed,0);
 budget.beginFrame(2);uploads.layer.update(selection,camera(103.43968));assert.equal(uploads.layer.records.get(key(near)).state,'ready');assert.equal(uploads.layer.records.get(key(far)).state,'pending');uploads.layer.dispose();
 // Occupied far DETAIL can yield one slot safely; late ignored-abort result dies.
-const preempt=controlled();seed(preempt.layer);preempt.layer.update(selection,camera(105.8));assert.equal(preempt.calls[0],key(far));const obsolete=preempt.requests[0];
+const preempt=controlled({preemptFarDetail:true});seed(preempt.layer);preempt.layer.update(selection,camera(105.8));assert.equal(preempt.calls[0],key(far));const obsolete=preempt.requests[0];
 preempt.layer.update(selection,camera(103.43968));assert.equal(preempt.calls[1],key(near));assert.equal(obsolete.signal.aborted,true);assert.equal(preempt.layer.stats.preemptedRequests,1);
 let released=0;const stale=field(far,10000);stale.texture.addEventListener('dispose',()=>released++);obsolete.resolveData(stale);await tick();
 assert.equal(released,1);assert.equal(preempt.layer.records.get(key(far)).data,null,'Aborted far result must not publish');assert.equal(preempt.layer.resolveTexture(near).sourceLevel,0,'Trusted parent stays while near data loads');
 preempt.requests[1].resolve(8000);await tick();preempt.layer.update(selection,camera(103.43968));assert.equal(preempt.layer.resolveTexture(near).sourceLevel,14);preempt.layer.dispose();
+const exposed=controlled({preemptFarDetail:true}),farParent={level:7,x:Math.floor(far.x/2),y:Math.floor(far.y/2)};seed(exposed.layer,farParent);exposed.layer.update(selection,camera(105.8));assert.equal(exposed.calls[0],key(far));
+exposed.layer.update(selection,camera(103.43968));assert.equal(exposed.calls[1],key({level:12,x:Math.floor(near.x/4),y:Math.floor(near.y/4)}),'A newly exposed near COVER must also get the freed slot');assert.equal(exposed.requests[0].signal.aborted,true);exposed.layer.dispose();
 // Regional display commits a READY near cohort before an equally ready far one.
 const region=controlled({regionalCoverage:true,maxCommitsPerFrame:10,commitBudgetMs:100});const root=seed(region.layer);region.layer.publishedKeys.add('0/0/0');region.layer.displayKeys.add('0/0/0');region.layer.displayedData.set('0/0/0',root);region.layer.displaySignatures.set('0/0/0',`${root.texture.uuid}/raw`);
 for(const id of [near,far]){const parent={level:id.level-1,x:Math.floor(id.x/2),y:Math.floor(id.y/2)};seed(region.layer,parent,6500);seed(region.layer,id,8000);}
