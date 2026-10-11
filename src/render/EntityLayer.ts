@@ -55,6 +55,7 @@ export class EntityLayer implements GlobeSceneLayer {
   constructor(private readonly ellipsoid: Ellipsoid, private readonly entities: EntityCollection,private readonly groundSource?:EntityGroundSurface) {
     for (const value of entities.values) this.dirty.add(value.id);
     this.unsubscribe = entities.onChange(change => {
+      if (change.type === 'selection') return;
       if (change.type === 'clear') { this.ordered=[]; for (const id of this.rendered.keys()) this.release(id); this.dirty.clear();this.groundJobs.clear();this.groundStates.clear(); }
       else if (change.id && change.type === 'remove') { this.dirty.delete(change.id); this.release(change.id);this.groundJobs.delete(change.id);this.groundStates.delete(change.id); }
       else if (change.id) {

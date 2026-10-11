@@ -124,7 +124,8 @@ try{
      h.engine.flyTo({longitude:106.55,latitude:29.61,altitude:12000,pitch:-55,heading:37,duration:0});
      return {positionError,projectionSame,offsetMounted,baseMounted,icons:images.length,canvasCount:document.querySelectorAll('#globe canvas').length};
    })()`);
-   assert.ok(tools.positionError<1e-6);assert.equal(tools.projectionSame,true);assert.equal(tools.offsetMounted,true);assert.equal(tools.baseMounted,true);assert.equal(tools.icons,9);assert.equal(tools.canvasCount,1);
+   assert.ok(tools.positionError<1e-6);assert.equal(tools.projectionSame,true);assert.equal(tools.offsetMounted,true);assert.equal(tools.baseMounted,true);assert.equal(tools.icons,8);assert.equal(tools.canvasCount,1);
+   assert.ok(await evaluate(`parseFloat(getComputedStyle(document.querySelector('.sag-tools')).bottom)>=48`),'Toolbar must stay clear of container bottom');
    assert.equal(await evaluate(`document.querySelector('.sag-tool-panel').classList.contains('sag-tool-panel--compact')`),true);
    if(terrain===1&&process.env.ENTITY_SCREENSHOT){const screenshot=await command('Page.captureScreenshot',{format:'png'});await writeFile(process.env.ENTITY_SCREENSHOT,Buffer.from(screenshot.result.data,'base64'));}
    // Real browser input exercises navigation handlers, not just controls.enabled.
@@ -157,6 +158,7 @@ try{
    assert.equal(measured.waiting,true);assert.equal(measured.continuousPoints,true);assert.equal(measured.noDuplicate,true);
    const markers=await evaluate(`(async()=>{
      const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),old=h.entities.length;document.querySelector('[data-tool="draw"]').click();await new Promise(r=>setTimeout(r,80));
+     document.getElementById('entity-type').value='point';
      document.querySelector('[data-action="start-draw"]').click();
      for(const x of [.3,.4]){c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:100,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:100,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));}
      const active=h.draw.isActive,count=h.entities.length-old;h.toolbar.close();return {active,count,ended:!h.draw.isActive,preserved:h.entities.length-old};
@@ -180,6 +182,20 @@ try{
      h.toolbar.close();h.entities.remove(m2);h.entities.add({id:m2,type:'point',position:[106.55,29.61,0]});h.measurements.clear();
      return {preservedOnStart,drawingOnly,failedKeepsOld,reusedSafe,measurementOnly,measureReuseSafe:h.entities.has(m2)};
    })()`);assert.deepEqual(history,{preservedOnStart:true,drawingOnly:true,failedKeepsOld:true,reusedSafe:true,measurementOnly:true,measureReuseSafe:true});
+   const liveIcon=await evaluate(`(async()=>{
+     const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect();
+     document.querySelector('[data-tool="draw"]').click();await new Promise(r=>setTimeout(r,80));
+     const mounted=!!document.querySelector('.sag-tool-panel #entity-panel'),set=(id,value)=>{const node=document.getElementById('entity-'+id);if(node.type==='checkbox')node.checked=value;else node.value=String(value);node.dispatchEvent(new Event('change'));};
+     document.getElementById('entity-type').value='point';set('height-reference','absolute');set('occlusion','overlay');set('color','#ffffff');set('opacity',1);set('size',40);set('icon-url','/mylocation_up.png');set('icon-enabled',true);set('heading',15);
+     const history=document.querySelector('[data-action="clear-draw-history"]');history.checked=false;history.dispatchEvent(new Event('change'));
+     document.querySelector('[data-action="start-draw"]').click();const click=x=>{for(const type of ['pointerdown','pointerup'])c.dispatchEvent(new PointerEvent(type,{button:0,pointerId:107,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));};
+     click(.35);const first=h.draw.state.lastEntityId;set('heading',135);click(.45);const second=h.draw.state.lastEntityId;
+     for(let i=0;i<200&&h.layer.getResourceState(second)?.state!=='ready';i++)await new Promise(r=>requestAnimationFrame(r));
+     const a=h.entities.getById(first),b=h.entities.getById(second),ready=h.layer.getResourceState(second)?.state;
+     const preserved=document.getElementById('entity-icon-enabled').checked,selected=h.entities.selectedId===second;h.toolbar.close();
+     return {mounted,firstIcon:a?.symbol?.icon?.url,secondIcon:b?.symbol?.icon?.url,firstHeading:a?.symbol?.heading,secondHeading:b?.symbol?.heading,preserved,selected,ready,restored:document.getElementById('entity-panel').parentElement===document.body};
+   })()`);
+   assert.deepEqual(liveIcon,{mounted:true,firstIcon:'/mylocation_up.png',secondIcon:'/mylocation_up.png',firstHeading:15,secondHeading:135,preserved:true,selected:true,ready:'ready',restored:true});
    if(terrain)for(const latitude of [88,-88]){
      await evaluate(`window.__entityDemo.engine.flyTo({longitude:0,latitude:${latitude},altitude:30000,pitch:-90,heading:0,duration:0})`);await pause(500);
      const polar=await evaluate(`(async()=>{await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const h=window.__entityDemo,c=h.engine.renderer.domElement,hit=h.engine.pickPositionDetailed({x:c.clientWidth/2,y:c.clientHeight/2}),gl=c.getContext('webgl2'),p=new Uint8Array(4);gl.readPixels(gl.drawingBufferWidth/2,gl.drawingBufferHeight/2,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return {appearance:h.engine.getPolarSurfaceState(),source:hit?.approximation,latitude:hit?.position.latitude,height:hit?.position.height,pixel:[...p],dem:h.engine.terrain.sampleHeight(0,${latitude})};})()`);

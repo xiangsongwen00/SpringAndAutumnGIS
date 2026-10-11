@@ -13,6 +13,15 @@ export class EntityCollection {
   private readonly listeners = new Set<(change: EntityChange) => void>();
   private shown = true;
   private destroyed = false;
+  private selection: string | null = null;
+  get selectedId(): string | null { this.assertAlive(); return this.selection; }
+  get selectedEntity(): EntitySnapshot | null { this.assertAlive(); return this.selection ? this.records.get(this.selection) ?? null : null; }
+  /** Selection context only; does not move camera, mutate symbol or add highlight geometry. */
+  selectById(id: string | null): EntitySnapshot | null {
+    this.assertAlive(); if (id !== null) this.require(id);
+    if (this.selection !== id) { this.selection = id; this.emit({ type: 'selection', ...(id === null ? {} : { id }) }); }
+    return this.selectedEntity;
+  }
   get isDestroyed(): boolean { return this.destroyed; }
   get length(): number { this.assertAlive(); return this.records.size; }
   get visible(): boolean { this.assertAlive(); return this.shown; }
@@ -72,14 +81,14 @@ export class EntityCollection {
     return 'position' in current ? this.update(id, { position: translate(current.position) }) : this.update(id, {
       positions: current.positions.map(translate), ...(current.type === 'polygon' ? { holes: current.holes?.map(ring => ring.map(translate)) } : {}) });
   }
-  remove(id: string): boolean { this.assertAlive(); const removed = this.records.delete(id); if (removed) this.emit({ type: 'remove', id }); return removed; }
-  clear(): void { this.assertAlive(); this.records.clear(); this.emit({ type: 'clear' }); }
+  remove(id: string): boolean { this.assertAlive(); const removed = this.records.delete(id); if (removed) { if (this.selection === id) this.selection = null; this.emit({ type: 'remove', id }); } return removed; }
+  clear(): void { this.assertAlive(); this.selection = null; this.records.clear(); this.emit({ type: 'clear' }); }
   /** Listener failures cannot interrupt other observers or leave the collection half-mutated. */
   onChange(listener: (change: EntityChange) => void): () => void {
     this.assertAlive(); this.listeners.add(listener); return () => this.listeners.delete(listener);
   }
   /** Owned by Viewer; after disposal all operational access fails explicitly. */
-  dispose(): void { if (this.destroyed) return; this.destroyed = true; this.records.clear(); this.emit({ type: 'clear' }); this.listeners.clear(); }
+  dispose(): void { if (this.destroyed) return; this.destroyed = true; this.selection = null; this.records.clear(); this.emit({ type: 'clear' }); this.listeners.clear(); }
   private require(id: string): EntityDefinition { const value = this.records.get(id); if (!value) throw new EntityError('NOT_FOUND', 'Entity was not found.'); return value; }
   private assertAlive(): void { if (this.destroyed) throw new EntityError('DESTROYED', 'Entity collection has been destroyed.'); }
   private emit(change: EntityChange): void {

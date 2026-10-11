@@ -193,7 +193,7 @@ export type { MeasurementState, MeasurementResult, MeasurementKind, MeasurementO
 export { ViewerToolbar } from './sdk/ViewerToolbar';
 export type { ToolbarTarget, ViewerToolbarOptions } from './sdk/ViewerToolbar';
 export { toolbarIcons } from './sdk/ToolbarIcons';
-export type { EntityDrawOptions, EntityDrawState } from './sdk/EntityDrawingController';
+export type { EntityDrawOptions, EntityDrawState, EntityDrawStyle } from './sdk/EntityDrawingController';
 export { EntityLayer } from './render/EntityLayer';
 export type { EntityDefinition, EntitySnapshot, EntityPosition, EntityPatch, EntityMove, EntityQuery, EntityChange,
   EntityPickOptions, ScreenPosition, PointSymbol, LineSymbol, PolygonSymbol, LabelSymbol } from './sdk/EntityTypes';

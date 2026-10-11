@@ -1,6 +1,18 @@
 # SDK 使用说明
 
-2026-10-08。引擎仓库负责库输出；独立交互、TS/JS消费和应用构建放在 **E:\0-SpringGISNet**。不再从本仓库通过demo:sdk创建临时消费者或启动交互服务。
+2026-10-11更新。引擎仓库负责库输出；独立交互、TS/JS消费和应用构建放在 **E:\0-SpringGISNet**。不再从本仓库通过demo:sdk创建临时消费者或启动交互服务。
+
+完整类/属性/类型/方法/返回值/错误/示例见 [SDK接口参考](SDK接口参考.md)，随安装包发布。本文侧重构建部署和历史实现边界；以接口参考和最新增量为当前调用约定。
+
+## 本轮增量：绘制样式、ID选择与工具栏（2026-10-11）
+
+工具栏默认离容器底部48px并加safe-area，toolbar.bottomOffset或CSS `--sag-toolbar-bottom`可覆盖；小弹窗同样偏移。标准7个图标，源码有业务层扩展共8个，对象管理收进绘制弹窗。源页面完整表单通过drawContent挂载到该弹窗，关闭恢复原DOM并隐藏；独立TS/ES6页同样复用完整表单，不复制ID/监听或建立第二套集合。
+
+图标不生效的已确认分叉：工具栏默认draw.start未读取已有表单符号，且会话样式被复制。修为同一EntityDrawingController，增加draw.setStyle(type,style)/getStyle(type)，按类型默认样式与活动同类型会话即时更新；已提交对象仍用entities.update或“应用到选中对象”明确更新，不无界批量改全部业务对象。表单change/开始读取完整图标/纹理参数；连续点提交期间不自动载入对象表单覆盖用户绘制预设。关掉icon/texture使用null移除，颜色白色保留原图色。
+
+已有entities.getById/query/update/move/显隐无需重复实现；新增entities.selectById/selectedId/selectedEntity、viewer.selectEntity/selectedEntity，ID稳定、位置/符号更新后读取最新快照；删除/清空撤销选择。selection事件不重建GPU、不自动高亮/飞行，可为实时定位/轨迹的选中上下文。viewer.coordinates公开已有转换器，sampleTerrainHeight仅查已可用DEM、未知null，不自动加载全球高程；屏幕高程仍用pickPositionDetailed并检查source。
+
+清理仅针对旧临时消费者和无npm引用的手工CDP诊断探针，先归档ZIP并核对条目/校验，再移出源码；核心DEM/XYZ-TMS/矢量/拾取/实体回归保留。恢复路径见archives/README.md，归档不进入SDK安装包。MVT底图/业务瓦片和地图注记仍为实验性，能力限制在接口参考专章列明，本轮不扩大样式/符号成熟度承诺。
 
 ## 1. 引擎只构建 dist
 
@@ -206,7 +218,7 @@ npm run dev
 
 打开终端实际地址的/index.html。此源码页依赖Vite转换TS，不能通过file://或Live Server直接运行；引擎dist仍只输出库，不改成网站。独立应用继续安装dist/tgz并用自身dev/preview。
 
-左下工具栏“绘图对象管理”图标打开完整面板，默认加入四类示例；里面有明确的“绘制点／绘制折线／绘制面／绘制标注”按钮，不是只勾选单击加点。“点属性查询”图标打开简洁查询弹窗，不强制定位；完整表单仍提供拾取诊断。永远村和行政区GeoJSON快捷定位收进“业务图层”面板，数据源不删除；独立demo重复的旧合成GeoJSON点线面示例已移除。
+当前左下工具栏“绘制”图标打开包含完整对象管理的面板；里面有明确的“绘制点／绘制折线／绘制面／绘制标注”按钮，不是只勾选单击加点。“测量／查询”图标可选点属性查询，不强制定位；完整表单仍提供拾取诊断。永远村和行政区GeoJSON快捷定位收进“业务图层”面板，数据源不删除；独立demo重复的旧合成GeoJSON点线面示例已移除。
 
 ```js
 viewer.draw.start({ type: 'polyline', id: 'route-from-mouse',
@@ -311,7 +323,7 @@ const hit = viewer.inspectAt({x:200,y:150}); // canvas相对CSS像素
 // hit.surface: 经纬度、高度、来源、回投误差；hit.entity: 自有实体属性/符号/几何快照
 ```
 
-工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标）；复杂设置与结果在右侧弹窗，底图和偏移是工具栏旁的紧凑弹窗。测量仅measure-distance图标、绘制仅polygon图标，弹窗选择点线面，默认点；包含初始视角、指南针、地形和对象管理，可选业务图层管理。悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。可用onEntities/onLayers接入应用自己的右侧管理面板。
+工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标），距底部48px+safe-area；复杂设置与结果在右侧弹窗，底图和偏移是工具栏旁的紧凑弹窗。测量仅measure-distance图标、绘制仅polygon图标，弹窗选择点线面，默认点；包含初始视角、指南针和地形，对象管理在绘制内部，可选业务图层管理。悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。推荐drawContent内嵌应用管理表单；onEntities可在绘制面板内部触发已有应用管理，onLayers扩展业务层入口。
 
 绘制默认navigation:'allow'：左键由绘制以捕获阶段独占（不拖地图），右键旋转、中键俯仰、滚轮缩放仍可用；拖动右键不落点，移动后的点击重新拾取当下显示地表。需要原行为可用viewer.draw.start({type:'polyline',navigation:'lock'})。若应用原本禁用相机，不擅自启用；结束恢复之前enabled状态。贴地细化期间最终实体跟随当前显示地表，不改变保存的顶点。
 
@@ -319,18 +331,18 @@ const hit = viewer.inspectAt({x:200,y:150}); // canvas相对CSS像素
 
 src/assets/img/NEW中的图片全部改为英文文件名，地形/测量/要素目录分别为terrain/measurement/entities；home、basemap、compass、tile-offset、entity-manager、layers等用于工具栏。Vite库构建将工具图标内联，消费者不需要引擎src目录；许可证生成到dist/THIRD_PARTY_NOTICES.txt。只有UI图标随包提供，不含维护者token或底图/DEM资源。
 
-源项目index.html使用同一个公共ViewerToolbar，通过轻量适配器复用已有引擎和右侧测试面板。顶部旧文字按钮隐藏，仅保留ID作为事件适配；“图层”按钮打开业务图层，“对象管理”打开点线面完整表单。独立项目TS/JS demo均创建已安装dist的工具栏，无源代码联接。
+源项目index.html使用同一个公共ViewerToolbar，通过轻量适配器复用已有引擎和右侧测试面板。顶部旧文字按钮隐藏，仅保留ID作为事件适配；“图层”按钮打开业务图层，“绘制”内嵌点线面完整表单。独立项目TS/JS demo均创建已安装dist的工具栏，无源代码联接。
 
 本轮验证：typecheck、完整npm test、test:measurement、test:ground、test:picking、test:sdk；根页面硬件GPU无地形/合成地形浏览器回归，新增实际右键导航、姿态/位置不变、图标解码、面板挂载、点查询、路程/面积完成、清理所有权。测试不请求真实地图，不视为实景服务或性能验收；地形LOD、队列和业务图层排序未改变。
 
 - 引擎：npm test、npm run typecheck、npm run test:sdk、npm run test:entities；保持原有渲染回归。
 - 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、真实GPU填充/洞/文字/图标方向/线面滚动/透明度、资源隔离与销毁重建。
 - SDK源码更新后显式build和sdk:update；日常应用启动只npm run dev或preview。
-- 历史examples/sdk-consumer仅是旧测试资料，不再随包发布，也不是日常交互入口；以独立应用为准。
+- 历史examples/sdk-consumer已ZIP归档，见archives/README.md；日常交互以独立应用为准。
 
 ## 6.2 连续点、双击与极圈补面（2026-10-11后续）
 
-测量默认选择点坐标／高程，另可选距离、面积或对象属性查询；绘制默认选择标记点，另可选折线、面、标注。打开或切换类型只进入待开始状态，必须点击独立“开始测量／开始绘制”才接管输入；完成后可再次开始，不必切换类型。测量和绘制各一个图标，标准SDK 8个、源码demo附带业务图层共9个。底图/偏移弹窗定位于工具栏旁，不占右侧大面板。
+测量默认选择点坐标／高程，另可选距离、面积或对象属性查询；绘制默认选择标记点，另可选折线、面、标注。打开或切换类型只进入待开始状态，必须点击独立“开始测量／开始绘制”才接管输入；完成后可再次开始，不必切换类型。测量和绘制各一个图标；对象管理已收进绘制，当前标准SDK 7个、源码demo附带业务图层共8个。底图/偏移弹窗定位于工具栏旁，不占右侧大面板。
 
 ```ts
 viewer.draw.start({type:'point'}); // 每次点击提交一个新marker，仍保持active

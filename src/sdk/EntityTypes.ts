@@ -40,7 +40,7 @@ export type EntityQuery = { type?: EntityDefinition['type']; visible?: boolean; 
   /** Anchor-in-bounds query; west > east represents crossing the antimeridian. */
   bounds?: { west: number; south: number; east: number; north: number };
   properties?: Record<string, unknown> };
-export type EntityChange = Readonly<{ type: 'add' | 'update' | 'remove' | 'clear' | 'visibility'; id?: string; fields?: readonly string[] }>;
+export type EntityChange = Readonly<{ type: 'add' | 'update' | 'remove' | 'clear' | 'visibility' | 'selection'; id?: string; fields?: readonly string[] }>;
 export type EntityPickOptions = { tolerance?: number };
 export type ScreenPosition = { x: number; y: number };
 export type EntityResourceState = Readonly<{ state: 'none' | 'pending' | 'loading' | 'ready' | 'error'; images: number }>;

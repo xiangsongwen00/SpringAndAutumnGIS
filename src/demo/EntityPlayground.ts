@@ -3,7 +3,7 @@ import { EntityCollection, EntityError, EntityLayer, EntityDrawingController, ty
   type EntityPosition, type EntityQuery, type PointSymbol, type LineSymbol, type PolygonSymbol } from '../index';
 
 /** Source-demo adapter: one engine, one independent entity overlay, no SDK consumer iframe. */
-export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entities:EntityCollection;layer:EntityLayer;draw:EntityDrawingController} {
+export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entities:EntityCollection;layer:EntityLayer;draw:EntityDrawingController;startDrawing:(type:EntityDefinition['type'],clearPrevious?:boolean)=>void} {
   const entities = new EntityCollection(), layer = new EntityLayer(engine.ellipsoid, entities,engine.entityGroundSurface);
   const layerId = '__demo_entities'; engine.addSceneLayer(layerId, layer);
   const draw=new EntityDrawingController(engine,entities,'__demo_draw_preview');
@@ -28,7 +28,7 @@ export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entitie
     el('entity-resource').textContent=`${entities.length} 个对象 · 集合${entities.visible?'显示':'隐藏'}${state?` · 符号 ${state.state}`:''}${ground?` · 地表 ${ground.state} · ${ground.vertices} 顶点`:''}`;
   };
   const refresh = (): void => {
-    if(disposed)return;const target=select('select'),previous=target.value;
+    if(disposed)return;const target=select('select'),previous=entities.selectedId??'';
     target.replaceChildren(new Option(`对象 ${entities.length} 个 · 请选择`,''));
     for(const value of entities.values)target.add(new Option(`${value.visible?'●':'○'} ${value.id} · ${value.type}`,value.id));
     target.value=entities.has(previous)?previous:'';input('all-visible').checked=entities.visible;
@@ -47,6 +47,7 @@ export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entitie
   const color = (value: string | undefined, fallback: string): string => `#${new THREE.Color(value??fallback).getHexString()}`;
   const loadForm = (): void => {
     const value=selected(),p='position' in value?value.position:value.positions[0]!;
+    entities.selectById(value.id);
     select('type').value=value.type;input('id').value=value.id;input('name').value=value.name??'';
     select('height-reference').value=value.heightReference??'absolute';input('ground-offset').value=String(value.groundOffset??.15);
     input('lon').value=String(p[0]);input('lat').value=String(p[1]);input('height').value=String(p[2]??30);
@@ -98,21 +99,25 @@ export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entitie
     {id:'demo-polygon',type:'polygon',name:'贴地纹理面（有洞）',heightReference:'clamp-to-ground',positions:[[106.51,29.63,1500],[106.57,29.63,1500],[106.57,29.67,1500],[106.51,29.67,1500]],holes:[[[106.53,29.64,1500],[106.55,29.64,1500],[106.55,29.66,1500],[106.53,29.66,1500]]],symbol:{color:'#ffffff',opacity:.5,outlineColor:'#ffffff',outlineWidth:2,texture:{url:'/Qianjin_left.png',repeat:[8,4],speed:[-.15,0]}}},
     {id:'demo-label',type:'label',name:'独立标注',position:[106.58,29.65,1500],label:{text:'独立标注\n绝对高度1500m',fontSize:18,color:'#ffffff',backgroundColor:'#173342',offset:[0,0]}}
   ];
-  const startDrawing=(type:EntityDefinition['type']):void=>{
+  const setDrawStyle=():void=>{const type=select('type').value as EntityDefinition['type'];draw.setStyle(type,{symbol:type==='label'?undefined:symbol(type),label:label()??null,heightReference:select('height-reference').value as 'absolute'|'clamp-to-ground',groundOffset:number('ground-offset',0,10)});};
+  const startDrawing=(type:EntityDefinition['type'],clearPrevious=false):void=>{
     select('type').value=type;input('id').value='';if(type==='label'&&!input('text').value)input('text').value='标注';
-    select('occlusion').value=type==='polyline'||type==='polygon'?'depth':'overlay';
-    if(type==='polyline'||type==='polygon')select('height-reference').value='clamp-to-ground';
+    if(!Object.keys(draw.getStyle(type)).length){select('occlusion').value=type==='polyline'||type==='polygon'?'depth':'overlay';
+      if(type==='polyline'||type==='polygon')select('height-reference').value='clamp-to-ground';}
     if(select('height-reference').value==='clamp-to-ground')select('pick-mode').value='surface';
     const mode=select('pick-mode').value as 'surface'|'ellipsoid'|'absolute-height';
-    draw.start({type,name:input('name').value,properties:properties(),symbol:type==='label'?undefined:symbol(type),label:label(),heightReference:select('height-reference').value as 'absolute'|'clamp-to-ground',groundOffset:number('ground-offset',0,10),pick:{mode,height:mode==='absolute-height'?number('height'):undefined}});open(true);
+    setDrawStyle();draw.start({type,clearPrevious,name:input('name').value,properties:properties(),pick:{mode,height:mode==='absolute-height'?number('height'):undefined}});open(true);
   };
   const unsubscribeDraw=draw.onChange(state=>{message(state.error??(state.active?`绘制 ${state.type} · ${state.vertexCount} 顶点 · 拾取 ${state.pickMs.toFixed(1)}ms / CPU预览 ${state.previewMs.toFixed(1)}ms / 更新 ${state.previewFrameMs.toFixed(1)}ms`:'绘制结束，相机操作已恢复'),!!state.error);
-    if(state.lastEntityId&&entities.has(state.lastEntityId)){select('select').value=state.lastEntityId;loadForm();}});
+    if(state.lastEntityId&&entities.has(state.lastEntityId)){select('select').value=state.lastEntityId;entities.selectById(state.lastEntityId);if(!state.active)loadForm();}});
   const addSamples = (type?:EntityDefinition['type']):void => {
     const items=samples.filter(value=>!type||value.type===type);for(const value of items){entities.remove(value.id);entities.add(value);}
     entities.setVisible(true);select('select').value=items[0]!.id;loadForm();focus(items[0]!);open(true);
   };
   const unsubscribe=entities.onChange(refresh);
+  for(const node of panel.querySelectorAll<HTMLInputElement|HTMLSelectElement>('#entity-icon-enabled,#entity-icon-url,#entity-heading,#entity-source-heading,#entity-alignment,#entity-texture-enabled,#entity-texture-url,#entity-line-period,#entity-line-speed,#entity-line-direction,#entity-repeat-u,#entity-repeat-v,#entity-speed-u,#entity-speed-v,#entity-texture-rotation,#entity-color,#entity-opacity,#entity-size,#entity-width,#entity-shape,#entity-outline,#entity-fill,#entity-text,#entity-font,#entity-height-reference,#entity-ground-offset,#entity-occlusion'))
+    node.addEventListener('change',()=>{try{setDrawStyle();message('样式已用于当前会话与后续绘制；已有对象用“更新选中对象”。');}catch(error){message(String(error),true);}},{signal:events.signal});
+  select('type').dataset.drawType='true';
   bind('entity-test',()=>{if(panel.hidden){open(true);if(!entities.length)addSamples();}else open(false);});
   bind('entity-close',()=>open(false));bind('entity-samples',()=>addSamples());
   bind('pick-debug',()=>{open(true);input('pick-diagnostics').checked=true;message('点击地表查看经纬度、高度、来源和回投误差；可勾选单击新增点。');});
@@ -167,5 +172,5 @@ export function attachEntityPlayground(engine: GlobeEngine): (()=>void)&{entitie
     (window as Window & {__entityDemo?:unknown}).__entityDemo={entities,layer,engine,draw};
     el('entity-message').dataset.smoke='ready';
   }
-  return Object.assign(()=>{if(disposed)return;draw.dispose();disposed=true;events.abort();unsubscribe();unsubscribeDraw();clearInterval(timer);observer.disconnect();engine.removeSceneLayer(layerId);entities.dispose();document.body.classList.remove('entity-panel-open');},{entities,layer,draw});
+  return Object.assign(()=>{if(disposed)return;draw.dispose();disposed=true;events.abort();unsubscribe();unsubscribeDraw();clearInterval(timer);observer.disconnect();engine.removeSceneLayer(layerId);entities.dispose();document.body.classList.remove('entity-panel-open');},{entities,layer,draw,startDrawing});
 }

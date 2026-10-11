@@ -354,11 +354,13 @@ const toolbar=new ViewerToolbar({
   inspectAt:(screen)=>{const surface=engine.pickPositionDetailed(screen);engine.camera.updateMatrixWorld();return {surface,
     entity:disposeEntityPlayground.layer.pick(screen,engine.camera,{},surface?.source==='rendered-surface'?surface.viewDepth:null)};}
 },{basemapContent:basemapTools,offsetContent:levelOffsetInput.closest('label')!,
+  drawContent:requiredElement<HTMLElement>('#entity-panel'),
+  onDraw:(type,options)=>disposeEntityPlayground.startDrawing(type,options.clearPrevious),
   onPanelOpen:()=>{document.getElementById('entity-close')!.click();businessLayerPanel.hidden=true;businessLayerControl.setAttribute('aria-expanded','false');},
-  onEntities:()=>{if(requiredElement<HTMLElement>('#entity-panel').hidden)requiredElement<HTMLButtonElement>('#entity-test').click();},
   onLayers:()=>{if(businessLayerPanel.hidden)businessLayerControl.click();}
 });
 if(entitySmoke)Object.assign((window as Window & {__entityDemo?:object}).__entityDemo!,{toolbar,measurements});
+document.getElementById('entity-close')!.addEventListener('click',()=>toolbar.close());
 if (new URLSearchParams(window.location.search).has('pitch')) {
   engine.flyTo({ longitude: queryNumber('longitude', 105, -180, 180),
     latitude: queryNumber('latitude', 32, -85, 85),

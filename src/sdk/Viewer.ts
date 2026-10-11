@@ -159,6 +159,16 @@ export class Viewer {
   setLodGridVisible(visible: boolean): void { this.assertAlive(); this.engine.setLodGridVisible(visible); }
   flyTo(view: GlobeFlyToOptions): void { this.assertAlive(); this.engine.flyTo(view); }
   getCameraViewState() { this.assertAlive(); return this.engine.getCameraViewState(); }
+  /** Public WGS84/world/Web-Mercator/tile/ENU converter; world axes are engine-specific. */
+  get coordinates() { this.assertAlive(); return this.engine.coordinates; }
+  selectEntity(id:string|null):EntitySnapshot|null { this.assertAlive(); return this.entities.selectById(id); }
+  get selectedEntity():EntitySnapshot|null { this.assertAlive(); return this.entities.selectedEntity; }
+  /** Already available DEM height only; no fetch, no zero-height substitution. */
+  sampleTerrainHeight(longitude:number,latitude:number):number|null {
+    this.assertAlive();if(!Number.isFinite(longitude)||!Number.isFinite(latitude)||Math.abs(longitude)>180||Math.abs(latitude)>90)
+      throw new ViewerError('INVALID_OPTIONS','Expected WGS84 longitude/latitude in degrees.');
+    return this.engine.terrain?.sampleHeight(longitude,latitude)??null;
+  }
   getPolarSurfaceState(){this.assertAlive();return this.engine.getPolarSurfaceState();}
   orientNorthUp():void {this.assertAlive();this.engine.controls.orientNorthUp();}
   resetView():void {this.assertAlive();this.engine.controls.resetView();}

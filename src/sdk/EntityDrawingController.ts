@@ -16,6 +16,8 @@ export type EntityDrawOptions = { type: EntityDefinition['type']; id?: string; n
   historyGroup?:'drawing'|'measurement' };
 export type EntityDrawState = Readonly<{ active:boolean; type:EntityDefinition['type']|null; vertexCount:number;
   positions:readonly EntityPosition[]; lastEntityId:string|null; lastPick:SurfacePickResult|null; error:string|null;pickMs:number;previewMs:number;previewFrameMs:number }>;
+export type EntityDrawStyle = { symbol?: PointSymbol|LineSymbol|PolygonSymbol; label?: LabelSymbol|null;
+  heightReference?:'absolute'|'clamp-to-ground'; groundOffset?:number };
 
 /** Shared mouse expression system: preview, finish, undo, cancel, keyboard and navigation ownership. */
 export class EntityDrawingController {
@@ -44,6 +46,28 @@ export class EntityDrawingController {
   private previewQueuedAt=0;
   private previewProbe:number|undefined;
   private destroyed=false;
+  private readonly styles=new Map<EntityDefinition['type'],EntityDrawStyle>();
+  /** Per-kind defaults, shared by toolbar and application drawing entry points. */
+  getStyle(type:EntityDefinition['type']):EntityDrawStyle {this.assertAlive();this.validateType(type);return structuredClone(this.styles.get(type)??{});}
+  /** Updates future draws and the active session of this kind, not committed entities. */
+  setStyle(type:EntityDefinition['type'],patch:EntityDrawStyle):EntityDrawStyle {
+    this.assertAlive();this.validateType(type);
+    if(!patch||typeof patch!=='object'||Object.keys(patch).some(k=>!['symbol','label','heightReference','groundOffset'].includes(k)))throw new EntityError('INVALID_ENTITY','Invalid drawing style field.');
+    const old=this.styles.get(type)??{},next={...old,...structuredClone(patch)};
+    if(patch.symbol)next.symbol={...old.symbol,...structuredClone(patch.symbol)};
+    if(patch.label)next.label={...old.label,...structuredClone(patch.label)};
+    validateEntity(this.definition({type,...next,label:next.label??undefined},[[0,0,0],[.001,0,0],[.001,.001,0]],'__style_validation'));
+    this.styles.set(type,next);
+    if(this.options?.type===type&&(this.options.historyGroup??'drawing')==='drawing'){
+      const active=this.options,activeSymbol=active.symbol,activeLabel=active.label;
+      Object.assign(active,structuredClone(patch));
+      if(patch.symbol)active.symbol={...activeSymbol,...structuredClone(patch.symbol)};
+      if(patch.label===null)active.label=undefined;else if(patch.label)active.label={...activeLabel,...structuredClone(patch.label)};
+      this.showPreview();this.emit();
+    }
+    return this.getStyle(type);
+  }
+  private validateType(type:EntityDefinition['type']):void {if(!['point','polyline','polygon','label'].includes(type))throw new EntityError('INVALID_ENTITY','Invalid drawing type.');}
   constructor(private readonly engine:GlobeEngine,private readonly entities:EntityCollection,private readonly layerId='__entity_draw_preview') {
     this.unsubscribeEntities=entities.onChange(change=>{if(change.type==='clear'){for(const ids of this.history.values())ids.clear();this.history.clear();}else if(change.type==='remove'&&change.id)for(const ids of this.history.values())ids.delete(change.id);});
     this.previewLayer=new EntityLayer(engine.ellipsoid,this.preview,engine.entityGroundSurface);engine.addSceneLayer(layerId,this.previewLayer);this.preview.setVisible(false);
@@ -99,6 +123,9 @@ export class EntityDrawingController {
   start(options:EntityDrawOptions):EntityDrawState {
     this.assertAlive();
     if(!options||!['point','polyline','polygon','label'].includes(options.type))throw new EntityError('INVALID_ENTITY','Invalid drawing type.');
+    const defaults=options.historyGroup==='measurement'?{}:this.getStyle(options.type);
+    options={...defaults,...options,label:options.label??defaults.label??undefined,
+      symbol:options.symbol?{...defaults.symbol,...options.symbol}:defaults.symbol};
     if(options.navigation&&!['allow','lock'].includes(options.navigation))throw new EntityError('INVALID_ENTITY','Invalid drawing navigation policy.');
     if(options.continuous!==undefined&&typeof options.continuous!=='boolean')throw new EntityError('INVALID_ENTITY','Invalid continuous drawing flag.');
     if(options.clearPrevious!==undefined&&typeof options.clearPrevious!=='boolean')throw new EntityError('INVALID_ENTITY','Invalid history cleanup flag.');
@@ -142,7 +169,7 @@ export class EntityDrawingController {
     if(this.options&&(this.options.historyGroup??'drawing')===group)this.cancel();for(const id of [...(this.history.get(group)??[])])this.entities.remove(id);this.history.delete(group);}
   cancel():void {if(this.destroyed)return;if(this.options){this.end();this.error=null;this.lastId=null;this.emit();}}
   onChange(listener:(state:EntityDrawState)=>void):()=>void {this.assertAlive();this.listeners.add(listener);return()=>this.listeners.delete(listener);}
-  dispose():void {if(this.destroyed)return;this.cancel();this.destroyed=true;this.events.abort();this.unsubscribeEntities();this.history.clear();this.listeners.clear();this.engine.removeSceneLayer(this.layerId);this.preview.dispose();}
+  dispose():void {if(this.destroyed)return;this.cancel();this.destroyed=true;this.events.abort();this.unsubscribeEntities();this.history.clear();this.styles.clear();this.listeners.clear();this.engine.removeSceneLayer(this.layerId);this.preview.dispose();}
   private end():void {if(this.previewProbe!==undefined)cancelAnimationFrame(this.previewProbe);this.previewProbe=undefined;this.engine.controls.enabled=this.navigation;this.engine.renderer.domElement.style.cursor=this.previousCursor;this.options=undefined;this.pointer=undefined;this.preview.clear();this.preview.setVisible(false);this.positions=[];}
   private pick(event:PointerEvent):EntityPosition|null {
     const started=performance.now();
