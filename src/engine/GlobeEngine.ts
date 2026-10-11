@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CoordinateTransform } from '../core/coordinates/CoordinateTransform';
 import { pickSurfacePosition, type SurfacePickOptions, type SurfacePickResult } from '../core/geo/SurfacePicker';
 import type { ScreenPosition } from '../sdk/EntityTypes';
+import type { EntityGroundSurface } from '../render/EntityGroundSurface';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import {
   GlobeLodSelector,
@@ -102,6 +103,9 @@ export type GlobeEngineOptions = {
 /** Stage-one globe runtime: camera + WGS84 ellipsoid + geographic quadtree grid. */
 export class GlobeEngine {
   readonly backgroundWorkBudget = new FrameWorkBudget(4);
+  readonly entityGroundSurface:EntityGroundSurface={
+    get revision(){return 'uninitialized';},patches:()=>[]
+  };
   pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null {
     if(this.disposed)throw new Error('GlobeEngine has been disposed.');
     const rect=this.renderer.domElement.getBoundingClientRect();
@@ -173,6 +177,8 @@ export class GlobeEngine {
   };
 
   constructor(options: GlobeEngineOptions) {
+    const engine=this;
+    this.entityGroundSurface={get revision(){return engine.imagery?.surfaceRevision??'no-base-surface';},patches:bounds=>engine.imagery?.surfacePatches(bounds)??[]};
     this.container = options.container;
     this.requestedPixelRatio = Math.max(0.5, options.pixelRatio ?? window.devicePixelRatio);
     this.maxDrawingBufferPixels = Math.max(

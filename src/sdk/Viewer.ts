@@ -9,7 +9,9 @@ import type { GlobeFlyToOptions } from '../engine/GlobeCameraController';
 import { EntityCollection } from './EntityCollection';
 import { EntityLayer } from '../render/EntityLayer';
 import { EntityDrawingController } from './EntityDrawingController';
-import type { EntitySnapshot, EntityPickOptions, ScreenPosition, EntityResourceState } from './EntityTypes';
+import { MeasurementController, measureDistance, measureArea } from './Measurement';
+import { ViewerToolbar, type ViewerToolbarOptions } from './ViewerToolbar';
+import type { EntitySnapshot, EntityPickOptions, ScreenPosition, EntityResourceState, EntityGroundState } from './EntityTypes';
 import type { Cartographic } from '../core/geo/Ellipsoid';
 import type { SurfacePickOptions, SurfacePickResult } from '../core/geo/SurfacePicker';
 
@@ -29,6 +31,8 @@ export type ViewerOptions = Omit<GlobeEngineOptions, 'container' | 'imagery' | '
   autoStart?: boolean;
   /** Cancels creation/configuration loading; not the lifetime of a ready Viewer. */
   signal?: AbortSignal;
+  /** Optional bundled icon toolbar, disabled unless requested. */
+  toolbar?:boolean|ViewerToolbarOptions;
 };
 
 export type ViewerErrorCode = 'INVALID_OPTIONS' | 'DESTROYED' | 'ABORTED' | 'BASEMAP_LOAD_FAILED' | 'TERRAIN_UNAVAILABLE';
@@ -45,6 +49,8 @@ export class Viewer {
   readonly engine: GlobeEngine;
   readonly entities = new EntityCollection();
   readonly draw:EntityDrawingController;
+  readonly measure:MeasurementController;
+  private toolbar:ViewerToolbar|null=null;
   private readonly entityLayer: EntityLayer;
   private readonly definitions = new Map<string, BaseMapDefinition>();
   private current: PreparedBaseMap | null = null;
@@ -54,14 +60,15 @@ export class Viewer {
   private destroyed = false;
 
   private constructor(container: HTMLElement, options: ViewerOptions) {
-    const { basemaps = [], baseMap: _baseMap, terrain, showLodGrid = false, autoStart: _autoStart, signal: _signal, ...engineOptions } = options;
+    const { basemaps = [], baseMap: _baseMap, terrain, showLodGrid = false, autoStart: _autoStart, signal: _signal, toolbar: _toolbar, ...engineOptions } = options;
     for (const definition of basemaps) this.definitions.set(definition.id, definition);
     this.engine = new GlobeEngine({ ...engineOptions, container, imagery: false,
       terrain: terrain ? terrain.provider : false, terrainEnabled: terrain ? terrain.enabled ?? true : false,
       grid: { ...engineOptions.grid, visible: showLodGrid } });
-    this.entityLayer = new EntityLayer(this.engine.ellipsoid, this.entities);
+    this.entityLayer = new EntityLayer(this.engine.ellipsoid, this.entities,this.engine.entityGroundSurface);
     this.engine.addSceneLayer('__sdk_entities', this.entityLayer);
     this.draw=new EntityDrawingController(this.engine,this.entities,'__sdk_draw_preview');
+    this.measure=new MeasurementController(this.draw,this.entities);
   }
 
   static async create(container: string | HTMLElement, options: ViewerOptions = {}): Promise<Viewer> {
@@ -100,6 +107,7 @@ export class Viewer {
     options.signal?.addEventListener('abort', abort, { once: true });
     try {
       await viewer.setBaseMap(initial);
+      if(options.toolbar)viewer.createToolbar(options.toolbar===true?{}:options.toolbar);
       if (options.autoStart !== false) viewer.start();
       return viewer;
     } catch (error) { viewer.destroy(); throw error; }
@@ -151,6 +159,21 @@ export class Viewer {
   setLodGridVisible(visible: boolean): void { this.assertAlive(); this.engine.setLodGridVisible(visible); }
   flyTo(view: GlobeFlyToOptions): void { this.assertAlive(); this.engine.flyTo(view); }
   getCameraViewState() { this.assertAlive(); return this.engine.getCameraViewState(); }
+  orientNorthUp():void {this.assertAlive();this.engine.controls.orientNorthUp();}
+  resetView():void {this.assertAlive();this.engine.controls.resetView();}
+  setTileLevelOffset(offset:number):void {
+    this.assertAlive();if(!Number.isFinite(offset)||offset < -4||offset > 1)throw new ViewerError('INVALID_OPTIONS','Tile offset must be -4..1.');
+    if(!this.current?.provider.setViewLevelOffset)throw new ViewerError('INVALID_OPTIONS','Current base provider does not support offset.');
+    this.current.provider.setViewLevelOffset(offset);this.current.symbols?.setViewLevelOffset(offset);
+  }
+  get tileLevelOffset():number|null {return this.current?.provider.viewLevelOffset??null;}
+  /** Opt-in UI, owned and destroyed with the Viewer. Icons are bundled; no token/resource configuration included. */
+  createToolbar(options:ViewerToolbarOptions={}):ViewerToolbar {
+    this.assertAlive();this.toolbar?.destroy();return this.toolbar=new ViewerToolbar(this,options);
+  }
+  measureDistance=measureDistance;
+  measureArea=measureArea;
+  inspectAt(screen:ScreenPosition) {this.assertAlive();return {surface:this.pickPositionDetailed(screen),entity:this.pick(screen)};}
   /** CSS pixels relative to the canvas, not client coordinates or device pixels. */
   pick(screen: ScreenPosition, options: EntityPickOptions = {}): EntitySnapshot | null {
     this.assertAlive(); this.engine.camera.updateMatrixWorld();
@@ -158,6 +181,7 @@ export class Viewer {
     return this.entityLayer.pick(screen, this.engine.camera, options,ground?.source==='rendered-surface'?ground.viewDepth:null);
   }
   getEntityResourceState(id:string):EntityResourceState|null { this.assertAlive(); return this.entityLayer.getResourceState(id); }
+  getEntityGroundState(id:string):EntityGroundState|null { this.assertAlive();return this.entityLayer.getGroundState(id); }
   retryEntityResources(id:string):boolean { this.assertAlive(); return this.entityLayer.retryResources(id); }
   /** Defaults to the displayed raster/vector surface mesh. Explicit ellipsoid/height modes remain available. */
   pickPosition(screen: ScreenPosition,options:SurfacePickOptions={}): Cartographic | null { return this.pickPositionDetailed(screen,options)?.position??null; }
@@ -173,7 +197,7 @@ export class Viewer {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true; this.generation++; this.controller?.abort(); this.controller = null;
-    this.draw.dispose();this.engine.dispose(); this.entities.dispose(); this.current?.dispose(); this.current = null;
+    this.toolbar?.destroy();this.toolbar=null;this.measure.dispose();this.draw.dispose();this.engine.dispose(); this.entities.dispose(); this.current?.dispose(); this.current = null;
   }
   private assertAlive(): void { if (this.destroyed) throw new ViewerError('DESTROYED', 'Viewer has been destroyed.'); }
 

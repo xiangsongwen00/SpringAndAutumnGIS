@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 
-type Cached={signature:string;vertices:Float64Array;bounds:THREE.Box3};
+export type RasterSurfaceGeometry={signature:string;vertices:Float64Array;bounds:THREE.Box3};
+type Cached=RasterSurfaceGeometry;
 const cache=new WeakMap<THREE.BufferGeometry,Cached>();
 
 /** CPU counterpart of the existing raster vertex shader, including the DISPLAYED DEM and ECEF edge overrides. */
-export function intersectRasterSurface(ray:THREE.Ray,mesh:THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>,
-  ellipsoid:Ellipsoid,maximumDistance=Infinity):THREE.Vector3|null {
+export function rasterSurfaceGeometry(mesh:THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>,ellipsoid:Ellipsoid):RasterSurfaceGeometry {
   const uniforms=mesh.material.uniforms,g=mesh.geometry,position=g.getAttribute('position'),uv=g.getAttribute('uv');
   const mask=g.getAttribute('terrainEdgeMask'),high=g.getAttribute('terrainEdgeHigh'),low=g.getAttribute('terrainEdgeLow');
   const value=<T>(name:string):T=>uniforms[name]!.value as T;
@@ -43,6 +43,11 @@ export function intersectRasterSurface(ray:THREE.Ray,mesh:THREE.Mesh<THREE.Buffe
       vertices.set([point.x,point.y,point.z],i*3);bounds.expandByPoint(point);
     }state={signature,vertices,bounds};cache.set(g,state);
   }
+  return state;
+}
+export function intersectRasterSurface(ray:THREE.Ray,mesh:THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>,
+  ellipsoid:Ellipsoid,maximumDistance=Infinity):THREE.Vector3|null {
+  const state=rasterSurfaceGeometry(mesh,ellipsoid),g=mesh.geometry;
   const boxHit=ray.intersectBox(state.bounds,new THREE.Vector3());if(!boxHit||!state.bounds.containsPoint(ray.origin)&&ray.origin.distanceTo(boxHit)>maximumDistance)return null;
   const a=new THREE.Vector3(),b=new THREE.Vector3(),c=new THREE.Vector3(),hit=new THREE.Vector3();let best:THREE.Vector3|null=null;
   const index=g.index;if(!index)return null;

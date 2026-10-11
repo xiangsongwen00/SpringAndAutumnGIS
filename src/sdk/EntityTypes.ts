@@ -16,6 +16,10 @@ export type LabelSymbol = { text: string; fontSize?: number; color?: string; hal
   offset?: readonly [xPixels: number, yPixels: number]; backgroundColor?: string; padding?: number; opacity?: number;
   /** depth by default; attached point labels inherit the point policy unless explicitly set. */ occlusion?:'depth'|'overlay' };
 type Common = { id: string; name?: string; visible?: boolean; properties?: Record<string, unknown>;
+  /** absolute preserves input heights; clamp-to-ground follows the currently displayed base surface. */
+  heightReference?:'absolute'|'clamp-to-ground';
+  /** Rendering clearance in metres for clamped geometry, default 0.15; does not mutate stored positions. */
+  groundOffset?:number;
   /** Draw order below engine base annotations; 0..9000, default 500. */
   order?: number; label?: LabelSymbol };
 export type EntityDefinition = Common & (
@@ -28,6 +32,7 @@ type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonl
 export type EntitySnapshot = DeepReadonly<EntityDefinition>;
 /** Type/id stay stable; symbol and label fields merge, geometry arrays replace. null removes an attached label. */
 export type EntityPatch = { name?: string; visible?: boolean; order?: number; properties?: Record<string, unknown>;
+  heightReference?:'absolute'|'clamp-to-ground'; groundOffset?:number;
   position?: EntityPosition; positions?: readonly EntityPosition[]; holes?: readonly (readonly EntityPosition[])[];
   symbol?: PointSymbol | LineSymbol | PolygonSymbol; label?: Partial<LabelSymbol> | null };
 export type EntityMove = { longitude?: number; latitude?: number; height?: number };
@@ -39,3 +44,4 @@ export type EntityChange = Readonly<{ type: 'add' | 'update' | 'remove' | 'clear
 export type EntityPickOptions = { tolerance?: number };
 export type ScreenPosition = { x: number; y: number };
 export type EntityResourceState = Readonly<{ state: 'none' | 'pending' | 'loading' | 'ready' | 'error'; images: number }>;
+export type EntityGroundState=Readonly<{state:'absolute'|'pending'|'ready'|'unavailable'|'limited';revision:string|null;patches:number;vertices:number;message:string|null}>;

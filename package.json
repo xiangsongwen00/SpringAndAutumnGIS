@@ -24,6 +24,8 @@
     "test:sdk": "node scripts/test-sdk-package.mjs",
     "test:entities": "node scripts/test-entities.mjs",
     "test:picking": "node scripts/test-surface-picking.mjs",
+    "test:ground": "node scripts/test-entity-ground.mjs",
+    "test:measurement": "node scripts/test-measurement-camera.mjs",
     "test:entities:browser": "node scripts/test-entity-demo-browser.mjs",
     "dev": "vite",
     "build": "vite build && tsc -p tsconfig.build.json",
@@ -43,15 +45,18 @@
     "vite": "^5.1.4"
   },
   "peerDependencies": {
-    "three": "^0.182.0",
-    "@types/three": "^0.182.0"
+    "@types/three": "^0.182.0",
+    "three": "^0.182.0"
   },
   "peerDependenciesMeta": {
-    "@types/three": { "optional": true }
+    "@types/three": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
     "@maplibre/maplibre-gl-style-spec": "^26.4.4",
+    "geographiclib-geodesic": "^2.2.0",
     "pbf": "^5.1.2"
   }
 }

@@ -5,6 +5,8 @@ import {
   DEFAULT_LEVEL_OFFSET,
   DataSourceRegistry,
   GlobeEngine,
+  ViewerToolbar,
+  MeasurementController,
   GeoJsonLayer,
   LayerCollection,
   MvtRasterProvider,
@@ -333,6 +335,26 @@ if (!entitySmoke && activeBaseLayer.kind === 'vector') {
 engine.setTerrainEnabled(terrainEnabled);
 engine.start();
 const disposeEntityPlayground = attachEntityPlayground(engine);
+const measurements=new MeasurementController(disposeEntityPlayground.draw,disposeEntityPlayground.entities);
+const basemapTools=document.createElement('div');
+basemapTools.append(baseLayerSelect.closest('label')!,annotationControl);
+const toolbar=new ViewerToolbar({
+  engine,entities:disposeEntityPlayground.entities,draw:disposeEntityPlayground.draw,measure:measurements,
+  get terrainEnabled(){return terrainEnabled;},get tileLevelOffset(){return activeBaseLayer.levelOffset;},
+  get baseMap(){return {id:activeBaseLayer.id};},getBaseMaps:()=>baseLayers,
+  setBaseMap:async(id)=>{if(id){baseLayerSelect.value=id;baseLayerSelect.dispatchEvent(new Event('change'));}},
+  setTerrainEnabled:(enabled)=>{if(!terrain)throw new Error('请先配置地形服务');if(enabled!==terrainEnabled)terrainToggle.click();},
+  setTileLevelOffset:(value)=>{levelOffsetInput.value=String(value);levelOffsetInput.dispatchEvent(new Event('input'));},
+  orientNorthUp:()=>engine.controls.orientNorthUp(),resetView:()=>engine.controls.resetView(),
+  inspectAt:(screen)=>{const surface=engine.pickPositionDetailed(screen);engine.camera.updateMatrixWorld();return {surface,
+    entity:disposeEntityPlayground.layer.pick(screen,engine.camera,{},surface?.source==='rendered-surface'?surface.viewDepth:null)};}
+},{basemapContent:basemapTools,offsetContent:levelOffsetInput.closest('label')!,
+  onPanelOpen:()=>{document.getElementById('entity-close')!.click();businessLayerPanel.hidden=true;businessLayerControl.setAttribute('aria-expanded','false');},
+  onEntities:()=>{if(requiredElement<HTMLElement>('#entity-panel').hidden)requiredElement<HTMLButtonElement>('#entity-test').click();},
+  onLayers:()=>{if(businessLayerPanel.hidden)businessLayerControl.click();},
+  onDraw:(type)=>requiredElement<HTMLButtonElement>(`#entity-draw-${type==='polyline'?'line':type}`).click()
+});
+if(entitySmoke)Object.assign((window as Window & {__entityDemo?:object}).__entityDemo!,{toolbar,measurements});
 if (new URLSearchParams(window.location.search).has('pitch')) {
   engine.flyTo({ longitude: queryNumber('longitude', 105, -180, 180),
     latitude: queryNumber('latitude', 32, -85, 85),
@@ -500,6 +522,7 @@ geoJsonTest.addEventListener('click', async () => {
 
 window.addEventListener('pagehide', () => {
   cancelAnimationFrame(fpsAnimationFrame);
+  toolbar.destroy();measurements.dispose();
   disposeEntityPlayground();
   engine.dispose();
 }, { once: true });

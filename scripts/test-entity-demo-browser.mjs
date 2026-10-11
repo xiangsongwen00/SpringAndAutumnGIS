@@ -9,8 +9,9 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const server=await createServer({root,configFile:join(root,'vite.config.ts'),server:{host:'127.0.0.1',port:0,strictPort:false},logLevel:'error'});
 await server.listen();const base=`http://127.0.0.1:${server.httpServer.address().port}`;
 const profile=await mkdtemp(join(tmpdir(),'sag-entity-demo-'));
+const gpu=process.env.ENTITY_GPU_MODE==='hardware'?[]:['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
 const child=spawn(process.env.CHROME_PATH??'C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless','--no-first-run','--disable-extensions','--window-size=1440,900',
- '--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-gpu-sandbox','--disable-background-networking','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+ ...gpu,'--disable-gpu-sandbox','--disable-background-networking','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
 let socket,launchError;child.on('error',error=>{launchError=error;});const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 try{
  let port;for(let i=0;i<100&&!port;i++){if(launchError)throw launchError;try{port=(await readFile(join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];}catch{await pause(100);}}
@@ -65,24 +66,42 @@ try{
        c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:43,clientX:r.left+x*r.width,clientY:r.top+y*r.height}));
      };
      const before=h.entities.length;document.getElementById('entity-draw-line').click();const paused=!h.engine.controls.enabled;
-     click(.25,.58);click(.35,.65);document.getElementById('entity-draw-undo').click();const undo=h.draw.state.vertexCount;
+     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+     click(.25,.58);c.dispatchEvent(new PointerEvent('pointermove',{clientX:r.left+r.width*.33,clientY:r.top+r.height*.62}));
+     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+     const previewMs=h.draw.state.previewMs;
+     const previewFrameMs=h.draw.state.previewFrameMs;
+     click(.35,.65);document.getElementById('entity-draw-undo').click();const undo=h.draw.state.vertexCount;
      click(.35,.65);document.getElementById('entity-draw-finish').click();const line=h.entities.getById(h.draw.state.lastEntityId);
      document.getElementById('entity-draw-polygon').click();click(.25,.55);click(.36,.60);click(.27,.70);document.getElementById('entity-draw-finish').click();const polygon=h.entities.getById(h.draw.state.lastEntityId);
+     for(let i=0;i<300&&h.layer.getGroundState(polygon.id)?.state==='pending';i++)await new Promise(resolve=>requestAnimationFrame(resolve));
      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-     const center=polygon.positions.reduce((sum,p)=>sum.map((v,i)=>v+p[i]/polygon.positions.length),[0,0,0]),world=h.engine.coordinates.geodeticToWorld({longitude:center[0],latitude:center[1],height:center[2]}).project(h.engine.camera),gl=c.getContext('webgl2'),rgba=new Uint8Array(4);
+     // Clamp follows the CURRENT surface, so the old captured-height centroid is not
+     // necessarily inside the rendered polygon after DEM refinement. Probe a real
+     // committed ground triangle instead of an obsolete absolute-height proxy.
+     const fill=h.layer.rendered.get(polygon.id).ground.fill;let largest=-1,at=0;
+     for(let i=0;i<fill.length;i+=9){const ax=fill[i+3]-fill[i],ay=fill[i+4]-fill[i+1],az=fill[i+5]-fill[i+2],bx=fill[i+6]-fill[i],by=fill[i+7]-fill[i+1],bz=fill[i+8]-fill[i+2],area=(ay*bz-az*by)**2+(az*bx-ax*bz)**2+(ax*by-ay*bx)**2;if(area>largest){largest=area;at=i;}}
+     const position=h.engine.camera.position.clone().set((fill[at]+fill[at+3]+fill[at+6])/3,(fill[at+1]+fill[at+4]+fill[at+7])/3,(fill[at+2]+fill[at+5]+fill[at+8])/3);
+     const world=position.project(h.engine.camera),gl=c.getContext('webgl2'),rgba=new Uint8Array(4);
      gl.readPixels(Math.floor((world.x+1)*gl.drawingBufferWidth/2),Math.floor((world.y+1)*gl.drawingBufferHeight/2),1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
      document.getElementById('entity-draw-line').click();click(.22,.57);document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
      return {paused,undo,lineType:line?.type,lineVertices:line?.positions.length,polygonType:polygon?.type,polygonVertices:polygon?.positions.length,
-       restored:h.engine.controls.enabled,active:h.draw.isActive,added:h.entities.length-before,filledPixel:[...rgba]};
+       restored:h.engine.controls.enabled,active:h.draw.isActive,added:h.entities.length-before,filledPixel:[...rgba],ground:h.layer.getGroundState(polygon.id),previewMs,previewFrameMs};
    })()`);
-   const {filledPixel,...drawState}=drawing;
-   assert.deepEqual(drawState,{paused:true,undo:1,lineType:'polyline',lineVertices:2,polygonType:'polygon',polygonVertices:3,restored:true,active:false,added:2});
-   assert.ok(filledPixel[0]>180&&filledPixel[1]<100&&filledPixel[2]>180,`Drawn polygon fill not visible: ${filledPixel}`);
+   const {filledPixel,ground,previewMs,previewFrameMs,...drawState}=drawing;
+   assert.deepEqual(drawState,{paused:false,undo:1,lineType:'polyline',lineVertices:2,polygonType:'polygon',polygonVertices:3,restored:true,active:false,added:2});
+   assert.equal(ground.state,'ready',JSON.stringify(ground));
+   assert.ok(previewMs<200,`Pointer preview CPU latency ${previewMs}ms`);
+   // Software rasterization is not a hardware latency benchmark. Keep the reported
+   // 400ms regression boundary; the stricter 250ms goal remains open in diagnostics.
+   assert.ok(previewFrameMs<400,`Preview apply latency ${previewFrameMs}ms`);
+   assert.ok(filledPixel[0]>180&&filledPixel[1]<100&&filledPixel[2]>180,`Drawn polygon fill not visible: ${filledPixel}; ${JSON.stringify(ground)}`);
    if(terrain){
      const occlusion=await evaluate(`(async()=>{
        const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect();h.entities.clear();
        const ground=h.engine.pickPositionDetailed({x:r.width*.35,y:r.height*.65}).position;
-       h.entities.add({id:'occluded',type:'point',position:[ground.longitude,ground.latitude,ground.height-300],symbol:{color:'#ff00ff',size:30,outlineWidth:0,occlusion:'depth'},label:{text:'置顶文字',fontSize:20,color:'#ffffff',offset:[0,-40],occlusion:'overlay'}});
+       h.entities.add({id:'occluded',type:'point',position:[ground.longitude,ground.latitude,ground.height-300],symbol:{color:'#ffffff',size:40,icon:{url:'/mylocation_up.png'},outlineWidth:0,occlusion:'depth'},label:{text:'置顶文字',fontSize:20,color:'#ffffff',offset:[0,-40],occlusion:'overlay'}});
+       for(let i=0;i<200&&h.layer.getResourceState('occluded')?.state!=='ready';i++)await new Promise(resolve=>requestAnimationFrame(resolve));
        const read=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{const gl=c.getContext('webgl2'),p=h.engine.coordinates.geodeticToWorld({longitude:ground.longitude,latitude:ground.latitude,height:ground.height-300}).project(h.engine.camera),x=(p.x+1)*r.width/2,y=(1-p.y)*r.height/2,rgba=new Uint8Array(4);
          gl.readPixels(Math.floor(x*gl.drawingBufferWidth/r.width),Math.floor((r.height-y)*gl.drawingBufferHeight/r.height),1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);resolve([...rgba]);})));
        const normal=await read();h.entities.update('occluded',{symbol:{occlusion:'overlay'}});const top=await read();
@@ -90,12 +109,41 @@ try{
        h.entities.clear();h.entities.add({id:'backside',type:'point',position:[ground.longitude>0?ground.longitude-180:ground.longitude+180,-ground.latitude,100],symbol:{color:'#ff00ff',size:100,occlusion:'overlay'}});
        await read();return {normal,top,heightUnchanged:original===ground.height-300,backsideVisible:h.layer.object3d.children.some(group=>group.visible)};
      })()`);
-     assert.ok(!(occlusion.normal[0]>180&&occlusion.normal[2]>180&&occlusion.normal[1]<100),'Normal-depth point must be terrain occluded');
-     assert.ok(occlusion.top[0]>180&&occlusion.top[2]>180&&occlusion.top[1]<100,'Overlay point must show above terrain');
+     assert.ok(occlusion.normal[1]<160,'Normal-depth PNG icon must be terrain occluded');
+     assert.ok(occlusion.top[1]>160&&occlusion.top[0]<200,`Overlay PNG icon must show above terrain: ${occlusion.top}`);
      assert.equal(occlusion.heightUnchanged,true);assert.equal(occlusion.backsideVisible,false);
    }
    await evaluate(`document.getElementById('entity-close').click()`);assert.equal(await evaluate(`document.getElementById('entity-panel').hidden`),true);
-   console.log(`Root index.html: objects/material controls, one canvas, terrain=${terrain}, clicked point reprojection ${report.error.toFixed(6)}px passed.`);
+   const tools=await evaluate(`(async()=>{
+     const h=window.__entityDemo,button=id=>document.querySelector('[data-tool="'+id+'"]'),tick=()=>new Promise(r=>setTimeout(r,80));
+     const images=[...document.querySelectorAll('.sag-tools img')];await Promise.all(images.map(img=>img.decode()));
+     const position=h.engine.camera.position.clone(),projection=h.engine.camera.projectionMatrix.clone();button('compass').click();await tick();
+     const positionError=position.distanceTo(h.engine.camera.position),projectionSame=projection.equals(h.engine.camera.projectionMatrix);
+     button('offset').click();await tick();const offsetMounted=document.querySelector('.sag-tool-panel #level-offset')!==null;
+     button('basemap').click();await tick();const baseMounted=document.querySelector('.sag-tool-panel #base-layer-select')!==null;
+     h.engine.flyTo({longitude:106.55,latitude:29.61,altitude:12000,pitch:-55,heading:37,duration:0});
+     return {positionError,projectionSame,offsetMounted,baseMounted,icons:images.length,canvasCount:document.querySelectorAll('#globe canvas').length};
+   })()`);
+   assert.ok(tools.positionError<1e-6);assert.equal(tools.projectionSame,true);assert.equal(tools.offsetMounted,true);assert.equal(tools.baseMounted,true);assert.ok(tools.icons>=12);assert.equal(tools.canvasCount,1);
+   // Real browser input exercises navigation handlers, not just controls.enabled.
+   await evaluate(`document.querySelector('[data-tool="draw-polyline"]').click()`);await pause(100);
+   const navBefore=await evaluate(`({q:window.__entityDemo.engine.camera.quaternion.toArray(),vertices:window.__entityDemo.draw.state.vertexCount,r:(()=>{const r=window.__entityDemo.engine.renderer.domElement.getBoundingClientRect();return {x:r.left+r.width*.45,y:r.top+r.height*.6};})()})`);
+   await command('Input.dispatchMouseEvent',{type:'mousePressed',x:navBefore.r.x,y:navBefore.r.y,button:'right',buttons:2,clickCount:1});
+   await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:navBefore.r.x+40,y:navBefore.r.y+15,button:'right',buttons:2});
+   await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:navBefore.r.x+40,y:navBefore.r.y+15,button:'right',buttons:0,clickCount:1});await pause(150);
+   const navAfter=await evaluate(`({q:window.__entityDemo.engine.camera.quaternion.toArray(),vertices:window.__entityDemo.draw.state.vertexCount,enabled:window.__entityDemo.engine.controls.enabled})`);
+   assert.equal(navAfter.vertices,navBefore.vertices);assert.equal(navAfter.enabled,true);assert.ok(navAfter.q.some((value,i)=>Math.abs(value-navBefore.q[i])>1e-7),'Right drag must rotate during drawing');
+   const measured=await evaluate(`(async()=>{
+     const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),tick=()=>new Promise(r=>setTimeout(r,80)),click=(x,y)=>{
+       c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:99,clientX:r.left+r.width*x,clientY:r.top+r.height*y}));c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:99,clientX:r.left+r.width*x,clientY:r.top+r.height*y}));};
+     h.draw.cancel();h.engine.controls.orientNorthUp();document.querySelector('[data-tool="distance"]').click();await tick();click(.4,.5);click(.5,.6);
+     const distance=h.measurements.finish(),id=h.measurements.state.entityId,properties=h.entities.getById(id).properties;
+     document.querySelector('[data-tool="area"]').click();await tick();click(.4,.5);click(.5,.5);click(.45,.6);const area=h.measurements.finish();
+     document.querySelector('[data-tool="inspect"]').click();await tick();click(.45,.55);const inspected=document.querySelector('.sag-tool-panel pre').textContent;
+     h.measurements.clear();return {distance:distance.metres,area:area.squareMetres,properties:properties.measurementResult.kind,removed:!h.entities.has(id),inspected:inspected.includes('longitude'),active:h.draw.isActive};
+   })()`);
+   assert.ok(measured.distance>0);assert.ok(measured.area>0);assert.equal(measured.properties,'distance');assert.equal(measured.removed,true);assert.equal(measured.inspected,true);assert.equal(measured.active,false);
+   console.log(`Root index.html: terrain=${terrain}, ground fill/PNG overlay passed; pick reprojection ${report.error.toFixed(6)}px; preview CPU ${previewMs.toFixed(1)}ms / frame ${previewFrameMs.toFixed(1)}ms.`);
  }
  assert.deepEqual(external,[],'Regression must not request external tiles/services');
  console.log('Root source demo browser regression passed; no real map/token service used.');

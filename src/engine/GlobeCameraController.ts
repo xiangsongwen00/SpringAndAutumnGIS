@@ -68,6 +68,7 @@ export class GlobeCameraController {
   private animation: CameraAnimation | null = null;
   private terrainRevision = -1;
   private disposed = false;
+  private readonly initialPose: {position:THREE.Vector3;quaternion:THREE.Quaternion;up:THREE.Vector3};
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || this.pointerId !== null) return;
@@ -129,6 +130,7 @@ export class GlobeCameraController {
     this.ellipsoid = ellipsoid;
     this.coordinates = new CoordinateTransform(ellipsoid);
     this.terrain = terrain;
+    this.initialPose={position:camera.position.clone(),quaternion:camera.quaternion.clone(),up:camera.up.clone()};
     this.element.style.touchAction = 'none';
     this.element.addEventListener('pointerdown', this.onPointerDown);
     this.element.addEventListener('pointermove', this.onPointerMove);
@@ -233,6 +235,26 @@ export class GlobeCameraController {
 
   cancelAnimation(): void {
     this.animation = null;
+  }
+
+  /** North-up nadir at the current camera position. Does not fly, change height or projection. */
+  orientNorthUp(): void {
+    this.cancelAnimation();
+    this.resetVelocities();
+    const p = this.coordinates.worldToGeodetic(this.camera.position);
+    const frame = this.localFrame(p.longitude, p.latitude);
+    this.camera.up.copy(frame.north);
+    this.camera.lookAt(this.camera.position.clone().sub(frame.up));
+    this.camera.updateMatrixWorld(true);
+    this.updateTargetFromView();
+  }
+
+  resetView(): void {
+    this.cancelAnimation();this.resetVelocities();
+    this.camera.position.copy(this.initialPose.position);
+    this.camera.quaternion.copy(this.initialPose.quaternion);
+    this.camera.up.copy(this.initialPose.up);
+    this.camera.updateMatrixWorld(true);this.updateTargetFromView();
   }
 
   dispose(): void {

@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { Ellipsoid } from '../core/geo/Ellipsoid';
 import { EntityCollection, entityAnchor, wrapLongitude } from '../sdk/EntityCollection';
-import type { EntityDefinition, EntityPosition, EntityPickOptions, ScreenPosition, LabelSymbol, LineTexture, EntityResourceState } from '../sdk/EntityTypes';
+import type { EntityDefinition, EntityPosition, EntityPickOptions, ScreenPosition, LabelSymbol, LineTexture, EntityResourceState, EntityGroundState } from '../sdk/EntityTypes';
+import { groundBounds, type EntityGroundSurface } from './EntityGroundSurface';
+import { buildGroundGeometry, type GroundGeometry } from './EntityGroundGeometry';
 import type { GlobeSceneLayer } from '../engine/GlobeEngine';
 
 type Rendered = { definition: EntityDefinition; group: THREE.Group; center: THREE.Vector3; radius: number;
@@ -9,6 +11,7 @@ type Rendered = { definition: EntityDefinition; group: THREE.Group; center: THRE
   paths: THREE.Vector3[][]; images: ImageEntry[]; imageBindings: { entry: ImageEntry; ready: THREE.IUniform }[]; labelBytes:number; limited:boolean;
   iconRotation?: THREE.IUniform; animations: { uniform: THREE.IUniform; repeat: number; speed: number | readonly [number,number]; base: readonly [number,number] }[];
   stroke?: { attribute: THREE.BufferAttribute; version: number };
+  ground?:GroundGeometry; groundRevision:string|null;
   label?: { mesh: THREE.Mesh; width: number; height: number; offset: readonly [number, number] } };
 type ImageEntry = { url: string; texture: THREE.Texture; references: number; bytes:number; controller: AbortController; state: 'loading'|'ready'|'error' };
 const projection = /* glsl */ `
@@ -17,17 +20,21 @@ vec4 projectWorld(vec3 p) {
   vec3 relative = (originHigh - eyeHigh) + (originLow - eyeLow) + p;
   return projectionMatrix * vec4(mat3(viewMatrix) * relative, 1.0);
 }`;
-const fragmentStart = `#include <logdepthbuf_pars_fragment>\nuniform vec3 color; uniform float opacity;`;
-const fragmentEnd = `\n#include <logdepthbuf_fragment>\n#include <colorspace_fragment>\n`;
+const fragmentStart = `#include <logdepthbuf_pars_fragment>\nuniform vec3 color; uniform float opacity,groundDepthBias;`;
+const fragmentEnd = `\n#include <logdepthbuf_fragment>\n#ifdef USE_LOGDEPTHBUF\nif(groundDepthBias>0.0)gl_FragDepth=log2(max(1.0,vFragDepth-groundDepthBias))*logDepthBufFC*0.5;\n#endif\n#include <colorspace_fragment>\n`;
 
 /** SDK objects are independent scene overlays. No imagery/DEM request or LOD selection is changed. */
 export class EntityLayer implements GlobeSceneLayer {
   readonly object3d = new THREE.Group();
   private readonly rendered = new Map<string, Rendered>();
   private readonly dirty = new Set<string>();
+  private readonly groundJobs=new Map<string,{revision:string;iterator:Generator<void,GroundGeometry>;definition:EntityDefinition}>();
+  private readonly groundStates=new Map<string,EntityGroundState>();
+  private observedGroundRevision='';
   private ordered: Rendered[] = [];
   private orderDirty = true;
   private readonly imageCache = new Map<string,ImageEntry>();
+  private readonly materialPool:{key:string;material:THREE.ShaderMaterial}[]=[];
   private readonly imageQueue = new Set<ImageEntry>();
   private activeImages = 0;
   /** Shared estimated RGBA upload budget, including labels; excludes transient decode buffers. */
@@ -45,11 +52,11 @@ export class EntityLayer implements GlobeSceneLayer {
   private readonly unsubscribe: () => void;
   private readonly ellipsoidRay = new THREE.Vector3();
   private disposed = false;
-  constructor(private readonly ellipsoid: Ellipsoid, private readonly entities: EntityCollection) {
+  constructor(private readonly ellipsoid: Ellipsoid, private readonly entities: EntityCollection,private readonly groundSource?:EntityGroundSurface) {
     for (const value of entities.values) this.dirty.add(value.id);
     this.unsubscribe = entities.onChange(change => {
-      if (change.type === 'clear') { this.ordered=[]; for (const id of this.rendered.keys()) this.release(id); this.dirty.clear(); }
-      else if (change.id && change.type === 'remove') { this.dirty.delete(change.id); this.release(change.id); }
+      if (change.type === 'clear') { this.ordered=[]; for (const id of this.rendered.keys()) this.release(id); this.dirty.clear();this.groundJobs.clear();this.groundStates.clear(); }
+      else if (change.id && change.type === 'remove') { this.dirty.delete(change.id); this.release(change.id);this.groundJobs.delete(change.id);this.groundStates.delete(change.id); }
       else if (change.id) {
         // A hidden object must disappear immediately, even while a geometry update waits its turn.
         const item = this.rendered.get(change.id);
@@ -58,7 +65,7 @@ export class EntityLayer implements GlobeSceneLayer {
         const directionOnly=item?.definition.type==='point' && latest?.type==='point' && change.fields?.length===1 && change.fields[0]==='symbol' &&
           JSON.stringify({...item.definition.symbol,heading:0,alignment:0})===JSON.stringify({...latest.symbol,heading:0,alignment:0});
         if(item && (directionOnly || change.fields?.every(field=>['visible','name','properties'].includes(field)))) item.definition=latest!;
-        else this.dirty.add(change.id);
+        else {this.dirty.add(change.id);this.groundJobs.delete(change.id);this.groundStates.delete(change.id);}
       }
       this.object3d.visible = !entities.isDestroyed && entities.visible;
     });
@@ -66,13 +73,33 @@ export class EntityLayer implements GlobeSceneLayer {
   update(camera: THREE.PerspectiveCamera, width: number, height: number): void {
     if (this.disposed || this.entities.isDestroyed) return;
     split(camera.position, this.eyeHigh, this.eyeLow); this.viewport.set(width, height);
+    const groundRevision=this.groundSource?.revision??'no-ground-source';
+    if(groundRevision!==this.observedGroundRevision){this.observedGroundRevision=groundRevision;for(const entity of this.entities.values)if(entity.heightReference==='clamp-to-ground')this.dirty.add(entity.id);}
     // Rebuild only changed entities, not all geometry/text every frame. Soft, not preemptive, budget.
     const started = performance.now(); let built = 0;
     for (const id of this.dirty) {
       const definition = this.entities.getById(id);
       if (definition) {
-        const next = this.build(definition);
-        this.release(id); this.rendered.set(id, next); this.object3d.add(next.group); this.orderDirty=true;
+        let ground:GroundGeometry|undefined,revision:string|null=null;
+        if(definition.heightReference==='clamp-to-ground'){
+          let job=this.groundJobs.get(id);
+          if(!job){
+            const positions='position' in definition?[definition.position]:[...definition.positions,...(definition.type==='polygon'?definition.holes??[]:[]).flat()];
+            const patches=this.groundSource?.patches(groundBounds(positions))??[];
+            if(!patches.length){this.groundStates.set(id,{state:'unavailable',revision:groundRevision,patches:0,vertices:0,message:'Waiting for displayed surface coverage.'});this.dirty.delete(id);continue;}
+            job={revision:groundRevision,definition,iterator:buildGroundGeometry(definition,patches)};this.groundJobs.set(id,job);
+          }
+          try {
+            let step=job.iterator.next();
+            while(!step.done&&performance.now()-started<2)step=job.iterator.next();
+            if(!step.done){this.groundStates.set(id,{state:'pending',revision:job.revision,patches:0,vertices:0,message:null});break;}
+            ground=step.value;revision=job.revision;this.groundJobs.delete(id);
+            this.groundStates.set(id,{state:revision===groundRevision?'ready':'pending',revision,patches:ground.patches,vertices:ground.vertices,message:null});
+          }catch(error){this.groundJobs.delete(id);this.dirty.delete(id);this.groundStates.set(id,{state:'limited',revision:groundRevision,patches:0,vertices:0,message:error instanceof Error?error.message:'Ground construction failed.'});continue;}
+        }
+        const next = this.build(definition,ground,revision);
+        this.release(id,true); this.rendered.set(id, next); this.object3d.add(next.group); this.orderDirty=true;
+        if(revision&&revision!==groundRevision){this.dirty.delete(id);this.dirty.add(id);break;}
       }
       this.dirty.delete(id);
       if (++built >= 8 || performance.now() - started >= 2) break;
@@ -84,9 +111,9 @@ export class EntityLayer implements GlobeSceneLayer {
     const occupied = new Set<string>(); let labelCount = 0;
     if(this.orderDirty){this.ordered=[...this.rendered.values()].sort((a,b)=>(b.definition.order??500)-(a.definition.order??500));this.orderDirty=false;}
     for (const item of this.ordered) {
-      const overlay=item.definition.type==='label'?item.definition.label.occlusion==='overlay':item.definition.symbol?.occlusion==='overlay';
+      const overlay=this.geometryOverlay(item.definition)||this.labelOverlay(item.definition);
       item.group.visible = item.definition.visible !== false && this.frustum.intersectsSphere(new THREE.Sphere(item.center, item.radius + 100)) &&
-        (item.radius > 100000&&!overlay || !this.occluded(camera.position, item.center, item.radius));
+        (overlay?this.nearHemisphere(camera.position,item.center):item.radius>100000||!this.occluded(camera.position,item.center,item.radius));
       if(item.group.visible){
         for(const binding of item.imageBindings)binding.ready.value=binding.entry.state==='ready'?1:0;
         for(const animation of item.animations){
@@ -132,9 +159,10 @@ export class EntityLayer implements GlobeSceneLayer {
         const dx=p ? Math.abs(screen.x-p.x) : Infinity,dy=p ? Math.abs(screen.y-p.y) : Infinity;
         const shape=definition.symbol?.shape ?? 'circle',distance=shape==='square'?Math.max(dx,dy):shape==='diamond'?dx+dy:Math.hypot(dx,dy);
         const icon=definition.symbol?.icon;
+        const visible=this.geometryOverlay(definition)?this.nearHemisphere(camera.position,item.center):!this.occluded(camera.position,item.center);
         if(icon){const angle=item.iconRotation?.value ?? 0,c=Math.cos(angle),s=Math.sin(angle),x=p?screen.x-p.x:Infinity,y=p?screen.y-p.y:Infinity;
-          hit ||=!!p && !this.occluded(camera.position,item.center) && Math.abs(c*x+s*y)<=(icon.width??definition.symbol?.size??32)/2+tolerance && Math.abs(s*x-c*y)<=(icon.height??definition.symbol?.size??32)/2+tolerance;
-        }else hit ||= !!p && !this.occluded(camera.position, item.center) && distance <= (definition.symbol?.size ?? 12) / 2 + tolerance;
+          hit ||=!!p && visible && Math.abs(c*x+s*y)<=(icon.width??definition.symbol?.size??32)/2+tolerance && Math.abs(s*x-c*y)<=(icon.height??definition.symbol?.size??32)/2+tolerance;
+        }else hit ||= !!p && visible && distance <= (definition.symbol?.size ?? 12) / 2 + tolerance;
       } else if ((definition.type === 'polygon' || definition.type === 'polyline') && geometryVisible) {
         const projected = item.paths.map(path => path.map(p => this.occluded(camera.position, p) ? null : this.project(p, camera)));
         const width = definition.type === 'polyline' ? definition.symbol?.width ?? 3 : definition.symbol?.outlineWidth ?? 2;
@@ -156,7 +184,14 @@ export class EntityLayer implements GlobeSceneLayer {
     if (this.disposed) return; this.disposed = true; this.unsubscribe();
     this.ordered=[];
     for (const id of this.rendered.keys()) this.release(id);
-    this.dirty.clear(); this.object3d.clear();
+    for(const entry of this.materialPool)entry.material.dispose();this.materialPool.length=0;
+    this.dirty.clear();this.groundJobs.clear();this.groundStates.clear(); this.object3d.clear();
+  }
+  getGroundState(id:string):EntityGroundState|null {
+    const entity=this.entities.getById(id);if(!entity)return null;
+    if(entity.heightReference!=='clamp-to-ground')return {state:'absolute',revision:null,patches:0,vertices:0,message:null};
+    const state=this.groundStates.get(id)??{state:'pending' as const,revision:null,patches:0,vertices:0,message:null};
+    return state.state==='ready'&&state.revision!==this.groundSource?.revision?{...state,state:'pending'}:state;
   }
   getResourceState(id:string): EntityResourceState|null {
     if(!this.entities.has(id))return null;
@@ -174,9 +209,16 @@ export class EntityLayer implements GlobeSceneLayer {
     if(item?.limited){this.dirty.add(id);retried=true;}
     this.pumpImages();return retried;
   }
-  private release(id: string): void {
+  private release(id: string,retainMaterials=false): void {
     const item = this.rendered.get(id); if (!item) return;
-    this.object3d.remove(item.group); item.geometries.forEach(g => g.dispose()); item.materials.forEach(m => m.dispose()); item.textures.forEach(t => t.dispose());
+    this.object3d.remove(item.group); item.geometries.forEach(g => g.dispose());
+    for(const material of item.materials){if(retainMaterials){
+      const key=`${material.vertexShader}\0${material.fragmentShader}\0${material.depthTest}`;
+      // WebGLRenderer retains the uniforms OBJECT. Clear values in-place, not by
+      // swapping that object, so a later lease cannot upload a stale origin/texture.
+      for(const name of Object.keys(material.uniforms))delete material.uniforms[name];
+      this.materialPool.push({key,material});if(this.materialPool.length>8)this.materialPool.shift()!.material.dispose();
+    }else material.dispose();}item.textures.forEach(t => t.dispose());
     this.textureBytes-=item.labelBytes;
     for(const entry of item.images){if(--entry.references===0){entry.controller.abort();this.imageQueue.delete(entry);this.imageCache.delete(entry.url);this.textureBytes-=entry.bytes;entry.texture.dispose();const image=entry.texture.image as ImageBitmap|undefined;image?.close?.();}}
     item.group.clear();this.ordered=this.ordered.filter(value=>value!==item);
@@ -190,7 +232,7 @@ export class EntityLayer implements GlobeSceneLayer {
   }
   private labelBox(item: Rendered, camera: THREE.PerspectiveCamera): readonly [number, number, number, number] | null {
     const label = item.label!, p = this.project(item.center, camera);
-    if (!p || this.occluded(camera.position, item.center)) return null;
+    if (!p || (this.labelOverlay(item.definition)?!this.nearHemisphere(camera.position,item.center):this.occluded(camera.position,item.center))) return null;
     const x = p.x + label.offset[0], y = p.y + label.offset[1];
     if (x + label.width / 2 < 0 || x - label.width / 2 > this.viewport.x || y + label.height / 2 < 0 || y - label.height / 2 > this.viewport.y) return null;
     return [x - label.width / 2, y - label.height / 2, x + label.width / 2, y + label.height / 2];
@@ -208,29 +250,39 @@ export class EntityLayer implements GlobeSceneLayer {
     const below=Math.max(0,1-Math.sqrt((target.x/a)**2+(target.y/b)**2+(target.z/a)**2))*a;
     return t > 0 && t < 1 - (margin + below + 5) / Math.max(1, eye.distanceTo(target));
   }
-  private build(definition: EntityDefinition): Rendered {
-    const anchor = entityAnchor(definition), center = this.world(anchor);
-    const item: Rendered = { definition, center, radius: 0, group: new THREE.Group(), geometries: [], materials: [], textures: [], paths: [],images:[],imageBindings:[],animations:[],labelBytes:0,limited:false };
+  private geometryOverlay(definition:EntityDefinition):boolean{return definition.type!=='label'&&definition.symbol?.occlusion==='overlay';}
+  private labelOverlay(definition:EntityDefinition):boolean{return (definition.label?.occlusion??(definition.type==='point'?definition.symbol?.occlusion:undefined))==='overlay';}
+  private nearHemisphere(eye:THREE.Vector3,target:THREE.Vector3):boolean {
+    const a=this.ellipsoid.equatorialRadius,b=this.ellipsoid.polarRadius;
+    return target.x*eye.x/(a*a)+target.y*eye.y/(b*b)+target.z*eye.z/(a*a)>=0;
+  }
+  private build(definition: EntityDefinition,ground?:GroundGeometry,groundRevision:string|null=null): Rendered {
+    const anchor = entityAnchor(definition), center = ground?.center??this.world(anchor);
+    const item: Rendered = { definition, center, radius: 0, group: new THREE.Group(), geometries: [], materials: [], textures: [], paths: [],images:[],imageBindings:[],animations:[],labelBytes:0,limited:false,ground,groundRevision };
     if (definition.type === 'point') this.point(item);
     else if (definition.type !== 'label') {
       const rings = [definition.positions, ...(definition.type === 'polygon' ? definition.holes ?? [] : [])];
-      item.paths = rings.map(ring => densify(ring, definition.type === 'polygon').map(p => this.world(p)));
+      item.paths = ground?.paths??rings.map(ring => densify(ring, definition.type === 'polygon').map(p => this.world(p)));
       if (definition.type === 'polygon' && definition.symbol?.fill !== false) this.fill(item, definition);
       const color = definition.type === 'polyline' ? definition.symbol?.color ?? (definition.symbol?.texture?'#ffffff':'#32e6a1') : definition.symbol?.outlineColor ?? '#32e6a1';
       const width = definition.type === 'polyline' ? definition.symbol?.width ?? 3 : definition.symbol?.outlineWidth ?? 2;
       if (width > 0) this.lines(item, color, width, definition.symbol?.opacity ?? 1, definition.type === 'polyline' ? definition.symbol?.dash : undefined,definition.type==='polyline'?definition.symbol?.texture??undefined:undefined);
     }
-    if (definition.label?.text) this.label(item, definition.label);
+    if (definition.label?.text&&(!ground||ground.anchorReady)) this.label(item, definition.label);
     for (const path of item.paths) for (const p of path) item.radius = Math.max(item.radius, center.distanceTo(p));
+    if(ground)for(let i=0;i<ground.fill.length;i+=3)item.radius=Math.max(item.radius,center.distanceTo(new THREE.Vector3().fromArray(ground.fill,i)));
     item.group.visible = definition.visible !== false;
     return item;
   }
   private world(p: EntityPosition): THREE.Vector3 { return this.ellipsoid.cartographicToCartesian({ longitude: p[0], latitude: p[1], height: p[2] ?? 30 }); }
   private material(item: Rendered, vertexShader: string, fragmentShader: string, uniforms: Record<string, THREE.IUniform>,depthTest=true): THREE.ShaderMaterial {
     const high = new THREE.Vector3(), low = new THREE.Vector3(); split(item.center, high, low);
-    const result = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: {
-      originHigh: { value: high }, originLow: { value: low }, eyeHigh: { value: this.eyeHigh }, eyeLow: { value: this.eyeLow }, viewport: { value: this.viewport }, ...uniforms },
-      transparent: true, depthTest, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+    const uniformsValues={
+      groundDepthBias:{value:item.ground||item.definition.type==='point'||item.definition.type==='label'?0.5:0},originHigh: { value: high }, originLow: { value: low }, eyeHigh: { value: this.eyeHigh }, eyeLow: { value: this.eyeLow }, viewport: { value: this.viewport }, ...uniforms },
+      key=`${vertexShader}\0${fragmentShader}\0${depthTest}`,index=this.materialPool.findIndex(entry=>entry.key===key);
+    const result=index>=0?this.materialPool.splice(index,1)[0]!.material:new THREE.ShaderMaterial({vertexShader,fragmentShader,
+      transparent:true,depthTest,depthWrite:false,side:THREE.DoubleSide,forceSinglePass:true,toneMapped:false});
+    Object.assign(result.uniforms,uniformsValues);result.uniformsNeedUpdate=true;
     item.materials.push(result); return result;
   }
   private mesh(item: Rendered, geometry: THREE.BufferGeometry, material: THREE.ShaderMaterial, label = false): THREE.Mesh {
@@ -254,34 +306,43 @@ else{if (d > 1.0) discard; gl_FragColor = vec4(d > 1.0 - 2.0*outlineWidth/size ?
     this.mesh(item, quad(), material);
   }
   private lines(item: Rendered, color: string, width: number, opacity: number, dash?: readonly [number, number],pattern?:LineTexture): void {
-    const positions: number[] = [], next: number[] = [], sides: number[] = [], distances: number[] = [];
-    for (const path of item.paths) for (let i = 1; i < path.length; i++) {
+    const positions: number[] = [], next: number[] = [], sides: number[] = [], distances: number[] = [],normals:number[]=[];
+    for (const [pathIndex,path] of item.paths.entries()) for (let i = 1; i < path.length; i++) {
       const a = path[i - 1]!.clone().sub(item.center), b = path[i]!.clone().sub(item.center);
       // Each quad is independent: bounded simple strokes with butt ends, no platform linewidth limitation.
       for (const [p, q, sign, along] of [[a,b,1,0],[a,b,-1,0],[b,a,-1,1],[a,b,-1,0],[b,a,1,1],[b,a,-1,1]] as const) {
         positions.push(p.x,p.y,p.z); next.push(q.x,q.y,q.z); sides.push(sign); distances.push(along);
+        const normal=item.ground?.normals[pathIndex];normals.push(normal?.x??0,normal?.y??0,normal?.z??0);
       }
     }
     const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
     geometry.setAttribute('next', new THREE.Float32BufferAttribute(next,3)); geometry.setAttribute('side',new THREE.Float32BufferAttribute(sides,1)); geometry.setAttribute('along',new THREE.Float32BufferAttribute(distances,1));
+    geometry.setAttribute('planeNormal',new THREE.Float32BufferAttribute(normals,3));
     const travel=new THREE.BufferAttribute(new Float32Array(distances.length),1);travel.setUsage(THREE.DynamicDrawUsage);geometry.setAttribute('travel',travel);
     if(pattern||dash)item.stroke={attribute:travel,version:-1};
     const image=pattern?this.acquireImage(item,pattern.url):undefined,ready={value:0},phase={value:0};
     if(image)item.imageBindings.push({entry:image,ready});
     if(pattern?.speed)item.animations.push({uniform:phase,repeat:pattern.length??64,speed:pattern.speed,base:[0,0]});
     const material = this.material(item, `#include <common>\n#include <logdepthbuf_pars_vertex>\n${projection}
-uniform vec2 viewport; uniform float width; attribute vec3 next; attribute float side, along, travel; varying vec2 vTravel; varying float vSide;
+uniform vec2 viewport; uniform float width;uniform bool onGround; attribute vec3 next,planeNormal; attribute float side, along, travel; varying vec2 vTravel; varying float vSide;
 void main() { vec4 p=projectWorld(position), q=projectWorld(next);
 float cp=p.z+p.w, cq=q.z+q.w;
 if(cp<0.0 && cq<0.0){gl_Position=vec4(2.0,2.0,2.0,1.0);vTravel=vec2(0.0,1.0);vSide=0.0;return;}
 if(cp<0.0)p=mix(p,q,cp/(cp-cq));else if(cq<0.0)q=mix(q,p,cq/(cq-cp));
 vec2 delta=(q.xy/max(q.w,0.001)-p.xy/max(p.w,0.001))*viewport;
 float len=max(length(delta),0.001); vec2 normal=vec2(-delta.y,delta.x)/len;
-p.xy+=normal*side*width/viewport*p.w; gl_Position=p; vTravel=vec2(travel*p.w,p.w);vSide=side*(along>0.5?-1.0:1.0);
+p.xy+=normal*side*width/viewport*p.w;
+if(onGround){vec3 n=mat3(viewMatrix)*planeNormal;
+ vec3 eyePoint=mat3(viewMatrix)*((originHigh-eyeHigh)+(originLow-eyeLow)+position);
+ vec3 ray=vec3(p.x/(p.w*projectionMatrix[0][0]),p.y/(p.w*projectionMatrix[1][1]),-1.0);
+ float denominator=dot(n,ray),distance=dot(n,eyePoint)/denominator;
+ if(abs(denominator)>0.000001&&distance>0.0)p=projectionMatrix*vec4(ray*distance,1.0);
+}
+gl_Position=p; vTravel=vec2(travel*p.w,p.w);vSide=side*(along>0.5?-1.0:1.0);
 #include <logdepthbuf_vertex>\n}`, `${fragmentStart}\nvarying vec2 vTravel; varying float vSide; uniform vec2 dash; uniform sampler2D image; uniform int imageReady;uniform float phase,period,direction;
 void main(){float distance=vTravel.x/max(vTravel.y,0.001); if(dash.y>0.0 && mod(distance,dash.x+dash.y)>dash.x) discard; gl_FragColor=vec4(color,opacity);
 if(imageReady==1)gl_FragColor*=texture2D(image,vec2(direction*(distance-phase)/period,(vSide+1.0)*0.5));if(gl_FragColor.a<0.01)discard;${fragmentEnd} }`, {
-      image:{value:image?.texture??null},imageReady:ready,phase,period:{value:pattern?.length??64},direction:{value:pattern?.sourceDirection==='left'?-1:1},
+      onGround:{value:!!item.ground},image:{value:image?.texture??null},imageReady:ready,phase,period:{value:pattern?.length??64},direction:{value:pattern?.sourceDirection==='left'?-1:1},
       width:{value:width}, color:{value:new THREE.Color(color)},opacity:{value:opacity},dash:{value:new THREE.Vector2(dash?.[0] ?? 1,dash?.[1] ?? 0)} },item.definition.type==='label'||item.definition.symbol?.occlusion!=='overlay');
     this.mesh(item, geometry, material);
   }
@@ -303,7 +364,8 @@ if(imageReady==1)gl_FragColor*=texture2D(image,vec2(direction*(distance-phase)/p
         emit(e[0],mid,e[2],depth+1); emit(mid,e[1],e[2],depth+1);
       } else for (const p of [a,b,c]) { const world=this.world(p).sub(item.center); positions.push(world.x,world.y,world.z);uvs.push((reference+wrapLongitude(p[0]-reference)-west)/spanX,(p[1]-south)/spanY); }
     };
-    for (const face of faces) emit(points[face[0]!]!,points[face[1]!]!,points[face[2]!]!,0);
+    if(item.ground){for(let i=0;i<item.ground.fill.length;i+=3){const point=new THREE.Vector3().fromArray(item.ground.fill,i).sub(item.center);positions.push(point.x,point.y,point.z);}for(const uv of item.ground.uvs)uvs.push(uv);}
+    else for (const face of faces) emit(points[face[0]!]!,points[face[1]!]!,points[face[2]!]!,0);
     const geometry=new THREE.BufferGeometry(); geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
     geometry.setAttribute('uv',new THREE.Float32BufferAttribute(uvs,2));
     const pattern=definition.symbol?.texture,image=pattern?this.acquireImage(item,pattern.url):undefined,ready={value:0},offset={value:new THREE.Vector2(...(pattern?.offset??[0,0]))};
@@ -323,13 +385,16 @@ if(imageReady==1)gl_FragColor*=texture2D(image,p*repeat-offset);if(gl_FragColor.
     return a&&b&&Math.hypot(b.x-a.x,b.y-a.y)>0.001?Math.atan2(b.x-a.x,a.y-b.y):0;
   }
   private updateStroke(item:Rendered,camera:THREE.PerspectiveCamera):void {
-    const state=item.stroke!,values=state.attribute.array as Float32Array;let cursor=0;
-    for(const path of item.paths){let distance=0;
+    const state=item.stroke!,values=state.attribute.array as Float32Array;let cursor=0,distance=0,group=-1;let previous:THREE.Vector3|undefined;
+    for(const [pathIndex,path] of item.paths.entries()){
+      const nextGroup=item.ground?.groups[pathIndex]??pathIndex;if(nextGroup!==group){distance=0;previous=undefined;group=nextGroup;}
+      if(previous&&path[0]&&previous.distanceToSquared(path[0])>1e-8){const a=this.project(previous,camera),b=this.project(path[0],camera);if(a&&b)distance+=Math.hypot(b.x-a.x,b.y-a.y);}
       for(let i=1;i<path.length;i++){
         const a=this.project(path[i-1]!,camera),b=this.project(path[i]!,camera),end=distance+(a&&b?Math.hypot(b.x-a.x,b.y-a.y):0);
         for(const v of [distance,distance,end,distance,end,end])values[cursor++]=v;
         distance=end;
       }
+      previous=path[path.length-1];
     }state.attribute.needsUpdate=true;state.version=this.cameraVersion;
   }
   private acquireImage(item:Rendered,url:string):ImageEntry {
@@ -383,7 +448,7 @@ if(imageReady==1)gl_FragColor*=texture2D(image,p*repeat-offset);if(gl_FragColor.
     lines.forEach((text,i)=>{const y=pad+(i+0.5)*size*1.3;if(context.lineWidth>0) context.strokeText(text,width/2,y);context.fillText(text,width/2,y);});
     const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace; texture.generateMipmaps=false;texture.minFilter=THREE.LinearFilter; item.textures.push(texture);
     const offset=symbol.offset ?? [0,-22];
-    const material=this.material(item,billboardVertex,`#include <logdepthbuf_pars_fragment>\nuniform sampler2D image; uniform float opacity; varying vec2 vUv;
+    const material=this.material(item,billboardVertex,`#include <logdepthbuf_pars_fragment>\nuniform sampler2D image; uniform float opacity,groundDepthBias; varying vec2 vUv;
 void main(){gl_FragColor=texture2D(image,vUv);gl_FragColor.a*=opacity;if(gl_FragColor.a<0.01)discard;${fragmentEnd}}`,{
       image:{value:texture},rotation:{value:0},opacity:{value:symbol.opacity ?? 1},dimensions:{value:new THREE.Vector2(width,height)},offset:{value:new THREE.Vector2(...offset)} },
       (symbol.occlusion??(item.definition.type==='point'?item.definition.symbol?.occlusion:undefined))!=='overlay');

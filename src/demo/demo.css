@@ -294,9 +294,18 @@ body.entity-panel-open .stats { right:438px; width:280px; }
 
 .attribution:hover { color: #dff7ff; }
 
+/* Source demo uses the library's compact icon toolbar; old IDs remain event adapters. */
+#map-controls-anchor { display:none; }
+body > .level-debug { display:none; }
+.sag-tool-panel .level-debug { position:static;display:grid;grid-template-columns:1fr;min-width:0;background:transparent;border:0;padding:0; }
+.sag-tool-panel .source-picker { display:block; }
+.sag-tool-panel .source-picker select { width:100%; }
+.sag-tool-panel .annotation-control[hidden] { display:none; }
+.entity-panel,.business-layer-panel { top:56px;max-height:calc(100vh - 80px); }
+
 .hint {
   position: fixed;
-  left: 32px;
+  left: 74px;
   bottom: 28px;
   z-index: 2;
   color: #607985;

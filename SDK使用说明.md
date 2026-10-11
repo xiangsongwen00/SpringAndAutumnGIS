@@ -244,6 +244,41 @@ pickPositionDetailed提供position、source、tile、screen、reprojected、erro
 
 验证：npm run test:picking与npm run test:entities:browser。后者显式entitySmoke=1使用本地合成栅格/DEM，在root index验证单canvas、DPR=2、页面偏移、地形开/关、GPU点击点像素、折线/面绘制、撤销/取消/导航恢复、置顶与背面剔除；阻断外部请求，不用真实服务压测。受控点击回投约0.000001px，不证明所有实景服务配准或FPS已验收。普通URL不启用合成回退。
 
+## 4.4 持续贴地、置顶图标与抗闪烁（2026-10-10后续）
+
+此前线面只有绝对高度快照/置顶表达。现在增加heightReference:'clamp-to-ground'，复用当前base显示三角网格：线按地表三角形边界裁剪分段，面/洞与地表三角形求交并做同平面重心插值。不是只采输入点后连大三角形，也不是转图片兜底；当前地表LOD/DEM版本变更会重新构建。无地形时跟随当前显示椭球网格，有地形时跟随已显示DEM及共享边；不额外请求DEM，不改地形LOD。
+
+```js
+viewer.entities.update('route', {
+  heightReference: 'clamp-to-ground', groundOffset: 0.5,
+  symbol: { occlusion: 'depth' }
+});
+viewer.entities.update('area', {
+  heightReference: 'clamp-to-ground', groundOffset: 0.5,
+  symbol: { occlusion: 'depth' }
+});
+viewer.draw.start({ type: 'polygon', heightReference: 'clamp-to-ground', groundOffset: 0.5,
+  symbol: { color: '#32e6a1', opacity: 0.4, occlusion: 'depth' } });
+const state = viewer.getEntityGroundState('area');
+// absolute / pending / ready / unavailable / limited；含revision、patches、vertices、message
+```
+
+贴地忽略坐标第三维的渲染高度，但不重写实体保存的positions；如需再用第三维，改回heightReference:absolute。groundOffset是沿显示地表三角形法向的渲染抬高量，范围0–10米、默认0.15米，专用于避开接面闪烁；可以设0.5/1米对照，不把它当作业务海拔。另对贴地材质使用约0.5米的有限对数深度偏置，仍保留depthTest，不是将全部图形永远覆盖地形，也不改变已有系统注记排序。
+
+宽线顶点的屏幕挤出会重新求交所在地表平面，而不保持错误的中心深度；连续路径长度用于纹理/虚线流动。非常宽的线在陡峭三角形接缝仍有局部平面近似，尚不是逐片元地形分类通道。面UV用局部Mercator归一化，凹环/洞与动态纹理保留。
+
+构建跨帧续作，约2ms软预算/8实体；128个地表三角形一个续作检查点。上限400000次相交检查、150000输出顶点，超限明确limited，不默默降成平面。只覆盖已显示base patch；离屏/缺失区域等待，unavailable不伪造零地形。无base网格时不提供持续贴地替代面；绝对高度模式仍可显示。地表更新时旧对象有界等待新构建完成；状态pending不表示新地表已对齐，长时间等待请看诊断。不承诺无限规模/全球多边形贴地或建筑表面吸附，极区超出Web Mercator覆盖拒绝。
+
+点图标之前看似置顶失效的路径：绘制点未自动选择overlay，以及CPU的分析椭球地平线判断仍隐藏近侧低视角点。现两种demo的点/标注绘制与人物示例明确overlay；overlay只做远侧半球剔除，近侧符号不再被分析椭球深度拦住。正常depth仍按原遮挡。点也可选择clamp-to-ground，标注未指定时继承点策略；显式label.occlusion可独立设置。可见性仍受视口/碰撞/数量限制，不是让地球背面全部透出来。
+
+绘制预览与最终贴地拆开：移动鼠标的橡皮筋预览是临时absolute+overlay，不在每次移动取消/重启贴地裁剪；完成后再交付所选的实时贴地实体。这种临时预览不是最终贴地精度。拾取用高程范围及实际共享边缓存紧包围球，替代所有近景patch一律+30km的大球，以免每次指针移动都扫描大量瓦片。
+
+draw.state提供pickMs、previewMs（CPU）和previewFrameMs（预览更新回调时间，非屏幕呈现硬件时间）。面板直接显示，便于拆分400ms是拾取、重建还是渲染等待；40ms鼠标预览节流仍保留。测试用软件GPU/合成地形测量，不承诺所有实景400ms均同因或固定FPS；持续低延迟/大对象构建仍须按实际设备和轨迹评估。
+
+性能收尾记录：软件GPU中曾观察到拾取CPU约1–2ms但首预览约966ms；材质复用、单通道透明绘制与模式开启时有限预热后，软件末轮CPU约1–2.5ms、更新约270–300ms，严格250ms目标仍未稳定通过。硬件模式同场景末轮CPU约2.8–3.6ms、更新约12–20ms，并通过PNG置顶/正常遮挡、贴地面实际像素验证；不据此承诺所有实景设备同样延迟。
+
+复用实现曾错误替换uniforms对象，但WebGLRenderer保留旧对象引用，导致面缺失；已改成原位清空/更新，避免旧原点或纹理被上传。材质池最多8个、销毁释放，不无限保留程序。软件回归采用400ms报告边界并输出数字，硬件/软件分开记录；冷编译和用户原轨迹仍须跟踪，抗闪烁机制不代表所有驱动/极近视角都已无问题。点/文字也使用有限0.5m眼向深度偏置，数据坐标不变。
+
 ## 5. 用户资源与凭据
 
 独立应用要求用户填写自己的token.json，缺少底图/DEM不启动普通地图；HTTP页面仍可显示配置提示。这是交互应用的约束，Viewer库本身仍允许不配置地形。

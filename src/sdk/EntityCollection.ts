@@ -50,7 +50,7 @@ export class EntityCollection {
   }
   update(id: string, patch: EntityPatch): EntitySnapshot {
     this.assertAlive(); const current = this.require(id);
-    const allowed = ['name', 'visible', 'order', 'properties', 'position', 'positions', 'holes', 'symbol', 'label'];
+    const allowed = ['name', 'visible', 'order', 'properties', 'position', 'positions', 'holes', 'symbol', 'label','heightReference','groundOffset'];
     if (!patch || typeof patch !== 'object' || Object.keys(patch).some(key => !allowed.includes(key))) invalid('Unsupported update field; type/id cannot change.');
     const next = { ...current, ...patch } as EntityDefinition;
     if (patch.symbol) {
@@ -104,7 +104,9 @@ function fields(value: object, allowed: string[]): void { if (Object.keys(value)
 export function validateEntity(value: EntityDefinition): void {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !value.id.trim() || value.id.length > 256) invalid('A nonempty stable id is required.');
   if (!['point', 'polyline', 'polygon', 'label'].includes(value.type)) invalid('Unsupported entity type.');
-  fields(value, ['id', 'type', 'name', 'visible', 'order', 'properties', 'label', ...(value.type === 'point' || value.type === 'label' ? ['position'] : ['positions', ...(value.type === 'polygon' ? ['holes'] : [])]), ...(value.type !== 'label' ? ['symbol'] : [])]);
+  fields(value, ['id', 'type', 'name', 'visible', 'order', 'properties', 'label','heightReference','groundOffset', ...(value.type === 'point' || value.type === 'label' ? ['position'] : ['positions', ...(value.type === 'polygon' ? ['holes'] : [])]), ...(value.type !== 'label' ? ['symbol'] : [])]);
+  if(value.heightReference!==undefined&&!['absolute','clamp-to-ground'].includes(value.heightReference))invalid('Invalid height reference.');
+  if(value.groundOffset!==undefined)range(value.groundOffset,0,10);
   if (value.name !== undefined && typeof value.name !== 'string') invalid('Name must be a string.');
   if (value.visible !== undefined) bool(value.visible);
   if (value.order !== undefined) range(value.order, 0, 9000);
@@ -164,6 +166,10 @@ export function validateEntity(value: EntityDefinition): void {
       if (typeof item !== 'object' || seen.has(item) || !Array.isArray(item) && Object.getPrototypeOf(item) !== Object.prototype) invalid('Properties must contain finite, noncyclic JSON data.');
       seen.add(item); Object.values(item).forEach(child => visit(child, depth + 1)); seen.delete(item);
     }; visit(value.properties, 0);
+  }
+  if(value.heightReference==='clamp-to-ground'){
+    const positions='position' in value?[value.position]:[...value.positions,...(value.type==='polygon'?value.holes??[]:[]).flat()];
+    if(positions.some(p=>Math.abs(p[1])>85.0511287798066))invalid('Ground clamping currently requires Web Mercator surface coverage.');
   }
 }
 function validateImageSymbol(value: unknown, type: EntityDefinition['type']): void {

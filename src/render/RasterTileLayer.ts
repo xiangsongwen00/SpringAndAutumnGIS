@@ -11,7 +11,8 @@ import { tileKey, type TileId } from '../core/tiling/GeographicTilingScheme';
 import { globeCoordinateShader } from './shaders/coordinates';
 import type { TerrainHeightSource } from './TerrainTileLayer';
 import { terrainSurfaceEdges } from '../core/terrain/TerrainSurfaceEdges';
-import { intersectRasterSurface } from './RasterSurfacePicker';
+import { intersectRasterSurface, rasterSurfaceGeometry } from './RasterSurfacePicker';
+import type { GroundBounds, GroundPatch } from './EntityGroundSurface';
 import type { SurfaceRayHit } from '../core/geo/SurfacePicker';
 
 export type RasterTileLayerOptions = {
@@ -73,19 +74,47 @@ type RenderTile = {
   mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
   textureKey: string;
   terrainKey: string;
+  pickBound?:{signature:string;sphere:THREE.Sphere};
 };
 type ContinuityPatch = { id: TileId; sourceKey: string; expires: number };
 
 /** Visible-leaf raster consumer. Selection remains owned by GlobeLodSelector. */
 export class RasterTileLayer {
   readonly object3d = new THREE.Group();
+  private surfaceToken='';
+  private surfaceGeneration=0;
+  get surfaceRevision():string {
+    // Called at most once by each entity layer per frame; no CPU vertex generation here.
+    const token=[...this.renderTiles.values()].map(t=>`${tileKey(t.id)}:${t.mesh.visible}:${t.terrainKey}:${t.mesh.material.uniforms.terrainTexture?.value?.version??0}:${(t.mesh.geometry.getAttribute('terrainEdgeHigh') as THREE.BufferAttribute).version}`).join('|');
+    if(token!==this.surfaceToken){this.surfaceToken=token;this.surfaceGeneration++;}
+    return `${this.object3d.uuid}/${this.visible}/${this.surfaceGeneration}`;
+  }
+  surfacePatches(bounds:GroundBounds):readonly GroundPatch[] {
+    if(!this.visible||this.disposed)return [];const result:GroundPatch[]=[];
+    for(const tile of this.renderTiles.values()){
+      if(!tile.mesh.visible)continue;const n=2**tile.id.level,y=tile.id.y/n;
+      if(y>bounds.south||(tile.id.y+1)/n<bounds.north)continue;
+      for(const shift of [-1,0,1]){const x=tile.id.x/n+shift;if(x>bounds.east||(tile.id.x+1)/n+shift<bounds.west)continue;
+        const data=rasterSurfaceGeometry(tile.mesh,this.ellipsoid);result.push({id:{...tile.id},shift,signature:data.signature,vertices:data.vertices,
+          uv:tile.mesh.geometry.getAttribute('uv') as THREE.BufferAttribute,index:tile.mesh.geometry.index!});break;}
+    }return result;
+  }
   /** Query only; no change to tile selection, DEM publication or GPU geometry. */
   pickSurface(ray:THREE.Ray):SurfaceRayHit|null {
     if(!this.visible||this.disposed)return null;
     let best:SurfaceRayHit|null=null,distance=Infinity;
     const candidates=[...this.renderTiles.values()].filter(tile=>tile.mesh.visible).map(tile=>{
-      const u=tile.mesh.material.uniforms,center=(u.sag_originHigh!.value as THREE.Vector3).clone().add(u.sag_originLow!.value);
-      const radius=this.ellipsoid.equatorialRadius*Math.min(2,Math.abs(u.tileLongitudeSpan!.value)+Math.abs(u.tileMercatorSpan!.value))+30000*Math.max(1,u.terrainExaggeration!.value);
+      const u=tile.mesh.material.uniforms,g=tile.mesh.geometry,range=u.hasTerrain!.value?this.terrain?.heightRange?.(tile.id):{minimumHeight:0,maximumHeight:0};
+      const minimum=range?.minimumHeight??-30000,maximum=range?.maximumHeight??30000;
+      const signature=`${tile.terrainKey}/${minimum}/${maximum}/${(g.getAttribute('terrainEdgeHigh') as THREE.BufferAttribute).version}`;
+      if(tile.pickBound?.signature!==signature){
+        const center=(u.sag_originHigh!.value as THREE.Vector3).clone().add(u.sag_originLow!.value).addScaledVector(u.sag_up!.value,(minimum+maximum)/2);
+        let radius=this.ellipsoid.equatorialRadius*Math.min(2,Math.abs(u.tileLongitudeSpan!.value)+Math.abs(u.tileMercatorSpan!.value))+(maximum-minimum)/2+25;
+        const mask=g.getAttribute('terrainEdgeMask'),high=g.getAttribute('terrainEdgeHigh'),low=g.getAttribute('terrainEdgeLow'),point=new THREE.Vector3();
+        for(let i=0;i<mask.count;i++)if(mask.getX(i)>.5){point.set(high.getX(i)+low.getX(i),high.getY(i)+low.getY(i),high.getZ(i)+low.getZ(i));radius=Math.max(radius,point.distanceTo(center)+1);}
+        tile.pickBound={signature,sphere:new THREE.Sphere(center,radius)};
+      }
+      const {center,radius}=tile.pickBound.sphere;
       return {tile,center,radius};
     }).filter(item=>ray.intersectsSphere(new THREE.Sphere(item.center,item.radius))).sort((a,b)=>ray.origin.distanceTo(a.center)-ray.origin.distanceTo(b.center));
     for(const item of candidates){if(ray.origin.distanceTo(item.center)-item.radius>distance)continue;

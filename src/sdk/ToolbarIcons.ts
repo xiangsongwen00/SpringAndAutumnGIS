@@ -1,0 +1,15 @@
+import basemap from '../assets/img/NEW/basemap.png';
+import home from '../assets/img/NEW/home.png';
+import compass from '../assets/img/NEW/compass.png';
+import offset from '../assets/img/NEW/tile-offset.png';
+import terrainOn from '../assets/img/NEW/terrain/terrain-on.png';
+import terrainOff from '../assets/img/NEW/terrain/terrain-off.png';
+import inspect from '../assets/img/NEW/measurement/inspect-point.png';
+import distance from '../assets/img/NEW/measurement/measure-distance.png';
+import area from '../assets/img/NEW/measurement/measure-area.png';
+import point from '../assets/img/NEW/entities/point-blue.png';
+import line from '../assets/img/NEW/entities/polyline.png';
+import polygon from '../assets/img/NEW/entities/polygon.png';
+import entities from '../assets/img/NEW/entity-manager.png';
+import layers from '../assets/img/NEW/layers.png';
+export const toolbarIcons={basemap,home,compass,offset,terrainOn,terrainOff,inspect,distance,area,point,line,polygon,entities,layers};
