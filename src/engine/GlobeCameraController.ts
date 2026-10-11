@@ -57,7 +57,7 @@ export class GlobeCameraController {
   private readonly element: HTMLElement;
   private readonly ellipsoid: Ellipsoid;
   private readonly coordinates: CoordinateTransform;
-  private readonly terrain?: TerrainHeightSource;
+  private readonly terrain?: Pick<TerrainHeightSource,'revision'|'sampleHeight'>;
   private readonly pointer = new THREE.Vector2();
   private readonly orbitVelocity = new THREE.Vector2();
   private readonly lookVelocity = new THREE.Vector2();
@@ -123,7 +123,7 @@ export class GlobeCameraController {
     camera: THREE.PerspectiveCamera,
     element: HTMLElement,
     ellipsoid = Ellipsoid.WGS84,
-    terrain?: TerrainHeightSource
+    terrain?: Pick<TerrainHeightSource,'revision'|'sampleHeight'>
   ) {
     this.camera = camera;
     this.element = element;

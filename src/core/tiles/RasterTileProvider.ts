@@ -1,5 +1,6 @@
 import type { TileId } from '../tiling/GeographicTilingScheme';
 import type * as THREE from 'three';
+import {polarConfigurationKey,type PolarStylePalette} from '../../render/PolarStyle';
 
 /** Default continuous mapping: source zoom = floor(camera zoom + offset). */
 export const DEFAULT_LEVEL_OFFSET = -1.7;
@@ -27,6 +28,9 @@ export interface RasterTileProvider {
   /** Resolves the highest data level allowed for a globe render tile. */
   maximumSourceLevel?(renderLevel: number): number;
   readonly attribution?: string;
+  /** Stable configuration/style identity, independent of camera/source LOD revision. */
+  readonly polarAppearanceKey?:string;
+  readonly polarStylePalette?:PolarStylePalette|null;
   /** Returns false when the source has no content for this tile. */
   hasTile?(tile: TileId): boolean;
   url(tile: TileId): string;
@@ -62,6 +66,8 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
   private _viewLevelOffset: number | null;
   private viewSourceLevel: number;
   private _revision = 0;
+  private readonly polarKey:string;
+  get polarAppearanceKey():string{return this.polarKey;}
 
   constructor(options: UrlTemplateRasterProviderOptions) {
     if (!options.urlTemplate.includes('{z}') ||
@@ -70,6 +76,7 @@ export class UrlTemplateRasterProvider implements RasterTileProvider {
       throw new Error('Raster tile URL must include {z}, {x}, and either {y} or {-y}.');
     }
     this.id = options.id ?? 'raster';
+    this.polarKey=polarConfigurationKey(JSON.stringify({id:this.id,url:options.urlTemplate,bounds:options.bounds,subdomains:options.subdomains}));
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.maxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 19));
     this.levelOffset = Math.min(0, Math.round(options.levelOffset ?? 0));

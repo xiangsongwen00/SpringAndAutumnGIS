@@ -217,7 +217,7 @@ viewer.draw.start({ type: 'polygon', symbol: { color: '#32e6a1', opacity: 0.35, 
 viewer.draw.undo(); // 撤销当前最后一个顶点
 viewer.draw.cancel(); // 丢弃预览，不删除已提交对象
 viewer.draw.start({ type: 'point', symbol: { icon: { url: './mylocation_up.png' }, occlusion: 'overlay' } });
-// 点和标注单击自动提交；独立标注：type:'label', label:{text:'标注',occlusion:'overlay'}
+// 点和标注每次单击提交一个对象，默认持续操作；draw.stop()结束；continuous:false则单击后退出。
 const unsubscribe = viewer.draw.onChange(state => console.log(state.active, state.type, state.vertexCount, state.lastEntityId));
 ```
 
@@ -311,11 +311,11 @@ const hit = viewer.inspectAt({x:200,y:150}); // canvas相对CSS像素
 // hit.surface: 经纬度、高度、来源、回投误差；hit.entity: 自有实体属性/符号/几何快照
 ```
 
-工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标）；复杂设置与结果在右侧弹窗。包含底图、初始视角、指南针、瓦片偏移、地形、属性查询、路程/面积测量、绘制点线面和对象管理。点击后悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。可用onEntities/onLayers接入应用自己的右侧管理面板。
+工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标）；复杂设置与结果在右侧弹窗，底图和偏移是工具栏旁的紧凑弹窗。测量仅measure-distance图标、绘制仅polygon图标，弹窗选择点线面，默认点；包含初始视角、指南针、地形和对象管理，可选业务图层管理。悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。可用onEntities/onLayers接入应用自己的右侧管理面板。
 
 绘制默认navigation:'allow'：左键由绘制以捕获阶段独占（不拖地图），右键旋转、中键俯仰、滚轮缩放仍可用；拖动右键不落点，移动后的点击重新拾取当下显示地表。需要原行为可用viewer.draw.start({type:'polyline',navigation:'lock'})。若应用原本禁用相机，不擅自启用；结束恢复之前enabled状态。贴地细化期间最终实体跟随当前显示地表，不改变保存的顶点。
 
-测量口径为WGS84椭球测地线：distance.metres/segments（米）；area.squareMetres（平方米）、perimeterMetres（米，含孔洞周长）。使用GeographicLib，支持日期变更线、反向环和孔洞面积扣减；纯函数输入需有效、非自交外环及内部不相交孔洞，较小区域面积，不用于大于半个地球的区域解释。高度不影响数值，不称为沿山坡距离/山坡表面积。交互绘制继承当前局部面最大跨度与拓扑校验；未实现全世界任意巨大交互面。属性查询仅覆盖本引擎entities及显示地表，不宣称能返回所有MVT/GeoJSON/WMS源要素属性。测量结果存入实体properties.measurementResult，是完成时的快照；后续编辑几何应重新调用measureDistance/measureArea，不自动改写快照。
+测量口径为WGS84椭球测地线：distance.metres/segments（米）；area.squareMetres（平方米）、perimeterMetres（米，含孔洞周长）。point返回坐标、拾取来源及可选approximation。使用GeographicLib，支持日期变更线、反向环和孔洞面积扣减；纯函数输入需有效、非自交外环及内部不相交孔洞，较小区域面积，不用于大于半个地球的区域解释。高度不影响距离/面积数值，不称为沿山坡距离/山坡表面积。交互绘制继承当前局部面最大跨度与拓扑校验；未实现全世界任意巨大交互面。属性查询仅覆盖本引擎entities及显示地表，不宣称能返回所有MVT/GeoJSON/WMS源要素属性。测量结果存入实体properties.measurementResult，是完成时的快照；后续编辑几何应重新调用measureDistance/measureArea，不自动改写快照。
 
 src/assets/img/NEW中的图片全部改为英文文件名，地形/测量/要素目录分别为terrain/measurement/entities；home、basemap、compass、tile-offset、entity-manager、layers等用于工具栏。Vite库构建将工具图标内联，消费者不需要引擎src目录；许可证生成到dist/THIRD_PARTY_NOTICES.txt。只有UI图标随包提供，不含维护者token或底图/DEM资源。
 
@@ -327,3 +327,67 @@ src/assets/img/NEW中的图片全部改为英文文件名，地形/测量/要素
 - 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、真实GPU填充/洞/文字/图标方向/线面滚动/透明度、资源隔离与销毁重建。
 - SDK源码更新后显式build和sdk:update；日常应用启动只npm run dev或preview。
 - 历史examples/sdk-consumer仅是旧测试资料，不再随包发布，也不是日常交互入口；以独立应用为准。
+
+## 6.2 连续点、双击与极圈补面（2026-10-11后续）
+
+测量默认选择点坐标／高程，另可选距离、面积或对象属性查询；绘制默认选择标记点，另可选折线、面、标注。打开或切换类型只进入待开始状态，必须点击独立“开始测量／开始绘制”才接管输入；完成后可再次开始，不必切换类型。测量和绘制各一个图标，标准SDK 8个、源码demo附带业务图层共9个。底图/偏移弹窗定位于工具栏旁，不占右侧大面板。
+
+```ts
+viewer.draw.start({type:'point'}); // 每次点击提交一个新marker，仍保持active
+viewer.draw.stop();              // 代码结束，保留已提交点；没有点也可以结束
+viewer.draw.start({type:'point',continuous:false}); // 兼容一次点击退出
+viewer.measure.start();         // 等同 start('point')，连续拾取
+viewer.measure.stop();          // 结束但保留已提交测量点
+toolbar.endInteraction();       // 结束当前工具输入，弹窗保持打开
+toolbar.close();                // 关闭且退出；切换模式也退出旧会话
+```
+
+折线/面双击或Enter完成：第二次释放不重复加入末端点；尊重浏览器/OS较长双击间隔。顶点不足/拓扑错误不会误提交，继续会话供修正。点/标注双击不结束，Enter、结束按钮、stop、close或销毁结束。点undo删除本会话最后一个已提交点；cancel/关闭不删除已经落下的点。单会话仍有1000顶点上限。state.lastPick提供最近拾取诊断；result实体仍可通过entities管理。右/中键、滚轮继续导航。
+
+极圈现状：默认瓦片域约±85.0511288°，不是完整极地覆盖。PolarSurfaceLayer填补域外南北两圈；读取当前base显示边缘的影像纹理、祖先UV裁剪与CPU地形三角形，外沿沿用同一高度。最新整圈颜色采用每个地图自己的预制贴图（§6.4），高程仍向参考椭球衰减。不会翻转XYZ/TMS，不额外下载DEM，不把经线图像无限拉到极点；切换底图同步换边缘采样，透明无数据像素不涂黑。基底不叠在已采样地形扇区下，避免零高度底面遮住负高程扇区。
+
+补圈是显示近似，非真实极地影像/DEM。TerrainTileLayer.sampleHeight在域外返回null、heightVersionAt为polar-no-dem；pickPositionDetailed的补圈命中标记approximation:polar-cap，不能当作真实高程。相机离地间距通过补圈自身的少量三角形查询计算，不从边缘DEM夹取高度，不混进真实DEM API。附近/远处两档补圈网格带滞回和可见半球筛选；这不是独立地形LOD的实现，不改变普通瓦片选择/请求队列。polarSurface:false可禁用；非Mercator格网默认不启用该补面。
+
+真正极地地形仍需极地覆盖的地理/极地投影影像和DEM服务、明确CRS/覆盖/行号约定，并增加重投影及接边适配；目前服务和MVT/栅格管线不能被声明为已支持任意极地投影。持续贴地的线面仍限Mercator域；极地点标记/拾取可用absolute坐标与显示补圈查询。测试覆盖南北±88°、正/负边界高程、祖先UV、资源借用/换底图、近景间距和双击/连续输入；不证明真实极地精度及全轨迹性能。
+
+## 6.3 显式开始、历史清理与南北极默认差异（2026-10-11）
+
+弹窗新增“开始测量／开始绘制”和各自的“新对象提交后清除历史对象”复选框，默认不勾选（保留）。打开、类型切换、勾选、点击开始均不立即删除旧对象；只有新对象成功提交才替换本工具历史。点模式勾选时每次落点只保留最新点；线面勾选时完成新几何后替换旧结果，预览、取消、无交点、顶点不足/非法几何都保留旧结果。设置在点击开始时捕获，活动会话中修改勾选项应再次开始以应用。
+
+清理采用控制器所有权，不通过id前缀或properties猜测。绘制与测量分别管理，普通entities.add的业务对象不会被清理；删除后同ID重新加入的普通对象也不继承旧所有权。clearPrevious只负责替换本工具已生成的结果；draw.clearHistory()显式清绘制历史，measure.clear()显式清测量历史。被清理对象不提供自动恢复，需提前保存实体JSON自行恢复。自定义onDraw回调第二参数为{clearPrevious}，应用需要将该参数传给draw.start。
+
+```ts
+// 无真实极地影像时，默认北极采用海洋色，南极采用冰雪色，可按底图风格覆盖：
+const viewer = await Viewer.create('map', {
+  ...yourOptions,
+  polarSurface: {northColor:'#244d66',southColor:'#edf2f6'}
+});
+viewer.draw.start({type:'point',clearPrevious:true});
+viewer.measure.start('distance',{clearPrevious:true});
+viewer.draw.clearHistory(); // 只清绘制控制器拥有的对象
+```
+
+此前南北两圈虽然取各自边缘行，但默认无数据色都接近雪白，视觉差异不明显。北极海洋蓝、南极冰雪白现在只作最终缺数据兜底，正常整圈由当前地图预制贴图决定（§6.4）；不共用南极纹理、不新增行号翻转。此设置不代表真实海冰范围、海岸线或地形影像。补圈approximation标记和真实DEM缺失行为不变，不能以颜色差异宣称真实极地数据已接入。
+
+## 6.4 所有底图统一自适应极圈预制（2026-10-11）
+
+Google、天地图、Esri、OSM、MapTiler以及自定义XYZ/WMTS/TMS和原生/兼容矢量底图，全部走同一PolarAppearance准备流程，不按厂商写死颜色表。当前地图加载后自动准备自己的南北贴图，换底图换贴图，缓存命中直接复用；不是只在边缘借一条纹理、圈内统一蓝白。
+
+- 栅格：先采样该地图已加载的南北边界瓦片（含缓存的非可见祖先），按全球经度组织两条环状像素谱。颜色沿纬向逐步平滑，整圈预制成两张256×32 RGBA atlas；极点收敛到本地图对应半球的采样均值，消除经线条带和极点奇点。透明像素视为无数据，不填黑。高细节样本可更新自己的分区，南北分别采样，不互换行号。
+- 矢量：在像素尚未就绪时，按已解析Style v8的背景、海洋、水、冰雪和陆地填充生成本样式的初始atlas；支持原生GpuVectorTileProvider和MvtRaster/ArcGIS兼容Provider。原生GPU制图纹理由小型离屏采样读取，不回到Canvas矢量渲染兜底；实际像素就绪后更新atlas。无法识别的样式语义回退到可用背景，仍受现有样式表达能力限制。
+- 稳定身份：URL模板/覆盖配置、矢量样式/source使用配置指纹，不以camera LOD revision作缓存身份，不同服务、同ID不同URL或明暗样式隔离；URL/token不作为状态返回字段。普通缩放不销毁预制结果。缓存默认24张地图，每图两张atlas共64KiB原始纹理，默认约1.5MiB；派生像素不依赖原Provider纹理继续存活。
+- 自动补样本：地图激活1.5秒后，仅当前景loading<2且queued<8时，最多1个额外低层级请求并行，优先复用已加载瓦片；通常z1的4张瓦片即可采到南北完整边缘。minLevel超过3的局部/高层级源不全世界穷举。请求默认5秒超时，切换/销毁取消，迟到纹理释放；失败计数不使普通底图崩溃。不额外请求DEM，不批量初始化所有未选用地图，不把维护者资源放入SDK发行包。
+
+```ts
+const viewer = await Viewer.create('map', {
+  ...yourOptions,
+  polarSurface: { warmup:true, maxCachedMaps:24, requestTimeoutMs:5000 }
+});
+console.log(viewer.getPolarSurfaceState());
+// mapId / north、south的mode与coverage / warming / queued / failures / textureBytes
+// mode: sampled=本图像素生成；style=本图样式生成；fallback=没有可用数据。
+```
+
+coverage表示边缘环的经度样本覆盖比例，不是极地影像或DEM覆盖/精度。部分样本时缺口可按该图已有像素均值估计，不能解释为真实极地像素；fixed northColor/southColor仅在没有样式/像素时兜底。warmup:false可禁止额外影像请求，仍使用现有像素与样式自适应。服务不可用、凭据不足、CORS/读回失败可能保持style/fallback，必须看状态，不能承诺所有服务无条件准备完成。源码统计面板显示极圈来源、样本比例和预制排队/失败数。
+
+这是按底图自适应预制的显示补圈，不是发布包内预置所有厂商真实极地图像；每个消费者使用自己的资源配置生成。真实极地海冰/地貌/影像和DEM仍需要相应数据及投影适配，approximation:polar-cap和DEM域外null保持不变。测试以受控数据检查不同地图/样式的整圈像素、缓存隔离、透明无数据、纹理方向和GPU读回；不宣称真实Google/天地图/Esri服务已逐一通过权限/配额验收。

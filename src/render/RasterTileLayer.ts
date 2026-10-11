@@ -83,6 +83,18 @@ export class RasterTileLayer {
   readonly object3d = new THREE.Group();
   private surfaceToken='';
   private surfaceGeneration=0;
+  /** Ready source images for per-map polar baking, including cached non-visible ancestors. */
+  polarTextureSources():readonly {id:TileId;texture:THREE.Texture}[]{
+    if(this.disposed||this.overlay)return [];
+    return [...this.textures.values()].filter(r=>r.state==='ready'&&r.texture&&(r.id.y===0||r.id.y===2**r.id.level-1))
+      .sort((a,b)=>a.id.level-b.id.level).slice(0,64).map(r=>({id:{...r.id},texture:r.texture!}));
+  }
+  /** Borrowed visible border meshes. Polar completion never requests tiles or owns these textures. */
+  polarBorderMeshes():readonly {id:TileId;mesh:THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>;north:boolean}[]{
+    if(!this.visible||this.disposed||this.overlay)return [];
+    return [...this.renderTiles.values()].filter(t=>t.mesh.visible&&(t.id.y===0||t.id.y===2**t.id.level-1))
+      .flatMap(t=>[...(t.id.y===0?[{id:t.id,mesh:t.mesh,north:true}]:[]),...(t.id.y===2**t.id.level-1?[{id:t.id,mesh:t.mesh,north:false}]:[])]);
+  }
   get surfaceRevision():string {
     // Called at most once by each entity layer per frame; no CPU vertex generation here.
     const token=[...this.renderTiles.values()].map(t=>`${tileKey(t.id)}:${t.mesh.visible}:${t.terrainKey}:${t.mesh.material.uniforms.terrainTexture?.value?.version??0}:${(t.mesh.geometry.getAttribute('terrainEdgeHigh') as THREE.BufferAttribute).version}`).join('|');
@@ -1351,7 +1363,7 @@ export class RasterTileLayer {
   }
 }
 
-async function loadTextureWithFetch(url: string, signal: AbortSignal): Promise<THREE.Texture> {
+export async function loadTextureWithFetch(url: string, signal: AbortSignal): Promise<THREE.Texture> {
   const response = await fetch(url, { signal, mode: 'cors' });
   if (!response.ok) throw new Error(`纹理请求失败 (${response.status}): ${url}`);
   // Keep the same upload orientation as THREE.TextureLoader. ImageBitmap has

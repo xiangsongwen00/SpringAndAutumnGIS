@@ -159,6 +159,7 @@ export class Viewer {
   setLodGridVisible(visible: boolean): void { this.assertAlive(); this.engine.setLodGridVisible(visible); }
   flyTo(view: GlobeFlyToOptions): void { this.assertAlive(); this.engine.flyTo(view); }
   getCameraViewState() { this.assertAlive(); return this.engine.getCameraViewState(); }
+  getPolarSurfaceState(){this.assertAlive();return this.engine.getPolarSurfaceState();}
   orientNorthUp():void {this.assertAlive();this.engine.controls.orientNorthUp();}
   resetView():void {this.assertAlive();this.engine.controls.resetView();}
   setTileLevelOffset(offset:number):void {

@@ -335,6 +335,7 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   heightVersionAt(longitude: number, latitude: number): string {
+    if(Math.abs(latitude)>WEB_MERCATOR_MAX_LATITUDE)return 'polar-no-dem';
     if (!this._enabled || (!this.coverageReady && !this.hasInitialCoverage)) return 'flat';
     const latitudeRadians = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(latitude,
       -WEB_MERCATOR_MAX_LATITUDE, WEB_MERCATOR_MAX_LATITUDE));
@@ -351,6 +352,9 @@ export class TerrainTileLayer implements TerrainHeightSource {
   }
 
   sampleHeight(longitude: number, latitude: number): number | null {
+    // Outside the provider's Mercator domain there is no measured DEM. Do not
+    // repeat the boundary height around the entire pole or move the camera on it.
+    if(Math.abs(latitude)>WEB_MERCATOR_MAX_LATITUDE)return null;
     if (!this._enabled || (!this.coverageReady && !this.hasInitialCoverage)) return null;
     const clampedLatitude = THREE.MathUtils.clamp(
       latitude,

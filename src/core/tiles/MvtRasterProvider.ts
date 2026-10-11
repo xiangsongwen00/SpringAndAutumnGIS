@@ -10,6 +10,7 @@ import { MvtTileSource } from '../../vector/source/MvtTileSource';
 import { MapStyleLoader } from '../../vector/style/MapStyleLoader';
 import type { MapStyleCapabilityReport } from '../../vector/style/MapStyleLoader';
 import type { MapStyle, VectorSource } from '../../vector/style/VectorStyleTypes';
+import {polarPaletteFromStyle,polarConfigurationKey,type PolarStylePalette} from '../../render/PolarStyle';
 
 export type MvtRasterProviderOptions = Readonly<{
   id?: string;
@@ -58,12 +59,17 @@ export class MvtRasterProvider implements RasterTileProvider {
   private viewSourceLevel: number;
   private _viewLevelOffset: number | null;
   private _revision = 0;
+  private polarKey:string;
+  private paletteReady=false;
+  polarStylePalette:PolarStylePalette|null=null;
+  get polarAppearanceKey():string{return this.polarKey;}
 
   constructor(options: MvtRasterProviderOptions) {
     if (!options.urlTemplate && !options.tileJsonUrl && !options.style && !options.styleUrl) {
       throw new Error('MVT 数据源必须提供 urlTemplate、tileJsonUrl 或带矢量 source 的样式。');
     }
     this.id = options.id ?? 'mvt-raster';
+    this.polarKey=polarConfigurationKey(JSON.stringify({id:this.id,url:options.urlTemplate,tileJson:options.tileJsonUrl,style:options.style??options.styleUrl,source:options.sourceId,bounds:options.bounds}));
     this.minLevel = Math.max(0, Math.round(options.minLevel ?? 0));
     this.resolvedMaxLevel = Math.max(this.minLevel, Math.round(options.maxLevel ?? 20));
     this._viewLevelOffset = normalizeViewLevelOffset(
@@ -140,6 +146,7 @@ export class MvtRasterProvider implements RasterTileProvider {
 
   async initialize(): Promise<void> {
     const style = await this.styleLoader.load();
+    if(!this.paletteReady){this.polarStylePalette=polarPaletteFromStyle(style);this.polarKey=polarConfigurationKey(`${this.polarKey}/${JSON.stringify(style)}`);this.paletteReady=true;}
     const selected = this.styleLoader.selectVectorSource(style);
     this.source ??= new MvtTileSource({ id: selected.id, source: this.directSource ?? selected.source, fetcher: this.fetcher });
     await this.source.initialize();

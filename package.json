@@ -26,6 +26,8 @@
     "test:picking": "node scripts/test-surface-picking.mjs",
     "test:ground": "node scripts/test-entity-ground.mjs",
     "test:measurement": "node scripts/test-measurement-camera.mjs",
+    "test:polar": "node scripts/test-polar-surface.mjs",
+    "test:polar:appearance": "node scripts/test-polar-appearance.mjs",
     "test:entities:browser": "node scripts/test-entity-demo-browser.mjs",
     "dev": "vite",
     "build": "vite build && tsc -p tsconfig.build.json",

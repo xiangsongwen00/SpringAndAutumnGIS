@@ -124,9 +124,15 @@ try{
      h.engine.flyTo({longitude:106.55,latitude:29.61,altitude:12000,pitch:-55,heading:37,duration:0});
      return {positionError,projectionSame,offsetMounted,baseMounted,icons:images.length,canvasCount:document.querySelectorAll('#globe canvas').length};
    })()`);
-   assert.ok(tools.positionError<1e-6);assert.equal(tools.projectionSame,true);assert.equal(tools.offsetMounted,true);assert.equal(tools.baseMounted,true);assert.ok(tools.icons>=12);assert.equal(tools.canvasCount,1);
+   assert.ok(tools.positionError<1e-6);assert.equal(tools.projectionSame,true);assert.equal(tools.offsetMounted,true);assert.equal(tools.baseMounted,true);assert.equal(tools.icons,9);assert.equal(tools.canvasCount,1);
+   assert.equal(await evaluate(`document.querySelector('.sag-tool-panel').classList.contains('sag-tool-panel--compact')`),true);
+   if(terrain===1&&process.env.ENTITY_SCREENSHOT){const screenshot=await command('Page.captureScreenshot',{format:'png'});await writeFile(process.env.ENTITY_SCREENSHOT,Buffer.from(screenshot.result.data,'base64'));}
    // Real browser input exercises navigation handlers, not just controls.enabled.
-   await evaluate(`document.querySelector('[data-tool="draw-polyline"]').click()`);await pause(100);
+   await evaluate(`document.querySelector('[data-tool="draw"]').click()`);await pause(100);
+   assert.equal(await evaluate(`window.__entityDemo.draw.isActive`),false,'Opening drawing must not start');
+   await evaluate(`const s=document.querySelector('[aria-label="绘制类型"]');s.value='polyline';s.dispatchEvent(new Event('change'));`);
+   assert.equal(await evaluate(`window.__entityDemo.draw.isActive`),false,'Changing type must not start');
+   await evaluate(`document.querySelector('[data-action="start-draw"]').click()`);
    const navBefore=await evaluate(`({q:window.__entityDemo.engine.camera.quaternion.toArray(),vertices:window.__entityDemo.draw.state.vertexCount,r:(()=>{const r=window.__entityDemo.engine.renderer.domElement.getBoundingClientRect();return {x:r.left+r.width*.45,y:r.top+r.height*.6};})()})`);
    await command('Input.dispatchMouseEvent',{type:'mousePressed',x:navBefore.r.x,y:navBefore.r.y,button:'right',buttons:2,clickCount:1});
    await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:navBefore.r.x+40,y:navBefore.r.y+15,button:'right',buttons:2});
@@ -136,14 +142,51 @@ try{
    const measured=await evaluate(`(async()=>{
      const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),tick=()=>new Promise(r=>setTimeout(r,80)),click=(x,y)=>{
        c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:99,clientX:r.left+r.width*x,clientY:r.top+r.height*y}));c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:99,clientX:r.left+r.width*x,clientY:r.top+r.height*y}));};
-     h.draw.cancel();h.engine.controls.orientNorthUp();document.querySelector('[data-tool="distance"]').click();await tick();click(.4,.5);click(.5,.6);
+     h.draw.cancel();h.engine.controls.orientNorthUp();document.querySelector('[data-tool="measure"]').click();await tick();
+     const waiting=!h.draw.isActive,select=document.querySelector('[aria-label="测量类型"]'),change=value=>{select.value=value;select.dispatchEvent(new Event('change'));document.querySelector('[data-action="start-measure"]').click();};
+     document.querySelector('[data-action="start-measure"]').click();
+     click(.35,.5);click(.45,.55);const continuousPoints=h.draw.isActive&&h.measurements.state.kind==='point'&&h.draw.state.vertexCount===2;
+     change('distance');click(.4,.5);click(.5,.6);
      const distance=h.measurements.finish(),id=h.measurements.state.entityId,properties=h.entities.getById(id).properties;
-     document.querySelector('[data-tool="area"]').click();await tick();click(.4,.5);click(.5,.5);click(.45,.6);const area=h.measurements.finish();
-     document.querySelector('[data-tool="inspect"]').click();await tick();click(.45,.55);const inspected=document.querySelector('.sag-tool-panel pre').textContent;
-     h.measurements.clear();return {distance:distance.metres,area:area.squareMetres,properties:properties.measurementResult.kind,removed:!h.entities.has(id),inspected:inspected.includes('longitude'),active:h.draw.isActive};
+     change('area');click(.4,.5);click(.5,.5);click(.45,.6);click(.45,.6);c.dispatchEvent(new MouseEvent('dblclick',{button:0,bubbles:true,cancelable:true}));const area=h.measurements.state.result;
+     const noDuplicate=h.entities.getById(h.measurements.state.entityId).positions.length===3&&!h.draw.isActive;
+     change('inspect');click(.45,.55);const inspected=document.querySelector('.sag-tool-panel pre').textContent;
+     h.measurements.clear();return {waiting,continuousPoints,noDuplicate,distance:distance.metres,area:area.squareMetres,properties:properties.measurementResult.kind,removed:!h.entities.has(id),inspected:inspected.includes('longitude'),active:h.draw.isActive};
    })()`);
    assert.ok(measured.distance>0);assert.ok(measured.area>0);assert.equal(measured.properties,'distance');assert.equal(measured.removed,true);assert.equal(measured.inspected,true);assert.equal(measured.active,false);
-   if(terrain===1&&process.env.ENTITY_SCREENSHOT){const screenshot=await command('Page.captureScreenshot',{format:'png'});await writeFile(process.env.ENTITY_SCREENSHOT,Buffer.from(screenshot.result.data,'base64'));}
+   assert.equal(measured.waiting,true);assert.equal(measured.continuousPoints,true);assert.equal(measured.noDuplicate,true);
+   const markers=await evaluate(`(async()=>{
+     const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),old=h.entities.length;document.querySelector('[data-tool="draw"]').click();await new Promise(r=>setTimeout(r,80));
+     document.querySelector('[data-action="start-draw"]').click();
+     for(const x of [.3,.4]){c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:100,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:100,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));}
+     const active=h.draw.isActive,count=h.entities.length-old;h.toolbar.close();return {active,count,ended:!h.draw.isActive,preserved:h.entities.length-old};
+   })()`);assert.deepEqual(markers,{active:true,count:2,ended:true,preserved:2});
+   const history=await evaluate(`(async()=>{
+     const h=window.__entityDemo,c=h.engine.renderer.domElement,r=c.getBoundingClientRect(),click=x=>{
+       c.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:101,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));c.dispatchEvent(new PointerEvent('pointerup',{button:0,pointerId:101,clientX:r.left+r.width*x,clientY:r.top+r.height*.6}));};
+     const business='ordinary-business';h.entities.add({id:business,type:'point',position:[106.55,29.61,0]});
+     h.measurements.start();click(.35);const measureId=h.measurements.state.entityId;h.measurements.stop();
+     document.querySelector('[data-tool="draw"]').click();await new Promise(r=>setTimeout(r,80));
+     const box=document.querySelector('[data-action="clear-draw-history"]');box.checked=true;box.dispatchEvent(new Event('change'));document.querySelector('[data-action="start-draw"]').click();
+     const preservedOnStart=h.entities.has(measureId)&&h.entities.has(business);click(.3);const first=h.draw.state.lastEntityId;click(.4);const second=h.draw.state.lastEntityId;
+     const drawingOnly=!h.entities.has(first)&&h.entities.has(second)&&h.entities.has(measureId)&&h.entities.has(business)&&h.draw.state.vertexCount===1;
+     const s=document.querySelector('[aria-label="绘制类型"]');s.value='polyline';s.dispatchEvent(new Event('change'));document.querySelector('[data-action="start-draw"]').click();click(.3);
+     try{h.draw.finish();}catch{}const failedKeepsOld=h.entities.has(second);h.draw.cancel();
+     h.entities.remove(second);h.entities.add({id:second,type:'point',position:[106.55,29.61,0]});
+     h.draw.start({type:'point',clearPrevious:true});click(.4);h.draw.stop();const reusedSafe=h.entities.has(second);
+     document.querySelector('[data-tool="measure"]').click();await new Promise(r=>setTimeout(r,80));
+     const mb=document.querySelector('[data-action="clear-measure-history"]');mb.checked=true;mb.dispatchEvent(new Event('change'));document.querySelector('[data-action="start-measure"]').click();click(.3);const m1=h.measurements.state.entityId;click(.4);const m2=h.measurements.state.entityId;
+     const measurementOnly=!h.entities.has(measureId)&&!h.entities.has(m1)&&h.entities.has(m2)&&h.entities.has(second)&&h.entities.has(business);
+     h.toolbar.close();h.entities.remove(m2);h.entities.add({id:m2,type:'point',position:[106.55,29.61,0]});h.measurements.clear();
+     return {preservedOnStart,drawingOnly,failedKeepsOld,reusedSafe,measurementOnly,measureReuseSafe:h.entities.has(m2)};
+   })()`);assert.deepEqual(history,{preservedOnStart:true,drawingOnly:true,failedKeepsOld:true,reusedSafe:true,measurementOnly:true,measureReuseSafe:true});
+   if(terrain)for(const latitude of [88,-88]){
+     await evaluate(`window.__entityDemo.engine.flyTo({longitude:0,latitude:${latitude},altitude:30000,pitch:-90,heading:0,duration:0})`);await pause(500);
+     const polar=await evaluate(`(async()=>{await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const h=window.__entityDemo,c=h.engine.renderer.domElement,hit=h.engine.pickPositionDetailed({x:c.clientWidth/2,y:c.clientHeight/2}),gl=c.getContext('webgl2'),p=new Uint8Array(4);gl.readPixels(gl.drawingBufferWidth/2,gl.drawingBufferHeight/2,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return {appearance:h.engine.getPolarSurfaceState(),source:hit?.approximation,latitude:hit?.position.latitude,height:hit?.position.height,pixel:[...p],dem:h.engine.terrain.sampleHeight(0,${latitude})};})()`);
+     assert.equal(polar.source,'polar-cap');assert.ok(Math.abs(polar.latitude-latitude)<.01);assert.equal(polar.dem,null);
+     assert.equal(latitude>0?polar.appearance.north.mode:polar.appearance.south.mode,'sampled');
+     assert.ok(Math.abs(polar.pixel[0]-15)<5&&Math.abs(polar.pixel[1]-55)<5&&Math.abs(polar.pixel[2]-85)<5,JSON.stringify(polar));
+   }
    console.log(`Root index.html: terrain=${terrain}, ground fill/PNG overlay passed; pick reprojection ${report.error.toFixed(6)}px; preview CPU ${previewMs.toFixed(1)}ms / frame ${previewFrameMs.toFixed(1)}ms.`);
  }
  assert.deepEqual(external,[],'Regression must not request external tiles/services');

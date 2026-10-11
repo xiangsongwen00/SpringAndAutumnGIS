@@ -14,6 +14,7 @@ import type { MapStyleCapabilityReport } from '../../vector/style/MapStyleLoader
 import { RequestScheduler } from './RequestScheduler';
 import type { FrameWorkBudget } from './FrameWorkBudget';
 import type { DecodedVectorTile } from '../../vector/style/VectorStyleTypes';
+import {polarPaletteFromStyle,polarConfigurationKey,type PolarStylePalette} from '../../render/PolarStyle';
 
 export type GpuVectorTileProviderOptions = MapStyleLoaderOptions & {
   id: string; renderer: THREE.WebGLRenderer; levelOffset?: number;
@@ -68,6 +69,9 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   private readonly recentDraws: Array<{ at: number; ms: number; finished: boolean }> = [];
   private issues: VectorStyleIssue[] = [];
   private initialized = false;
+  private polarStyleKey='';
+  polarStylePalette:PolarStylePalette|null=null;
+  override get polarAppearanceKey():string{return this.polarStyleKey||super.polarAppearanceKey;}
   private source: MvtTileSource | null = null;
   private sourceId = '';
   private readonly camera = new THREE.Camera();
@@ -109,6 +113,8 @@ export class GpuVectorTileProvider extends UrlTemplateRasterProvider {
   async initialize(): Promise<void> {
     if (this.disposed) throw new Error('GPU vector provider disposed');
     const style = await this.loader.load();
+    this.polarStylePalette=polarPaletteFromStyle(style);
+    this.polarStyleKey=polarConfigurationKey(JSON.stringify({id:this.id,style,source:this.sourceOverride}));
     if (this.disposed) throw new Error('GPU vector provider disposed');
     const selected = this.loader.selectVectorSource(style);
     this.sourceId = selected.id;

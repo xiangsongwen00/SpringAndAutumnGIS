@@ -30,7 +30,7 @@ const entities=new EntityCollection(),listeners=new Set();let options=null,state
 const draw={get isActive(){return !!options},get state(){return state},onChange(fn){listeners.add(fn);return()=>listeners.delete(fn)},
  cancel(){options=null;state={...state,active:false,lastEntityId:null};for(const fn of listeners)fn(state)},
  start(o){options=o;state={active:true,type:o.type,positions:[],vertexCount:0,lastEntityId:null};for(const fn of listeners)fn(state)},
- finish(){entities.add({...options,positions:[[0,0],[.1,0]],type:'polyline'});const id=options.id;options=null;state={...state,active:false,lastEntityId:id};for(const fn of listeners)fn(state)},undo(){}};
+ finish(){const {historyGroup,clearPrevious,...definition}=options;entities.add({...definition,positions:[[0,0],[.1,0]],type:'polyline'});const id=options.id;options=null;state={...state,active:false,lastEntityId:id};for(const fn of listeners)fn(state)},undo(){}};
 entities.add({id:'user-object',type:'point',position:[0,0],properties:{measurement:'distance'}});
 const measurement=new MeasurementController(draw,entities);measurement.start('distance');const result=measurement.finish();assert.ok(result.metres>10000);
 assert.equal(entities.length,2);measurement.clear();assert.equal(entities.length,1);assert.ok(entities.has('user-object'));

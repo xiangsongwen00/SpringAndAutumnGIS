@@ -1,6 +1,6 @@
 import type { GlobeEngine } from '../engine/GlobeEngine';
 import type { EntityDrawingController } from './EntityDrawingController';
-import type { MeasurementController } from './Measurement';
+import type { MeasurementController,MeasurementKind } from './Measurement';
 import type { EntitySnapshot, EntityDefinition, ScreenPosition } from './EntityTypes';
 import type { EntityCollection } from './EntityCollection';
 import type { SurfacePickResult } from '../core/geo/SurfacePicker';
@@ -19,7 +19,7 @@ export interface ToolbarTarget {
 export type ViewerToolbarOptions={container?:HTMLElement; onEntities?:()=>void;onLayers?:()=>void;
   /** Optional existing source-demo form controls are moved, not cloned. */
   basemapContent?:HTMLElement;offsetContent?:HTMLElement;
-  onDraw?:(type:EntityDefinition['type'])=>void;onPanelOpen?:()=>void;
+  onDraw?:(type:EntityDefinition['type'],options:{clearPrevious:boolean})=>void;onPanelOpen?:()=>void;
   baseMapNames?:Readonly<Record<string,string>>};
 
 const css=`
@@ -28,6 +28,7 @@ const css=`
 .sag-tools img{width:25px;height:25px;object-fit:contain}.sag-tools button:hover,.sag-tools button[aria-pressed=true]{background:#37758c}.sag-tools button:focus-visible{outline:2px solid #64d8ff}
 .sag-tool-panel{position:absolute;right:12px;top:56px;z-index:40;width:min(330px,calc(100% - 76px));max-height:calc(100% - 90px);overflow:auto;box-sizing:border-box;padding:14px;background:#071d29f5;border:1px solid #336477;border-radius:10px;color:#dcf7ff;font:13px/1.6 sans-serif;pointer-events:auto}
 .sag-tool-panel[hidden]{display:none}.sag-tool-panel button,.sag-tool-panel select,.sag-tool-panel input{font:inherit;margin:4px;padding:5px;border-radius:5px;max-width:100%;color:#dcf7ff;background:#133342;border:1px solid #336477}
+.sag-tool-panel--compact{left:62px;right:auto;top:auto;bottom:28px;width:min(300px,calc(100% - 74px));max-height:calc(100% - 56px)}
 .sag-tool-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:45vh;overflow:auto}.sag-tool-panel label{display:block}.sag-tool-panel header{display:flex;justify-content:space-between;align-items:center}.sag-tool-panel header button{margin:0}.sag-tool-panel output{display:block}
 `;
 /** Optional library toolbar: one owner, one active drawing/measurement interaction. */
@@ -46,6 +47,8 @@ export class ViewerToolbar {
   private pointer:{x:number;y:number;id:number}|null=null;
   private destroyed=false;
   private managerUnsubscribe:(()=>void)|null=null;
+  private clearDrawingHistory=false;
+  private clearMeasurementHistory=false;
   private previousPosition:string|null=null;
   private readonly host:HTMLElement;
   private readonly moved:{node:HTMLElement;parent:Node|null;next:Node|null}[]=[];
@@ -68,32 +71,62 @@ export class ViewerToolbar {
     add('compass','北向俯视（保持相机位置和高度）',toolbarIcons.compass,()=>target.orientNorthUp());
     add('offset','瓦片层级偏移',toolbarIcons.offset,()=>this.offset());
     add('terrain','地形开关',toolbarIcons.terrainOff,()=>{target.setTerrainEnabled(!target.terrainEnabled);this.terrainState();});this.terrainState();
-    add('inspect','点坐标与对象属性查询',toolbarIcons.inspect,()=>{this.beginInteraction();this.open('inspect','点属性查询');this.inspecting=true;this.status.textContent='单击地表或业务对象查询；拖拽不会查询。';});
-    add('distance','路程测量',toolbarIcons.distance,()=>this.measure('distance'));
-    add('area','面积测量',toolbarIcons.area,()=>this.measure('area'));
-    for(const [type,icon,name] of [['point',toolbarIcons.point,'绘制点'],['polyline',toolbarIcons.line,'绘制折线'],['polygon',toolbarIcons.polygon,'绘制面']] as const)
-      add(`draw-${type}`,name,icon,()=>{this.beginInteraction();if(options.onDraw){this.close();options.onDraw(type);}else{this.open('draw',name);this.expressionButtons();target.draw.start({type,heightReference:'clamp-to-ground',groundOffset:.5,symbol:{color:'#64d8ff',occlusion:type==='point'?'overlay':'depth'}});this.status.textContent='左键落点；右键旋转、中键俯仰、滚轮缩放；Enter完成，Esc取消。';}});
+    add('measure','测量／点查询',toolbarIcons.distance,()=>this.measureModule());
+    add('draw','绘制点线面',toolbarIcons.polygon,()=>this.drawModule());
     add('entities','绘图对象管理',toolbarIcons.entities,()=>{this.close();target.draw.cancel();options.onEntities?.();if(!options.onEntities)this.entityManager();});
     if(options.onLayers)add('layers','业务图层管理',toolbarIcons.layers,()=>{this.close();target.draw.cancel();options.onLayers!();});
     this.cleanup.push(target.measure.onChange(state=>{if(this.mode!=='measure')return;this.status.textContent=`${state.active?'测量中':'完成或取消'} · ${state.vertexCount} 顶点${state.error?' · '+state.error:''}`;let pre=this.content.querySelector('pre');if(!pre){pre=doc.createElement('pre');this.content.append(pre);}pre.textContent=JSON.stringify(state.result,null,2);}),
-      target.draw.onChange(state=>{for(const [id,b] of this.buttons)if(id.startsWith('draw-'))b.setAttribute('aria-pressed',String(state.active&&id===`draw-${state.type}`));if(this.mode==='draw')this.status.textContent=state.error??`${state.active?'绘制中':'绘制结束'} · ${state.vertexCount} 顶点`;}));
+      target.draw.onChange(state=>{this.buttons.get('draw')?.setAttribute('aria-pressed',String(this.mode==='draw'&&state.active));if(this.mode==='draw')this.status.textContent=state.error??`${state.active?'绘制中':'绘制结束'} · ${state.vertexCount} 顶点`;}));
     canvas.addEventListener('pointerdown',e=>{if(this.inspecting&&e.button===0)this.pointer={x:e.clientX,y:e.clientY,id:e.pointerId};},{signal:this.events.signal});
     canvas.addEventListener('pointercancel',()=>{this.pointer=null;},{signal:this.events.signal});
     canvas.addEventListener('pointerup',e=>{const p=this.pointer;this.pointer=null;if(!this.inspecting||!p||e.pointerId!==p.id||Math.hypot(p.x-e.clientX,p.y-e.clientY)>4)return;
-      const r=canvas.getBoundingClientRect();try{const result=target.inspectAt({x:e.clientX-r.left,y:e.clientY-r.top});this.content.replaceChildren();const pre=doc.createElement('pre');pre.textContent=JSON.stringify(result,null,2);this.content.append(pre);this.status.textContent=result.surface||result.entity?'查询完成':'天空或未命中对象';}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});
+      const r=canvas.getBoundingClientRect();try{const result=target.inspectAt({x:e.clientX-r.left,y:e.clientY-r.top});const pre=this.content.querySelector('pre');if(pre)pre.textContent=JSON.stringify(result,null,2);this.status.textContent=result.surface||result.entity?'查询完成，可继续点击':'天空或未命中对象';}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});
+    canvas.ownerDocument.addEventListener('keydown',e=>{if(e.key==='Escape'&&this.inspecting)this.endInteraction();},{signal:this.events.signal});
   }
   close():void{this.managerUnsubscribe?.();this.managerUnsubscribe=null;this.inspecting=false;this.pointer=null;this.panel.hidden=true;if(this.mode==='measure')this.target.measure.cancel();if(this.mode==='draw')this.target.draw.cancel();this.mode=null;}
   destroy():void{if(this.destroyed)return;this.close();this.destroyed=true;this.events.abort();for(const fn of this.cleanup)fn();for(const {node,parent,next} of this.moved)if(parent)parent.insertBefore(node,next?.parentNode===parent?next:null);this.element.remove();this.panel.remove();this.style.remove();if(this.previousPosition!==null)this.host.style.position=this.previousPosition;}
   private beginInteraction():void{this.target.measure.cancel();this.target.draw.cancel();this.inspecting=false;}
-  private open(mode:string,title:string):void{this.close();this.options.onPanelOpen?.();this.mode=mode;this.title.textContent=title;this.content.replaceChildren();this.status.textContent='';this.panel.hidden=false;}
+  private open(mode:string,title:string):void{this.close();this.options.onPanelOpen?.();this.mode=mode;this.title.textContent=title;this.content.replaceChildren();this.status.textContent='';this.panel.classList.toggle('sag-tool-panel--compact',mode==='basemap'||mode==='offset');this.panel.hidden=false;}
   private mount(node:HTMLElement):void{if(!this.moved.some(v=>v.node===node))this.moved.push({node,parent:node.parentNode,next:node.nextSibling});this.content.append(node);}
   private baseMaps():void{this.open('basemap','底图切换');if(this.options.basemapContent){this.mount(this.options.basemapContent);return;}
     const select=this.panel.ownerDocument.createElement('select');select.setAttribute('aria-label','底图');select.append(new Option('无底图',''));for(const map of this.target.getBaseMaps())select.append(new Option(this.options.baseMapNames?.[map.id]??map.id,map.id));select.value=this.target.baseMap.id??'';
     select.addEventListener('change',async()=>{select.disabled=true;try{await this.target.setBaseMap(select.value||null);this.status.textContent='底图配置已切换，瓦片继续加载。';}catch{select.value=this.target.baseMap.id??'';this.status.textContent='切换失败，保留原底图。';}finally{select.disabled=false;}},{signal:this.events.signal});this.content.append(select);}
   private offset():void{this.open('offset','瓦片层级偏移');if(this.options.offsetContent){this.mount(this.options.offsetContent);return;}const input=this.panel.ownerDocument.createElement('input');input.type='range';input.min='-4';input.max='1';input.step='.1';input.value=String(this.target.tileLevelOffset??-1.7);const value=this.panel.ownerDocument.createElement('output');value.textContent=input.value;
     input.addEventListener('input',()=>{try{this.target.setTileLevelOffset(Number(input.value));value.textContent=input.value;}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});this.content.append(input,value);}
-  private expressionButtons():void{for(const [name,action] of [['完成（Enter）',()=>this.target.draw.finish()],['撤销顶点',()=>this.target.draw.undo()],['取消（Esc）',()=>this.target.draw.cancel()]] as const){const b=this.panel.ownerDocument.createElement('button');b.textContent=name;b.addEventListener('click',()=>{try{action();}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});this.content.append(b);}}
-  private measure(kind:'distance'|'area'):void{this.beginInteraction();this.open('measure',kind==='distance'?'路程测量（WGS84）':'面积测量（WGS84）');this.expressionButtons();const clear=this.panel.ownerDocument.createElement('button');clear.textContent='清除测量';clear.addEventListener('click',()=>this.target.measure.clear(),{signal:this.events.signal});this.content.append(clear);this.target.measure.start(kind);}
+  /** Programmatic end is equivalent to the point-mode Finish button; popup stays open. */
+  endInteraction():void{this.target.measure.stop();this.target.draw.stop();this.inspecting=false;this.status.textContent='操作已结束，可选择模式重新开始。';}
+  private expressionButtons():void{for(const [name,action] of [['完成／结束（Enter）',()=>{
+    if(!this.inspecting&&!this.target.draw.isActive){this.status.textContent='当前未开始，请点击开始按钮。';return;}
+    if(this.inspecting||this.target.draw.state.type==='point'||this.target.draw.state.type==='label')this.endInteraction();else this.target.draw.finish();
+  }],['撤销顶点',()=>this.target.draw.undo()],['取消（Esc）',()=>{this.target.measure.cancel();this.target.draw.cancel();this.inspecting=false;}]] as const){const b=this.panel.ownerDocument.createElement('button');b.textContent=name;b.addEventListener('click',()=>{try{action();}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});this.content.append(b);}}
+  private selector(label:string,entries:readonly (readonly [string,string])[],change:(value:string)=>void):HTMLSelectElement{
+    const doc=this.panel.ownerDocument,wrap=doc.createElement('label'),select=doc.createElement('select');wrap.textContent=label;select.setAttribute('aria-label',label);for(const [value,name] of entries)select.append(new Option(name,value));select.addEventListener('change',()=>{try{change(select.value);}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});wrap.append(select);this.content.append(wrap);return select;
+  }
+  private drawModule():void{
+    this.beginInteraction();this.open('draw','绘制');const start=(value:string)=>{this.beginInteraction();const type=value as EntityDefinition['type'];
+      if(this.options.onDraw)this.options.onDraw(type,{clearPrevious:this.clearDrawingHistory});else this.target.draw.start({type,continuous:true,clearPrevious:this.clearDrawingHistory,heightReference:type==='point'||type==='label'?'absolute':'clamp-to-ground',groundOffset:.5,symbol:{color:'#64d8ff',occlusion:type==='point'?'overlay':'depth'}});
+      this.status.textContent='点可连续标记；线面双击或Enter完成。右/中键及滚轮可导航，关闭弹窗退出。';};
+    const select=this.selector('绘制类型',[['point','标记点'],['polyline','折线'],['polygon','面'],['label','标注']],()=>{this.beginInteraction();this.status.textContent='类型已选择，点击“开始绘制”。';});
+    this.historyCheckbox('draw');this.startButton('draw',()=>start(select.value));this.expressionButtons();this.status.textContent='请选择类型和历史设置，再点击“开始绘制”。';
+  }
+  private measureModule():void{
+    this.beginInteraction();this.open('measure','测量／查询');const pre=this.panel.ownerDocument.createElement('pre');const start=(value:string)=>{
+      this.beginInteraction();pre.textContent='';if(value==='inspect'){this.inspecting=true;this.status.textContent='连续点击查询坐标和对象属性；结束或关闭退出。';}
+      else{this.target.measure.start(value as MeasurementKind,{clearPrevious:this.clearMeasurementHistory});this.status.textContent='点可连续拾取；线面双击或Enter完成。数值为WGS84椭球测量。';}};
+    const select=this.selector('测量类型',[['point','点坐标／高程'],['distance','折线路程'],['area','面积'],['inspect','点对象属性查询']],()=>{this.beginInteraction();pre.textContent='';this.status.textContent='类型已选择，点击“开始测量”。';});
+    this.historyCheckbox('measure');this.startButton('measure',()=>start(select.value));this.expressionButtons();
+    const clear=this.panel.ownerDocument.createElement('button');clear.textContent='清除测量';clear.addEventListener('click',()=>this.target.measure.clear(),{signal:this.events.signal});this.content.append(clear,pre);this.status.textContent='请选择类型和历史设置，再点击“开始测量”。';
+  }
+  private startButton(mode:'draw'|'measure',start:()=>void):void{
+    const button=this.panel.ownerDocument.createElement('button');button.type='button';button.textContent=mode==='draw'?'开始绘制':'开始测量';button.dataset.action=`start-${mode}`;
+    button.addEventListener('click',()=>{try{start();}catch(error){this.status.textContent=error instanceof Error?error.message:String(error);}},{signal:this.events.signal});this.content.append(button);
+  }
+  private historyCheckbox(mode:'draw'|'measure'):void{
+    const doc=this.panel.ownerDocument,label=doc.createElement('label'),input=doc.createElement('input');input.type='checkbox';input.dataset.action=`clear-${mode}-history`;
+    input.checked=mode==='draw'?this.clearDrawingHistory:this.clearMeasurementHistory;
+    input.addEventListener('change',()=>{if(mode==='draw')this.clearDrawingHistory=input.checked;else this.clearMeasurementHistory=input.checked;},{signal:this.events.signal});
+    label.append(input,doc.createTextNode(`新对象提交后清除历史${mode==='draw'?'绘制':'测量'}对象（开始时生效）`));this.content.append(label);
+  }
   private terrainState():void{const b=this.buttons.get('terrain');if(b){b.setAttribute('aria-pressed',String(this.target.terrainEnabled));b.querySelector('img')!.src=this.target.terrainEnabled?toolbarIcons.terrainOn:toolbarIcons.terrainOff;}}
   private entityManager():void{
     this.open('entities','绘图对象管理');const doc=this.panel.ownerDocument,select=doc.createElement('select'),pre=doc.createElement('pre');select.setAttribute('aria-label','业务对象');

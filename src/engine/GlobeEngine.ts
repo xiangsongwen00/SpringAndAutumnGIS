@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CoordinateTransform } from '../core/coordinates/CoordinateTransform';
+import { WEB_MERCATOR_MAX_LATITUDE } from '../core/coordinates/CoordinateTransform';
 import { pickSurfacePosition, type SurfacePickOptions, type SurfacePickResult } from '../core/geo/SurfacePicker';
 import type { ScreenPosition } from '../sdk/EntityTypes';
 import type { EntityGroundSurface } from '../render/EntityGroundSurface';
@@ -10,6 +11,7 @@ import {
   type GlobeLodStats
 } from '../core/lod/GlobeLodSelector';
 import { GlobeGridRenderer, type GlobeGridRendererOptions } from '../render/GlobeGridRenderer';
+import { PolarSurfaceLayer,type PolarSurfaceLayerOptions } from '../render/PolarSurfaceLayer';
 import type { RasterTileProvider } from '../core/tiles/RasterTileProvider';
 import { TileStateMachine } from '../core/tiles/TileStateMachine';
 import { WebMercatorTilingScheme } from '../core/tiling/WebMercatorTilingScheme';
@@ -89,6 +91,8 @@ export type GlobeEngineOptions = {
   /** Configure a provider while disabling DEM requests from the first frame. */
   terrainEnabled?: boolean;
   terrainLayer?: TerrainTileLayerOptions;
+  /** Mercator-domain completion, not genuine polar imagery/DEM. Enabled by default for Mercator grids. */
+  polarSurface?:boolean|PolarSurfaceLayerOptions;
   initialView?: {
     longitude: number;
     latitude: number;
@@ -109,7 +113,10 @@ export class GlobeEngine {
   pickPositionDetailed(screen:ScreenPosition,options:SurfacePickOptions={}):SurfacePickResult|null {
     if(this.disposed)throw new Error('GlobeEngine has been disposed.');
     const rect=this.renderer.domElement.getBoundingClientRect();
-    return pickSurfacePosition(this.camera,this.ellipsoid,rect.width,rect.height,screen,options,ray=>this.imagery?.pickSurface(ray)??null);
+    return pickSurfacePosition(this.camera,this.ellipsoid,rect.width,rect.height,screen,options,ray=>{
+      const map=this.imagery?.pickSurface(ray)??null,cap=this.polarSurface?.pickSurface(ray)??null;
+      return map&&cap?(ray.origin.distanceToSquared(map.world)<=ray.origin.distanceToSquared(cap.world)?map:cap):map??cap;
+    });
   }
   private framePerformance: GlobeFramePerformance = { lodMs: 0, terrainMs: 0, surfaceMs: 0,
     featureMs: 0, renderSubmitMs: 0, drawCalls: 0, triangles: 0, gpuMs: null, lodSelections: 0 };
@@ -126,6 +133,7 @@ export class GlobeEngine {
   private _imagery: RasterTileLayer | null = null;
   get imagery(): RasterTileLayer | null { return this._imagery; }
   readonly terrain: TerrainTileLayer | null;
+  private readonly polarSurface:PolarSurfaceLayer|null;
   /** Shared per-content lifecycle registry for all raster surface layers. */
   readonly tileStateMachine = new TileStateMachine();
 
@@ -199,6 +207,8 @@ export class GlobeEngine {
       tiltSpeed: Math.max(0.05, options.navigation?.tiltSpeed ?? 1)
     };
     const tilingScheme = options.lod?.tilingScheme ?? new WebMercatorTilingScheme();
+    this.polarSurface=options.polarSurface!==false&&tilingScheme.id==='web-mercator'?new PolarSurfaceLayer(this.ellipsoid,typeof options.polarSurface==='object'?options.polarSurface:{}):null;
+    if(this.polarSurface)this.scene.add(this.polarSurface.object3d);
     const terrainExaggeration = Math.max(0, options.terrainLayer?.exaggeration ?? 1);
     this.terrainMaximumSurfaceDisplacement =
       options.lod?.maximumSurfaceDisplacement ??
@@ -225,6 +235,7 @@ export class GlobeEngine {
     });
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    this.polarSurface?.setRenderer(this.renderer);
     this.renderer.setPixelRatio(1);
     this.renderer.setClearColor(options.clearColor ?? 0x07131d, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -291,7 +302,11 @@ export class GlobeEngine {
       this.camera,
       this.renderer.domElement,
       this.ellipsoid,
-      this.terrain ?? undefined
+      this.terrain||this.polarSurface?{
+        get revision(){return (engine.terrain?.revision??0)+(engine.polarSurface?.revision??0);},
+        sampleHeight:(longitude,latitude)=>Math.abs(latitude)>WEB_MERCATOR_MAX_LATITUDE
+          ?this.polarSurface?.surfaceHeight(longitude,latitude)??null:this.terrain?.sampleHeight(longitude,latitude)??null
+      }:undefined
     );
     this.controls.enableDamping = true;
     this.controls.dampingFactor = this.navigation.dampingFactor;
@@ -382,6 +397,7 @@ export class GlobeEngine {
         if (layer === this.imagery) imageryStats = stats;
       }
       const featureStartedAt = performance.now();
+      this.polarSurface?.update(this.camera,this.imagery);
       for (const layer of this.featureLayers.values()) {
         if (layer.object3d.visible) layer.update(this.camera.position, now);
       }
@@ -424,6 +440,7 @@ export class GlobeEngine {
     this.gpuTimer.reset();
     this.resizeObserver.disconnect();
     this.controls.dispose();
+    this.polarSurface?.dispose();this.polarSurface?.object3d.removeFromParent();
     for (const layer of this.imageryLayers.values()) layer.dispose();
     this.imageryLayers.clear();
     for (const layer of this.featureLayers.values()) layer.dispose();
@@ -574,6 +591,7 @@ export class GlobeEngine {
   getCameraViewState(): GlobeCameraViewState {
     return this.controls.getViewState();
   }
+  getPolarSurfaceState(){return this.polarSurface?.appearanceState??null;}
 
   /** Continuous camera level using the same screen-error scale as the LOD selector. */
   getCameraLevel(): number {

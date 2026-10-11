@@ -209,6 +209,8 @@ const renderStats = (stats: GlobeEngineStats): void => {
   }
   const baseSymbolStats = stats.vectorLayers.get('native-base-symbols');
   if (baseSymbolStats) imageryValue.textContent += ` · 底图点注记 ${baseSymbolStats.visibleLabels}/${baseSymbolStats.allocatedLabels}（显示/缓存）· placement ${baseSymbolStats.placementMs.toFixed(1)}ms`;
+  const polar=engine.getPolarSurfaceState();
+  if(polar)imageryValue.textContent+=` · 极圈 ${polar.mapId??'无底图'}：北${polar.north.mode}/${Math.round(polar.north.coverage*100)}%采样 南${polar.south.mode}/${Math.round(polar.south.coverage*100)}%采样 · 预制${polar.warming?1:0}加载/${polar.queued}排队/${polar.failures}失败`;
   const nativeMvt = [...stats.vectorLayers.entries()].find(([id]) => id !== 'native-base-symbols')?.[1];
   if (nativeMvt) {
     imageryValue.textContent +=
@@ -351,8 +353,7 @@ const toolbar=new ViewerToolbar({
 },{basemapContent:basemapTools,offsetContent:levelOffsetInput.closest('label')!,
   onPanelOpen:()=>{document.getElementById('entity-close')!.click();businessLayerPanel.hidden=true;businessLayerControl.setAttribute('aria-expanded','false');},
   onEntities:()=>{if(requiredElement<HTMLElement>('#entity-panel').hidden)requiredElement<HTMLButtonElement>('#entity-test').click();},
-  onLayers:()=>{if(businessLayerPanel.hidden)businessLayerControl.click();},
-  onDraw:(type)=>requiredElement<HTMLButtonElement>(`#entity-draw-${type==='polyline'?'line':type}`).click()
+  onLayers:()=>{if(businessLayerPanel.hidden)businessLayerControl.click();}
 });
 if(entitySmoke)Object.assign((window as Window & {__entityDemo?:object}).__entityDemo!,{toolbar,measurements});
 if (new URLSearchParams(window.location.search).has('pitch')) {

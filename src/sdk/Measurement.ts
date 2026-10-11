@@ -2,11 +2,15 @@ import geodesic from 'geographiclib-geodesic';
 import type { EntityPosition, EntitySnapshot } from './EntityTypes';
 import type { EntityCollection } from './EntityCollection';
 import type { EntityDrawingController, EntityDrawState } from './EntityDrawingController';
+import type { SurfacePickResult } from '../core/geo/SurfacePicker';
 
 const geod = geodesic.Geodesic.WGS84;
 export type DistanceMeasurement = Readonly<{ kind:'distance'; method:'wgs84-geodesic'; metres:number; segments:readonly number[] }>;
 export type AreaMeasurement = Readonly<{ kind:'area'; method:'wgs84-geodesic'; squareMetres:number; perimeterMetres:number }>;
-export type MeasurementResult = DistanceMeasurement | AreaMeasurement;
+export type PointMeasurement=Readonly<{kind:'point';position:EntityPosition;source:SurfacePickResult['source']|null;approximation?:'polar-cap'}>;
+export type MeasurementKind='point'|'distance'|'area';
+export type MeasurementOptions={clearPrevious?:boolean};
+export type MeasurementResult = DistanceMeasurement | AreaMeasurement | PointMeasurement;
 
 function positions(input:readonly EntityPosition[], minimum:number): void {
   if(!Array.isArray(input)||input.length<minimum||input.length>10000)throw new Error(`Measurement requires ${minimum}..10000 positions.`);
@@ -31,12 +35,13 @@ export function measureArea(input:readonly EntityPosition[],holes:readonly (read
   if(squareMetres<0)throw new Error('Hole area exceeds outer area.');
   return Object.freeze({kind:'area',method:'wgs84-geodesic',squareMetres,perimeterMetres});
 }
-export type MeasurementState = Readonly<{ active:boolean; kind:'distance'|'area'|null; vertexCount:number;
+export type MeasurementState = Readonly<{ active:boolean; kind:MeasurementKind|null; vertexCount:number;
   result:MeasurementResult|null; entityId:string|null; error:string|null }>;
 
 /** Shares drawing interaction and entity lifecycle; no second picking/navigation system. */
 export class MeasurementController {
-  private kind:'distance'|'area'|null=null;
+  private kind:MeasurementKind|null=null;
+  private lastPointId:string|null=null;
   private entityId:string|null=null;
   private result:MeasurementResult|null=null;
   private error:string|null=null;
@@ -46,35 +51,45 @@ export class MeasurementController {
   private disposed=false;
   private readonly listeners=new Set<(state:MeasurementState)=>void>();
   private readonly unsubscribe:()=>void;
+  private readonly unsubscribeEntities:()=>void;
   constructor(private readonly draw:EntityDrawingController,private readonly entities:EntityCollection){
     this.unsubscribe=draw.onChange(state=>this.changed(state));
+    this.unsubscribeEntities=entities.onChange(change=>{if(change.type==='clear')this.owned.clear();else if(change.type==='remove'&&change.id)this.owned.delete(change.id);});
   }
   get state():MeasurementState{return Object.freeze({active:this.kind!==null&&this.draw.isActive,kind:this.kind,
     vertexCount:this.kind?this.draw.state.vertexCount:this.vertexCount,result:this.result,entityId:this.entityId,error:this.error});}
-  start(kind:'distance'|'area'):MeasurementState {
-    this.assertAlive();if(!['distance','area'].includes(kind))throw new Error('Unknown measurement kind.');
+  start(kind:MeasurementKind='point',options:MeasurementOptions={}):MeasurementState {
+    this.assertAlive();if(!['point','distance','area'].includes(kind))throw new Error('Unknown measurement kind.');
+    if(options.clearPrevious!==undefined&&typeof options.clearPrevious!=='boolean')throw new Error('Invalid history cleanup flag.');
     this.cancel();this.draw.cancel();let id:string;do{id=`measure-${kind}-${++this.serial}`;}while(this.entities.has(id));
-    this.kind=kind;this.entityId=id;this.result=null;this.error=null;this.vertexCount=0;
-    try{this.draw.start({id,type:kind==='distance'?'polyline':'polygon',name:kind==='distance'?'路程测量':'面积测量',
-      properties:{measurement:kind},heightReference:'clamp-to-ground',groundOffset:.5,
-      symbol:kind==='distance'?{color:'#ffcc66',width:3,occlusion:'overlay'}:{color:'#ffcc66',opacity:.3,outlineWidth:2,occlusion:'overlay'}});}
+    this.kind=kind;this.entityId=id;this.lastPointId=null;this.result=null;this.error=null;this.vertexCount=0;
+    try{this.draw.start({id:kind==='point'?undefined:id,type:kind==='point'?'point':kind==='distance'?'polyline':'polygon',name:kind==='point'?'点坐标测量':kind==='distance'?'路程测量':'面积测量',
+      properties:{measurement:kind},heightReference:kind==='point'?'absolute':'clamp-to-ground',groundOffset:.5,historyGroup:'measurement',clearPrevious:options.clearPrevious,
+      symbol:kind==='point'?{color:'#ffcc66',size:10,occlusion:'overlay'}:kind==='distance'?{color:'#ffcc66',width:3,occlusion:'overlay'}:{color:'#ffcc66',opacity:.3,outlineWidth:2,occlusion:'overlay'}});}
     catch(error){this.kind=null;this.entityId=null;throw error;}
     this.emit();return this.state;
   }
   finish():MeasurementResult {this.assertAlive();if(!this.kind)throw new Error('No active measurement.');this.draw.finish();if(!this.result)throw new Error(this.error??'Measurement failed.');return this.result;}
   undo():void{this.assertAlive();if(this.kind)this.draw.undo();}
+  stop():void{this.assertAlive();if(this.kind)this.draw.stop();}
   cancel():void{if(this.disposed)return;if(this.kind){this.kind=null;this.draw.cancel();this.entityId=null;this.result=null;this.error=null;this.vertexCount=0;this.emit();}}
   clear():void{this.assertAlive();this.cancel();for(const id of this.owned)this.entities.remove(id);this.owned.clear();this.result=null;this.entityId=null;this.vertexCount=0;this.emit();}
   onChange(listener:(state:MeasurementState)=>void):()=>void{this.assertAlive();this.listeners.add(listener);return()=>this.listeners.delete(listener);}
-  dispose():void{if(this.disposed)return;this.cancel();this.disposed=true;this.unsubscribe();this.listeners.clear();}
+  dispose():void{if(this.disposed)return;this.cancel();this.disposed=true;this.unsubscribe();this.unsubscribeEntities();this.listeners.clear();}
   private changed(state:EntityDrawState):void {
     if(!this.kind)return;
-    if(state.active&&state.type!==(this.kind==='distance'?'polyline':'polygon')){this.kind=null;this.entityId=null;this.result=null;this.emit();return;}
+    if(state.active&&state.type!==(this.kind==='point'?'point':this.kind==='distance'?'polyline':'polygon')){this.kind=null;this.entityId=null;this.result=null;this.emit();return;}
+    if(this.kind==='point'){
+      if(state.lastEntityId&&state.lastEntityId!==this.lastPointId){const value=this.entities.getById(state.lastEntityId);
+        if(value?.type==='point'){this.lastPointId=value.id;this.entityId=value.id;this.owned.add(value.id);this.result=Object.freeze({kind:'point',position:value.position,source:state.lastPick?.source??null,...(state.lastPick?.approximation?{approximation:state.lastPick.approximation}:{})});
+          this.entities.update(value.id,{properties:{...value.properties,measurementResult:this.result},label:{text:`${value.position[0].toFixed(5)}°, ${value.position[1].toFixed(5)}°`,occlusion:'overlay'}});}}
+      if(state.active){this.vertexCount=state.vertexCount;if(!state.lastEntityId){this.entityId=null;this.result=null;this.lastPointId=null;}}else this.kind=null;this.emit();return;
+    }
     if(!state.active){
       if(state.lastEntityId===this.entityId){
         const value=this.entities.getById(state.lastEntityId!)!;
         try{this.result=this.compute(value);this.vertexCount='positions' in value?value.positions.length:0;this.owned.add(value.id);
-          const text=this.result.kind==='distance'?`${(this.result.metres/1000).toFixed(3)} km`:`${(this.result.squareMetres/1e6).toFixed(4)} km²`;
+          const text=this.result.kind==='distance'?`${(this.result.metres/1000).toFixed(3)} km`:this.result.kind==='area'?`${(this.result.squareMetres/1e6).toFixed(4)} km²`:'';
           this.entities.update(value.id,{properties:{...value.properties,measurementResult:this.result},label:{text,occlusion:'overlay',color:'#ffcc66'}});
         }catch(error){this.error=error instanceof Error?error.message:'Measurement failed.';}
       }else{this.result=null;this.entityId=null;}

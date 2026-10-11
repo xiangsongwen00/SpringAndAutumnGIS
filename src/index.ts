@@ -157,6 +157,12 @@ export type {
 } from './core/lod/GlobeLodSelector';
 
 export { GlobeGridRenderer } from './render/GlobeGridRenderer';
+export { PolarSurfaceLayer } from './render/PolarSurfaceLayer';
+export type { PolarSurfaceLayerOptions } from './render/PolarSurfaceLayer';
+export {PolarAppearance} from './render/PolarAppearance';
+export type {PolarAppearanceState,PolarAppearanceOptions} from './render/PolarAppearance';
+export {polarPaletteFromStyle} from './render/PolarStyle';
+export type {PolarStylePalette} from './render/PolarStyle';
 export type { GlobeGridRendererOptions } from './render/GlobeGridRenderer';
 export { RasterTileLayer } from './render/RasterTileLayer';
 export { GeoJsonLayer } from './render/GeoJsonLayer';
@@ -181,7 +187,7 @@ export { Viewer, ViewerError } from './sdk/Viewer';
 export { EntityCollection, EntityError } from './sdk/EntityCollection';
 export { EntityDrawingController } from './sdk/EntityDrawingController';
 export { MeasurementController, measureDistance, measureArea } from './sdk/Measurement';
-export type { MeasurementState, MeasurementResult, DistanceMeasurement, AreaMeasurement } from './sdk/Measurement';
+export type { MeasurementState, MeasurementResult, MeasurementKind, MeasurementOptions, PointMeasurement, DistanceMeasurement, AreaMeasurement } from './sdk/Measurement';
 export { ViewerToolbar } from './sdk/ViewerToolbar';
 export type { ToolbarTarget, ViewerToolbarOptions } from './sdk/ViewerToolbar';
 export { toolbarIcons } from './sdk/ToolbarIcons';
