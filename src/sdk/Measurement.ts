@@ -41,6 +41,7 @@ export class MeasurementController {
   private result:MeasurementResult|null=null;
   private error:string|null=null;
   private serial=0;
+  private vertexCount=0;
   private readonly owned=new Set<string>();
   private disposed=false;
   private readonly listeners=new Set<(state:MeasurementState)=>void>();
@@ -49,11 +50,11 @@ export class MeasurementController {
     this.unsubscribe=draw.onChange(state=>this.changed(state));
   }
   get state():MeasurementState{return Object.freeze({active:this.kind!==null&&this.draw.isActive,kind:this.kind,
-    vertexCount:this.kind?this.draw.state.vertexCount:0,result:this.result,entityId:this.entityId,error:this.error});}
+    vertexCount:this.kind?this.draw.state.vertexCount:this.vertexCount,result:this.result,entityId:this.entityId,error:this.error});}
   start(kind:'distance'|'area'):MeasurementState {
     this.assertAlive();if(!['distance','area'].includes(kind))throw new Error('Unknown measurement kind.');
     this.cancel();this.draw.cancel();let id:string;do{id=`measure-${kind}-${++this.serial}`;}while(this.entities.has(id));
-    this.kind=kind;this.entityId=id;this.result=null;this.error=null;
+    this.kind=kind;this.entityId=id;this.result=null;this.error=null;this.vertexCount=0;
     try{this.draw.start({id,type:kind==='distance'?'polyline':'polygon',name:kind==='distance'?'路程测量':'面积测量',
       properties:{measurement:kind},heightReference:'clamp-to-ground',groundOffset:.5,
       symbol:kind==='distance'?{color:'#ffcc66',width:3,occlusion:'overlay'}:{color:'#ffcc66',opacity:.3,outlineWidth:2,occlusion:'overlay'}});}
@@ -62,8 +63,8 @@ export class MeasurementController {
   }
   finish():MeasurementResult {this.assertAlive();if(!this.kind)throw new Error('No active measurement.');this.draw.finish();if(!this.result)throw new Error(this.error??'Measurement failed.');return this.result;}
   undo():void{this.assertAlive();if(this.kind)this.draw.undo();}
-  cancel():void{if(this.disposed)return;if(this.kind){this.kind=null;this.draw.cancel();this.entityId=null;this.result=null;this.error=null;this.emit();}}
-  clear():void{this.assertAlive();this.cancel();for(const id of this.owned)this.entities.remove(id);this.owned.clear();this.result=null;this.entityId=null;this.emit();}
+  cancel():void{if(this.disposed)return;if(this.kind){this.kind=null;this.draw.cancel();this.entityId=null;this.result=null;this.error=null;this.vertexCount=0;this.emit();}}
+  clear():void{this.assertAlive();this.cancel();for(const id of this.owned)this.entities.remove(id);this.owned.clear();this.result=null;this.entityId=null;this.vertexCount=0;this.emit();}
   onChange(listener:(state:MeasurementState)=>void):()=>void{this.assertAlive();this.listeners.add(listener);return()=>this.listeners.delete(listener);}
   dispose():void{if(this.disposed)return;this.cancel();this.disposed=true;this.unsubscribe();this.listeners.clear();}
   private changed(state:EntityDrawState):void {
@@ -72,7 +73,7 @@ export class MeasurementController {
     if(!state.active){
       if(state.lastEntityId===this.entityId){
         const value=this.entities.getById(state.lastEntityId!)!;
-        try{this.result=this.compute(value);this.owned.add(value.id);
+        try{this.result=this.compute(value);this.vertexCount='positions' in value?value.positions.length:0;this.owned.add(value.id);
           const text=this.result.kind==='distance'?`${(this.result.metres/1000).toFixed(3)} km`:`${(this.result.squareMetres/1e6).toFixed(4)} km²`;
           this.entities.update(value.id,{properties:{...value.properties,measurementResult:this.result},label:{text,occlusion:'overlay',color:'#ffcc66'}});
         }catch(error){this.error=error instanceof Error?error.message:'Measurement failed.';}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createServer} from 'vite';
 import {spawn} from 'node:child_process';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -143,6 +143,7 @@ try{
      h.measurements.clear();return {distance:distance.metres,area:area.squareMetres,properties:properties.measurementResult.kind,removed:!h.entities.has(id),inspected:inspected.includes('longitude'),active:h.draw.isActive};
    })()`);
    assert.ok(measured.distance>0);assert.ok(measured.area>0);assert.equal(measured.properties,'distance');assert.equal(measured.removed,true);assert.equal(measured.inspected,true);assert.equal(measured.active,false);
+   if(terrain===1&&process.env.ENTITY_SCREENSHOT){const screenshot=await command('Page.captureScreenshot',{format:'png'});await writeFile(process.env.ENTITY_SCREENSHOT,Buffer.from(screenshot.result.data,'base64'));}
    console.log(`Root index.html: terrain=${terrain}, ground fill/PNG overlay passed; pick reprojection ${report.error.toFixed(6)}px; preview CPU ${previewMs.toFixed(1)}ms / frame ${previewFrameMs.toFixed(1)}ms.`);
  }
  assert.deepEqual(external,[],'Regression must not request external tiles/services');

@@ -72,11 +72,11 @@ export class ViewerToolbar {
     add('distance','路程测量',toolbarIcons.distance,()=>this.measure('distance'));
     add('area','面积测量',toolbarIcons.area,()=>this.measure('area'));
     for(const [type,icon,name] of [['point',toolbarIcons.point,'绘制点'],['polyline',toolbarIcons.line,'绘制折线'],['polygon',toolbarIcons.polygon,'绘制面']] as const)
-      add(`draw-${type}`,name,icon,()=>{this.beginInteraction();if(options.onDraw){this.close();options.onDraw(type);}else{this.open('draw',name);this.expressionButtons();target.draw.start({type,heightReference:'clamp-to-ground',groundOffset:.5,symbol:{color:'#64d8ff',occlusion:'overlay'}});this.status.textContent='左键落点；右键旋转、中键俯仰、滚轮缩放；Enter完成，Esc取消。';}});
+      add(`draw-${type}`,name,icon,()=>{this.beginInteraction();if(options.onDraw){this.close();options.onDraw(type);}else{this.open('draw',name);this.expressionButtons();target.draw.start({type,heightReference:'clamp-to-ground',groundOffset:.5,symbol:{color:'#64d8ff',occlusion:type==='point'?'overlay':'depth'}});this.status.textContent='左键落点；右键旋转、中键俯仰、滚轮缩放；Enter完成，Esc取消。';}});
     add('entities','绘图对象管理',toolbarIcons.entities,()=>{this.close();target.draw.cancel();options.onEntities?.();if(!options.onEntities)this.entityManager();});
     if(options.onLayers)add('layers','业务图层管理',toolbarIcons.layers,()=>{this.close();target.draw.cancel();options.onLayers!();});
     this.cleanup.push(target.measure.onChange(state=>{if(this.mode!=='measure')return;this.status.textContent=`${state.active?'测量中':'完成或取消'} · ${state.vertexCount} 顶点${state.error?' · '+state.error:''}`;let pre=this.content.querySelector('pre');if(!pre){pre=doc.createElement('pre');this.content.append(pre);}pre.textContent=JSON.stringify(state.result,null,2);}),
-      target.draw.onChange(state=>{for(const [id,b] of this.buttons)b.setAttribute('aria-pressed',String(state.active&&id===`draw-${state.type}`));if(this.mode==='draw')this.status.textContent=state.error??`${state.active?'绘制中':'绘制结束'} · ${state.vertexCount} 顶点`;}));
+      target.draw.onChange(state=>{for(const [id,b] of this.buttons)if(id.startsWith('draw-'))b.setAttribute('aria-pressed',String(state.active&&id===`draw-${state.type}`));if(this.mode==='draw')this.status.textContent=state.error??`${state.active?'绘制中':'绘制结束'} · ${state.vertexCount} 顶点`;}));
     canvas.addEventListener('pointerdown',e=>{if(this.inspecting&&e.button===0)this.pointer={x:e.clientX,y:e.clientY,id:e.pointerId};},{signal:this.events.signal});
     canvas.addEventListener('pointercancel',()=>{this.pointer=null;},{signal:this.events.signal});
     canvas.addEventListener('pointerup',e=>{const p=this.pointer;this.pointer=null;if(!this.inspecting||!p||e.pointerId!==p.id||Math.hypot(p.x-e.clientX,p.y-e.clientY)>4)return;

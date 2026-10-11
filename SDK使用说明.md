@@ -89,7 +89,7 @@ main().catch(console.error);
 - engine：低层扩展入口，可复用GeoJsonLayer等，不要直接破坏SDK持有的base图层或__sdk_base_labels。
 - ViewerError.code：INVALID_OPTIONS、BASEMAP_LOAD_FAILED、ABORTED、TERRAIN_UNAVAILABLE、DESTROYED。公共加载错误不回显后端凭据URL；浏览器WebGL构造错误可能直接抛出。
 
-内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。旧GeoJsonLayer的面仍仅为边界；2026-10-09增加entities，2026-10-10增加基础鼠标绘制、显示地表拾取和置顶表达，见§4.1–4.3。独立地形LOD、持续贴地和高级编辑仍未实施。
+内部统一XYZ；scheme:tms只转换请求行号，显式{-y}不重复翻转，不改纹理/几何南北方向。借用Provider由调用方管理，Viewer创建的矢量Provider由Viewer释放。矢量是现有GPU地表管线与简化独立注记子集，不是完整MapLibre兼容实现；能力报告见baseMap.capabilities。旧GeoJsonLayer的面仍仅为边界；entities绘制/拾取/置顶/持续贴地见§4.1–4.4，图标工具栏和测量见§6.1。独立地形LOD和高级编辑仍未实施。
 
 ## 4.1 B版：点线面与标注对象
 
@@ -206,7 +206,7 @@ npm run dev
 
 打开终端实际地址的/index.html。此源码页依赖Vite转换TS，不能通过file://或Live Server直接运行；引擎dist仍只输出库，不改成网站。独立应用继续安装dist/tgz并用自身dev/preview。
 
-顶部“测试点线面”打开完整面板，默认加入四类示例；里面有明确的“绘制点／绘制折线／绘制面／绘制标注”按钮，不是只勾选单击加点。顶部“拾取调试”打开诊断面板，不强制定位。永远村和行政区GeoJSON快捷定位收进“业务图层”面板，数据源不删除；独立demo重复的旧合成GeoJSON点线面示例已移除。
+左下工具栏“绘图对象管理”图标打开完整面板，默认加入四类示例；里面有明确的“绘制点／绘制折线／绘制面／绘制标注”按钮，不是只勾选单击加点。“点属性查询”图标打开简洁查询弹窗，不强制定位；完整表单仍提供拾取诊断。永远村和行政区GeoJSON快捷定位收进“业务图层”面板，数据源不删除；独立demo重复的旧合成GeoJSON点线面示例已移除。
 
 ```js
 viewer.draw.start({ type: 'polyline', id: 'route-from-mouse',
@@ -221,9 +221,9 @@ viewer.draw.start({ type: 'point', symbol: { icon: { url: './mylocation_up.png' 
 const unsubscribe = viewer.draw.onChange(state => console.log(state.active, state.type, state.vertexCount, state.lastEntityId));
 ```
 
-绘制开始时取消未完成飞行并暂停相机输入，完成/取消/销毁后恢复此前导航状态；Enter完成，Esc取消，Backspace/Ctrl+Z撤销顶点（输入框内不抢占编辑）。切换模式取消旧预览；非法自交面或顶点不足不会提交，保留当前会话供撤销/修正。当前鼠标上限1000顶点；面只绘外环，孔洞可通过实体update后加。符号和拾取配置在start时捕获，结束后可继续编辑。高级捕捉、顶点拖拽、Redo、触屏绘制、测量和持续贴地尚未实施。
+绘制开始时取消未完成飞行，默认只独占左键，右/中键与滚轮继续导航；可显式navigation:lock，完成/取消/销毁后恢复此前导航状态。Enter完成，Esc取消，Backspace/Ctrl+Z撤销顶点（输入框内不抢占编辑）。切换模式取消旧预览；非法自交面或顶点不足不会提交，保留当前会话供撤销/修正。当前鼠标上限1000顶点；面只绘外环，孔洞可通过实体update后加。符号和拾取配置在start时捕获，结束后可继续编辑。高级捕捉、顶点拖拽、Redo、触屏绘制仍未实施；持续贴地见§4.4，测量见§6.1。
 
-鼠标绘制线/面在两个demo里默认选“置顶表达”，确保当前未持续贴地的阶段也能看清图形；完成后可改正常深度。API创建实体与未指定occlusion的draw仍默认正常深度。overlay是关闭指定对象材质的depthTest、保留depthWrite:false和既有绘制顺序；不修改经纬度/高程，不是伪造贴地。点与文字保留地球背面剔除和标注碰撞限制；线面采用保守包围体剔除，跨地平线的大图形并非逐像素精确遮挡。
+鼠标绘制线/面在两个demo里默认持续贴地并使用正常深度；临时预览置顶，最终提交跟随显示地表。API创建实体与未指定occlusion的draw仍默认正常深度。overlay是关闭指定对象材质的depthTest、保留depthWrite:false和既有绘制顺序；不修改经纬度/高程，不是伪造贴地。点与文字保留地球背面剔除和标注碰撞限制；线面采用保守包围体剔除，跨地平线的大图形并非逐像素精确遮挡。
 
 ```js
 viewer.entities.update('station', {
@@ -240,7 +240,7 @@ const fixed = viewer.pickPositionDetailed(screen, { mode: 'absolute-height', hei
 
 默认拾取使用当前base影像／原生矢量的实际显示地表三角网格，复现现有shader的DEM采样（线性/最近邻）、XYZ UV绑定、局部高精度路径、曲率和公共边ECEF覆盖。不是拿“最新下载DEM”改高度，也不是把椭球交点垂直抬升。无可用base网格时明确返回source:ellipsoid，天空/画布外返回null。不会为拾取额外请求DEM，不改变瓦片/地形LOD；CPU顶点缓存按几何/纹理版本失效，在查询时懒制作，不每帧扫描网格。高频拾取/BVH和独立有效地表接口仍需后续性能工作。
 
-pickPositionDetailed提供position、source、tile、screen、reprojected、errorPixels、distance和viewDepth。诊断同时显示椭球对照；斜视时高度差会造成经纬度差，不能因“不看高度”就排除其影响。它是显示地图地表查询，不是建筑/模型/透明纹理任意深度缓冲拾取，也不是高度量测真值。拾取后顶点存绝对高度快照，DEM后续细化不自动改对象；测量与持续贴地需要后续明确高度参考及同代地表规则。
+pickPositionDetailed提供position、source、tile、screen、reprojected、errorPixels、distance和viewDepth。诊断同时显示椭球对照；斜视时高度差会造成经纬度差，不能因“不看高度”就排除其影响。它是显示地图地表查询，不是建筑/模型/透明纹理任意深度缓冲拾取，也不是高度量测真值。拾取顶点保存点击时的高度；absolute对象不自动变化，clamp-to-ground对象的显示随地表细化，但不改保存坐标。
 
 验证：npm run test:picking与npm run test:entities:browser。后者显式entitySmoke=1使用本地合成栅格/DEM，在root index验证单canvas、DPR=2、页面偏移、地形开/关、GPU点击点像素、折线/面绘制、撤销/取消/导航恢复、置顶与背面剔除；阻断外部请求，不用真实服务压测。受控点击回投约0.000001px，不证明所有实景服务配准或FPS已验收。普通URL不启用合成回退。
 
@@ -288,6 +288,40 @@ draw.state提供pickMs、previewMs（CPU）和previewFrameMs（预览更新回�
 发布只提供token.example.json、公开服务说明与资源申请教程。不分享维护者Key，不把OSM或云平台资源当成无限免费兜底。浏览器配置是公开数据，不是加密文件，只能放限制域名/权限/配额的客户端Key；服务端Secret必须留在后端。当前本机天地图曾返回429，不宣称真实服务权限/配额已验收成功。
 
 ## 6. 验证职责
+
+## 6.1 图标工具栏、相机恢复、测量与属性查询（2026-10-11）
+
+```ts
+import { Viewer, measureDistance, measureArea } from 'spring-and-autumn-gis';
+const viewer = await Viewer.create('map', {
+  basemaps: myBaseMaps, terrain: myTerrain, toolbar: true
+});
+// 或初始化后显式创建；默认不创建DOM工具栏。
+const toolbar = viewer.createToolbar({ baseMapNames: { satellite: '卫星影像' } });
+viewer.orientNorthUp(); // 姿态变为北向俯视，不移动相机或改变高度、FOV、near/far
+viewer.resetView();     // 恢复创建时的相机位置、姿态；不同于指南针
+viewer.setTileLevelOffset(-1.0); // 当前底图和其配套注记，不改变业务图层偏移
+const distance = measureDistance([[106.55,29.61],[106.56,29.62]]);
+const area = measureArea([[106.55,29.61],[106.56,29.61],[106.56,29.62]]);
+viewer.measure.start('distance'); // 或 area；共享 viewer.draw 输入系统
+// 线至少2点、面至少3点；Enter/工具面板完成，Backspace撤销，Esc取消。
+viewer.measure.onChange(state => console.log(state.result));
+// finish()结束当前测量，clear()只移除该测量控制器创建的结果实体。
+const hit = viewer.inspectAt({x:200,y:150}); // canvas相对CSS像素
+// hit.surface: 经纬度、高度、来源、回投误差；hit.entity: 自有实体属性/符号/几何快照
+```
+
+工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标）；复杂设置与结果在右侧弹窗。包含底图、初始视角、指南针、瓦片偏移、地形、属性查询、路程/面积测量、绘制点线面和对象管理。点击后悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。可用onEntities/onLayers接入应用自己的右侧管理面板。
+
+绘制默认navigation:'allow'：左键由绘制以捕获阶段独占（不拖地图），右键旋转、中键俯仰、滚轮缩放仍可用；拖动右键不落点，移动后的点击重新拾取当下显示地表。需要原行为可用viewer.draw.start({type:'polyline',navigation:'lock'})。若应用原本禁用相机，不擅自启用；结束恢复之前enabled状态。贴地细化期间最终实体跟随当前显示地表，不改变保存的顶点。
+
+测量口径为WGS84椭球测地线：distance.metres/segments（米）；area.squareMetres（平方米）、perimeterMetres（米，含孔洞周长）。使用GeographicLib，支持日期变更线、反向环和孔洞面积扣减；纯函数输入需有效、非自交外环及内部不相交孔洞，较小区域面积，不用于大于半个地球的区域解释。高度不影响数值，不称为沿山坡距离/山坡表面积。交互绘制继承当前局部面最大跨度与拓扑校验；未实现全世界任意巨大交互面。属性查询仅覆盖本引擎entities及显示地表，不宣称能返回所有MVT/GeoJSON/WMS源要素属性。测量结果存入实体properties.measurementResult，是完成时的快照；后续编辑几何应重新调用measureDistance/measureArea，不自动改写快照。
+
+src/assets/img/NEW中的图片全部改为英文文件名，地形/测量/要素目录分别为terrain/measurement/entities；home、basemap、compass、tile-offset、entity-manager、layers等用于工具栏。Vite库构建将工具图标内联，消费者不需要引擎src目录；许可证生成到dist/THIRD_PARTY_NOTICES.txt。只有UI图标随包提供，不含维护者token或底图/DEM资源。
+
+源项目index.html使用同一个公共ViewerToolbar，通过轻量适配器复用已有引擎和右侧测试面板。顶部旧文字按钮隐藏，仅保留ID作为事件适配；“图层”按钮打开业务图层，“对象管理”打开点线面完整表单。独立项目TS/JS demo均创建已安装dist的工具栏，无源代码联接。
+
+本轮验证：typecheck、完整npm test、test:measurement、test:ground、test:picking、test:sdk；根页面硬件GPU无地形/合成地形浏览器回归，新增实际右键导航、姿态/位置不变、图标解码、面板挂载、点查询、路程/面积完成、清理所有权。测试不请求真实地图，不视为实景服务或性能验收；地形LOD、队列和业务图层排序未改变。
 
 - 引擎：npm test、npm run typecheck、npm run test:sdk、npm run test:entities；保持原有渲染回归。
 - 独立应用：npm run build、npm run test:sdk、npm run test:sdk:browser，检查已安装dist、TS/JS交互、真实GPU填充/洞/文字/图标方向/线面滚动/透明度、资源隔离与销毁重建。

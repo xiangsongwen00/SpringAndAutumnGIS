@@ -1,6 +1,10 @@
 ﻿import { defineConfig } from 'vite';
 
+import { readFileSync } from 'node:fs';
+
 export default defineConfig({
+  plugins:[{name:'sdk-license-notice',generateBundle(){this.emitFile({type:'asset',fileName:'THIRD_PARTY_NOTICES.txt',
+    source:readFileSync(new URL('./THIRD_PARTY_NOTICES.txt',import.meta.url),'utf8')});}}],
   server: {
     proxy: {
       // Development-only bridge for the localhost services documented in 测试数据.md.

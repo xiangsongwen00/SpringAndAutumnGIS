@@ -173,7 +173,8 @@ export class Viewer {
   }
   measureDistance=measureDistance;
   measureArea=measureArea;
-  inspectAt(screen:ScreenPosition) {this.assertAlive();return {surface:this.pickPositionDetailed(screen),entity:this.pick(screen)};}
+  inspectAt(screen:ScreenPosition) {this.assertAlive();const surface=this.pickPositionDetailed(screen);this.engine.camera.updateMatrixWorld();
+    return {surface,entity:this.entityLayer.pick(screen,this.engine.camera,{},surface?.source==='rendered-surface'?surface.viewDepth:null)};}
   /** CSS pixels relative to the canvas, not client coordinates or device pixels. */
   pick(screen: ScreenPosition, options: EntityPickOptions = {}): EntitySnapshot | null {
     this.assertAlive(); this.engine.camera.updateMatrixWorld();
