@@ -158,6 +158,8 @@ export class Viewer {
   }
   setLodGridVisible(visible: boolean): void { this.assertAlive(); this.engine.setLodGridVisible(visible); }
   flyTo(view: GlobeFlyToOptions): void { this.assertAlive(); this.engine.flyTo(view); }
+  /** Orientation-only pitch; does not move the camera or change its altitude. */
+  setCameraPitch(pitch:number):void {this.assertAlive();this.engine.setCameraPitch(pitch);}
   getCameraViewState() { this.assertAlive(); return this.engine.getCameraViewState(); }
   /** Public WGS84/world/Web-Mercator/tile/ENU converter; world axes are engine-specific. */
   get coordinates() { this.assertAlive(); return this.engine.coordinates; }

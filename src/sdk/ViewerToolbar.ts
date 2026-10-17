@@ -152,14 +152,14 @@ export class ViewerToolbar {
   private styleEditor(host:HTMLElement,type:EntityDefinition['type']):void{
     const doc=host.ownerDocument,style=this.target.draw.getStyle(type);
     if(!Object.keys(style).length)this.target.draw.setStyle(type,{heightReference:type==='point'||type==='label'?'absolute':'clamp-to-ground',groundOffset:.5,
-      ...(type==='label'?{label:{text:'标注',occlusion:'overlay' as const}}:{symbol:{color:'#ffffff',occlusion:type==='point'?'overlay' as const:'depth' as const,...(type==='point'?{size:36}:type==='polyline'?{width:24}:{opacity:.5})}})});
+      ...(type==='label'?{label:{text:'标注',occlusion:'overlay' as const}}:{symbol:{color:'#ffffff',occlusion:type==='point'?'overlay' as const:'depth' as const,...(type==='point'?{size:30,icon:{url:toolbarIcons.point,sourceHeading:0},alignment:'screen' as const}:type==='polyline'?{width:4}:{opacity:.5})}})});
     const current=this.target.draw.getStyle(type),symbol=current.symbol;
     const controls=new Map<string,HTMLInputElement>();
     const input=(name:string,title:string,value:string,kind='text')=>{const label=doc.createElement('label'),node=doc.createElement('input');label.textContent=title;node.type=kind;if(kind==='checkbox')node.checked=value==='true';else node.value=value;node.dataset.style=name;label.append(node);host.append(label);controls.set(name,node);return node;};
     input('color','符号颜色',symbol?.color??current.label?.color??'#ffffff','color');input('opacity','透明度',String(symbol?.opacity??current.label?.opacity??1),'number');
     if(type==='point'){const s=symbol as import('./EntityTypes').PointSymbol|undefined;input('image','使用点图标',String(!!s?.icon),'checkbox');input('url','图标URL',s?.icon?.url??'');input('size','点大小 / CSS像素',String(s?.size??36),'number');input('heading','朝向 / 度',String(s?.heading??0),'number');input('sourceHeading','素材原始朝向 / 度',String(s?.icon?.sourceHeading??0),'number');}
     else if(type==='polyline'||type==='polygon'){const texture=(symbol as import('./EntityTypes').LineSymbol|import('./EntityTypes').PolygonSymbol|undefined)?.texture;input('image','使用纹理',String(!!texture),'checkbox');input('url','纹理URL',texture?.url??'');
-      if(type==='polyline'){const s=symbol as import('./EntityTypes').LineSymbol|undefined;input('width','线宽 / CSS像素',String(s?.width??24),'number');input('speed','流动速度 / CSS像素每秒',String(s?.texture?.speed??30),'number');}
+      if(type==='polyline'){const s=symbol as import('./EntityTypes').LineSymbol|undefined;input('width','线宽 / CSS像素',String(s?.width??4),'number');input('speed','流动速度 / CSS像素每秒',String(s?.texture?.speed??30),'number');}
     }
     const json=doc.createElement('textarea');json.setAttribute('aria-label','绘制样式JSON');json.value=JSON.stringify(current,null,2);const advanced=doc.createElement('details'),summary=doc.createElement('summary');summary.textContent='完整样式JSON（面UV、速度、注记等）';advanced.append(summary,json);host.append(advanced);
     const apply=doc.createElement('button');apply.textContent='应用样式JSON';apply.addEventListener('click',()=>{try{this.target.draw.setStyle(type,JSON.parse(json.value));this.styleEditorRefresh(host,type);this.status.textContent='当前会话与后续绘制已更新，已有对象不自动改变。';}catch(error){this.status.textContent=String(error);}},{signal:this.events.signal});advanced.append(apply);

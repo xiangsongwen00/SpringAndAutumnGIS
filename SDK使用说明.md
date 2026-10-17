@@ -325,6 +325,8 @@ const hit = viewer.inspectAt({x:200,y:150}); // canvas相对CSS像素
 
 工具栏默认在地图容器左下角纵向排列（36×34px按钮，25px图标），距底部48px+safe-area；复杂设置与结果在右侧弹窗，底图和偏移是工具栏旁的紧凑弹窗。测量仅measure-distance图标、绘制仅polygon图标，弹窗选择点线面，默认点；包含初始视角、指南针和地形，对象管理在绘制内部，可选业务图层管理。悬停提示和aria-label保留功能名称；小高度容器可滚动。需要容器有明确高度。toolbar.destroy()仅卸载工具UI，viewer.destroy()同步清理工具、测量和绘制监听器。重复createToolbar会替换旧UI，不创建第二个地球/canvas。推荐drawContent内嵌应用管理表单；onEntities可在绘制面板内部触发已有应用管理，onLayers扩展业务层入口。
 
+触控映射不是桌面鼠标行为的偶然兼容：单指拖动对应左键环绕；双指水平/垂直平移对应绕焦点旋转与俯仰；双指捏合对应滚轮缩放。绘制和测量仍使用单指轻触落点，双指手势保留给相机导航。容器设置 `touch-action:none`，避免浏览器页面滚动抢占地图手势。
+
 绘制默认navigation:'allow'：左键由绘制以捕获阶段独占（不拖地图），右键旋转、中键俯仰、滚轮缩放仍可用；拖动右键不落点，移动后的点击重新拾取当下显示地表。需要原行为可用viewer.draw.start({type:'polyline',navigation:'lock'})。若应用原本禁用相机，不擅自启用；结束恢复之前enabled状态。贴地细化期间最终实体跟随当前显示地表，不改变保存的顶点。
 
 测量口径为WGS84椭球测地线：distance.metres/segments（米）；area.squareMetres（平方米）、perimeterMetres（米，含孔洞周长）。point返回坐标、拾取来源及可选approximation。使用GeographicLib，支持日期变更线、反向环和孔洞面积扣减；纯函数输入需有效、非自交外环及内部不相交孔洞，较小区域面积，不用于大于半个地球的区域解释。高度不影响距离/面积数值，不称为沿山坡距离/山坡表面积。交互绘制继承当前局部面最大跨度与拓扑校验；未实现全世界任意巨大交互面。属性查询仅覆盖本引擎entities及显示地表，不宣称能返回所有MVT/GeoJSON/WMS源要素属性。测量结果存入实体properties.measurementResult，是完成时的快照；后续编辑几何应重新调用measureDistance/measureArea，不自动改写快照。

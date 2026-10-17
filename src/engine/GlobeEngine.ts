@@ -261,6 +261,15 @@ export class GlobeEngine {
     this.gpuTimer = new GpuFrameTimer(this.renderer.getContext() as WebGL2RenderingContext);
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost, false);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored, false);
+    // Keep the CSS display box independent from the high-DPI drawing buffer.
+    // Framework compilers such as uni-app can rewrite a `canvas` selector to
+    // their `<uni-canvas>` component selector, which does not match this
+    // dynamically-created native HTMLCanvasElement. Without inline sizing,
+    // setSize(..., false) leaves the element at its pixel-ratio-scaled
+    // intrinsic CSS size and shifts the visual centre toward the lower right.
+    this.renderer.domElement.style.display = 'block';
+    this.renderer.domElement.style.width = '100%';
+    this.renderer.domElement.style.height = '100%';
     this.container.appendChild(this.renderer.domElement);
     this.imageryLayerOptions = {
       ...options.raster,
@@ -618,6 +627,10 @@ export class GlobeEngine {
 
   flyTo(options: GlobeFlyToOptions): void {
     this.controls.flyTo(options);
+  }
+
+  setCameraPitch(pitch: number): void {
+    this.controls.setPitch(pitch);
   }
 
   getCameraViewState(): GlobeCameraViewState {

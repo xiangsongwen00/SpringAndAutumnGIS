@@ -52,6 +52,7 @@ export declare class EntityDrawingController {
     private positions;
     private navigation;
     private pointer;
+    private readonly touchPointers;
     private lastPreview;
     private lastId;
     private error;

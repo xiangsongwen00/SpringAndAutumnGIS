@@ -47,6 +47,9 @@ export declare class GlobeCameraController {
     private zoomVelocity;
     private pointerId;
     private dragMode;
+    private readonly touchPointers;
+    private readonly touchCentroid;
+    private touchDistance;
     private animation;
     private terrainRevision;
     private disposed;
@@ -60,11 +63,15 @@ export declare class GlobeCameraController {
     update(now?: number): boolean;
     getViewState(): GlobeCameraViewState;
     flyTo(options: GlobeFlyToOptions): void;
+    /** Changes only camera orientation; position, altitude and projection stay exact. */
+    setPitch(pitchDegrees: number): void;
     cancelAnimation(): void;
     /** North-up nadir at the current camera position. Does not fly, change height or projection. */
     orientNorthUp(): void;
     resetView(): void;
     dispose(): void;
+    private touchGeometry;
+    private resetTouchGesture;
     private orbitAroundGlobe;
     private tiltAroundSurface;
     private orbitAroundSurface;

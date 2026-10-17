@@ -170,6 +170,7 @@ export declare class GlobeEngine {
     getVectorLayer(id: string): MvtVectorLayer | undefined;
     setTerrainEnabled(enabled: boolean): void;
     flyTo(options: GlobeFlyToOptions): void;
+    setCameraPitch(pitch: number): void;
     getCameraViewState(): GlobeCameraViewState;
     getPolarSurfaceState(): Readonly<{
         mapId: string | null;

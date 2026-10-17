@@ -25,7 +25,7 @@ export type GlobeCameraViewState = Readonly<{
   pitch: number | null;
 }>;
 
-type DragMode = 'globe' | 'look' | 'tilt';
+type DragMode = 'globe' | 'look' | 'tilt' | 'touch';
 type CameraAnimation = {
   startTime: number;
   duration: number;
@@ -65,12 +65,24 @@ export class GlobeCameraController {
   private zoomVelocity = 0;
   private pointerId: number | null = null;
   private dragMode: DragMode | null = null;
+  private readonly touchPointers = new Map<number, THREE.Vector2>();
+  private readonly touchCentroid = new THREE.Vector2();
+  private touchDistance = 0;
   private animation: CameraAnimation | null = null;
   private terrainRevision = -1;
   private disposed = false;
   private readonly initialPose: {position:THREE.Vector3;quaternion:THREE.Quaternion;up:THREE.Vector3};
 
   private readonly onPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === 'touch') {
+      if (!this.enabled) return;
+      event.preventDefault();
+      this.cancelAnimation();
+      this.touchPointers.set(event.pointerId, new THREE.Vector2(event.clientX, event.clientY));
+      this.element.setPointerCapture(event.pointerId);
+      this.resetTouchGesture();
+      return;
+    }
     if (!this.enabled || this.pointerId !== null) return;
     const mode = pointerMode(event.button);
     if (!mode) return;
@@ -83,6 +95,32 @@ export class GlobeCameraController {
   };
 
   private readonly onPointerMove = (event: PointerEvent): void => {
+    if (event.pointerType === 'touch' && this.touchPointers.has(event.pointerId)) {
+      event.preventDefault();
+      const previousCentroid = this.touchCentroid.clone();
+      const previousDistance = this.touchDistance;
+      this.touchPointers.get(event.pointerId)!.set(event.clientX, event.clientY);
+      const gesture = this.touchGeometry();
+      if (this.touchPointers.size === 1) {
+        const radiansPerPixel = this.globeOrbitRadiansPerPixel();
+        this.orbitVelocity.x += -(gesture.centroid.x - previousCentroid.x) * radiansPerPixel * this.inputGain();
+        this.orbitVelocity.y += -(gesture.centroid.y - previousCentroid.y) * radiansPerPixel * this.inputGain();
+        this.dragMode = 'globe';
+      } else {
+        const deltaX = gesture.centroid.x - previousCentroid.x;
+        const deltaY = gesture.centroid.y - previousCentroid.y;
+        this.lookVelocity.x += -deltaX * 0.003 * this.lookSpeed * this.inputGain();
+        this.tiltVelocity += -deltaY * 0.003 * this.tiltSpeed * this.inputGain();
+        if (previousDistance > 0) {
+          const pinch = (previousDistance - gesture.distance) / 100;
+          this.zoomVelocity += THREE.MathUtils.clamp(pinch, -4, 4) * this.zoomSpeed * this.inputGain();
+        }
+        this.dragMode = 'touch';
+      }
+      this.touchCentroid.copy(gesture.centroid);
+      this.touchDistance = gesture.distance;
+      return;
+    }
     if (!this.enabled || event.pointerId !== this.pointerId || !this.dragMode) return;
     event.preventDefault();
     const deltaX = event.clientX - this.pointer.x;
@@ -101,6 +139,12 @@ export class GlobeCameraController {
   };
 
   private readonly onPointerUp = (event: PointerEvent): void => {
+    if (event.pointerType === 'touch' && this.touchPointers.has(event.pointerId)) {
+      if (this.element.hasPointerCapture(event.pointerId)) this.element.releasePointerCapture(event.pointerId);
+      this.touchPointers.delete(event.pointerId);
+      this.resetTouchGesture();
+      return;
+    }
     if (event.pointerId !== this.pointerId) return;
     if (this.element.hasPointerCapture(event.pointerId)) {
       this.element.releasePointerCapture(event.pointerId);
@@ -233,6 +277,33 @@ export class GlobeCameraController {
     };
   }
 
+  /** Changes only camera orientation; position, altitude and projection stay exact. */
+  setPitch(pitchDegrees: number): void {
+    if (!Number.isFinite(pitchDegrees)) throw new Error('Camera pitch must be finite.');
+    this.cancelAnimation();
+    this.resetVelocities();
+    const position = this.camera.position.clone();
+    const geodetic = this.coordinates.worldToGeodetic(position);
+    const frame = this.localFrame(geodetic.longitude, geodetic.latitude);
+    const state = this.getViewState();
+    const heading = THREE.MathUtils.degToRad(state.heading ?? 0);
+    const pitch = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pitchDegrees, -90, -0.1));
+    const horizontal = frame.north.clone().multiplyScalar(Math.cos(heading))
+      .addScaledVector(frame.east, Math.sin(heading));
+    const forward = horizontal.multiplyScalar(Math.cos(pitch))
+      .addScaledVector(frame.up, Math.sin(pitch))
+      .normalize();
+    const viewUp = frame.up.clone().addScaledVector(forward, -frame.up.dot(forward));
+    if (viewUp.lengthSq() <= 1e-10) viewUp.copy(frame.north);
+    viewUp.normalize();
+    this.camera.up.copy(viewUp);
+    this.camera.lookAt(position.clone().add(forward));
+    // Keep this explicit invariant even if Three.js changes lookAt internals.
+    this.camera.position.copy(position);
+    this.camera.updateMatrixWorld(true);
+    this.updateTargetFromView();
+  }
+
   cancelAnimation(): void {
     this.animation = null;
   }
@@ -266,6 +337,20 @@ export class GlobeCameraController {
     this.element.removeEventListener('pointercancel', this.onPointerUp);
     this.element.removeEventListener('wheel', this.onWheel);
     this.element.removeEventListener('contextmenu', this.onContextMenu);
+    this.touchPointers.clear();
+  }
+
+  private touchGeometry(): {centroid:THREE.Vector2;distance:number} {
+    const values=[...this.touchPointers.values()];
+    if(values.length===0)return{centroid:new THREE.Vector2(),distance:0};
+    const centroid=values.reduce((sum,value)=>sum.add(value),new THREE.Vector2()).multiplyScalar(1/values.length);
+    return {centroid,distance:values.length<2?0:values[0]!.distanceTo(values[1]!)};
+  }
+
+  private resetTouchGesture(): void {
+    const gesture=this.touchGeometry();
+    this.touchCentroid.copy(gesture.centroid);this.touchDistance=gesture.distance;
+    this.dragMode=this.touchPointers.size===0?null:this.touchPointers.size===1?'globe':'touch';
   }
 
   private orbitAroundGlobe(yaw: number, pitch: number): boolean {

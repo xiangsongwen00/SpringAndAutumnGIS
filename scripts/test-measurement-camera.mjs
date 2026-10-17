@@ -18,6 +18,9 @@ for(const [lon,lat] of [[103.43968,32.04231],[179,80],[-110,-45],[0,90]]){
  const element={style:{},addEventListener(){},removeEventListener(){},clientHeight:900};
  const controls=new GlobeCameraController(camera,element),old=camera.position.clone(),projection=camera.projectionMatrix.clone(),quaternion=camera.quaternion.clone();
  controls.flyTo({longitude:lon,latitude:lat,altitude:10000,pitch:-10,heading:70,duration:0});
+ const pitchPosition=camera.position.clone(),pitchProjection=camera.projectionMatrix.clone();
+ controls.setPitch(-35);assert.ok(camera.position.distanceTo(pitchPosition)<1e-9);assert.ok(camera.projectionMatrix.equals(pitchProjection));
+ controls.setPitch(-70);assert.ok(camera.position.distanceTo(pitchPosition)<1e-9);assert.ok(camera.projectionMatrix.equals(pitchProjection));
  const before=camera.position.clone();controls.orientNorthUp();assert.ok(camera.position.distanceTo(before)<1e-9);assert.ok(camera.projectionMatrix.equals(projection));
  const p=coordinates.worldToGeodetic(camera.position),rad=Math.PI/180,l=p.longitude*rad,t=p.latitude*rad;
  const north=new THREE.Vector3(-Math.sin(t)*Math.sin(l),Math.cos(t),-Math.sin(t)*Math.cos(l));

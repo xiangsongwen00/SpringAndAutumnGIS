@@ -19,6 +19,23 @@ export type EntityDrawState = Readonly<{ active:boolean; type:EntityDefinition['
 export type EntityDrawStyle = { symbol?: PointSymbol|LineSymbol|PolygonSymbol; label?: LabelSymbol|null;
   heightReference?:'absolute'|'clamp-to-ground'; groundOffset?:number };
 
+/** Drawing definitions are JSON-like data. This also unwraps cross-realm/Vue proxies. */
+function cloneDrawingData<T>(value:T,seen=new WeakSet<object>()):T {
+  if(value===null||typeof value!=='object')return value;
+  if(seen.has(value))throw new EntityError('INVALID_ENTITY','Drawing options cannot contain circular references.');
+  seen.add(value);
+  if(Array.isArray(value)){
+    const result=value.map(item=>cloneDrawingData(item,seen)) as T;
+    seen.delete(value);return result;
+  }
+  const prototype=Object.getPrototypeOf(value);
+  if(prototype!==Object.prototype&&prototype!==null)
+    throw new EntityError('INVALID_ENTITY','Drawing options must contain only plain data.');
+  const result:Record<string,unknown>={};
+  for(const [key,item] of Object.entries(value))result[key]=cloneDrawingData(item,seen);
+  seen.delete(value);return result as T;
+}
+
 /** Shared mouse expression system: preview, finish, undo, cancel, keyboard and navigation ownership. */
 export class EntityDrawingController {
   private readonly events=new AbortController();
@@ -29,6 +46,7 @@ export class EntityDrawingController {
   private positions:EntityPosition[]=[];
   private navigation=true;
   private pointer:{x:number;y:number;id:number}|undefined;
+  private readonly touchPointers=new Set<number>();
   private lastPreview=0;
   private lastId:string|null=null;
   private error:string|null=null;
@@ -48,21 +66,21 @@ export class EntityDrawingController {
   private destroyed=false;
   private readonly styles=new Map<EntityDefinition['type'],EntityDrawStyle>();
   /** Per-kind defaults, shared by toolbar and application drawing entry points. */
-  getStyle(type:EntityDefinition['type']):EntityDrawStyle {this.assertAlive();this.validateType(type);return structuredClone(this.styles.get(type)??{});}
+  getStyle(type:EntityDefinition['type']):EntityDrawStyle {this.assertAlive();this.validateType(type);return cloneDrawingData(this.styles.get(type)??{});}
   /** Updates future draws and the active session of this kind, not committed entities. */
   setStyle(type:EntityDefinition['type'],patch:EntityDrawStyle):EntityDrawStyle {
     this.assertAlive();this.validateType(type);
     if(!patch||typeof patch!=='object'||Object.keys(patch).some(k=>!['symbol','label','heightReference','groundOffset'].includes(k)))throw new EntityError('INVALID_ENTITY','Invalid drawing style field.');
-    const old=this.styles.get(type)??{},next={...old,...structuredClone(patch)};
-    if(patch.symbol)next.symbol={...old.symbol,...structuredClone(patch.symbol)};
-    if(patch.label)next.label={...old.label,...structuredClone(patch.label)};
+    const old=this.styles.get(type)??{},next={...old,...cloneDrawingData(patch)};
+    if(patch.symbol)next.symbol={...old.symbol,...cloneDrawingData(patch.symbol)};
+    if(patch.label)next.label={...old.label,...cloneDrawingData(patch.label)};
     validateEntity(this.definition({type,...next,label:next.label??undefined},[[0,0,0],[.001,0,0],[.001,.001,0]],'__style_validation'));
     this.styles.set(type,next);
     if(this.options?.type===type&&(this.options.historyGroup??'drawing')==='drawing'){
       const active=this.options,activeSymbol=active.symbol,activeLabel=active.label;
-      Object.assign(active,structuredClone(patch));
-      if(patch.symbol)active.symbol={...activeSymbol,...structuredClone(patch.symbol)};
-      if(patch.label===null)active.label=undefined;else if(patch.label)active.label={...activeLabel,...structuredClone(patch.label)};
+      Object.assign(active,cloneDrawingData(patch));
+      if(patch.symbol)active.symbol={...activeSymbol,...cloneDrawingData(patch.symbol)};
+      if(patch.label===null)active.label=undefined;else if(patch.label)active.label={...activeLabel,...cloneDrawingData(patch.label)};
       this.showPreview();this.emit();
     }
     return this.getStyle(type);
@@ -73,17 +91,28 @@ export class EntityDrawingController {
     this.previewLayer=new EntityLayer(engine.ellipsoid,this.preview,engine.entityGroundSurface);engine.addSceneLayer(layerId,this.previewLayer);this.preview.setVisible(false);
     const canvas=engine.renderer.domElement;
     canvas.addEventListener('pointerdown',event=>{if(!this.isActive||event.button!==0)return;
+      if(event.pointerType==='touch'){
+        this.touchPointers.add(event.pointerId);
+        // A second finger converts the gesture to camera navigation. Keep the
+        // event flowing to GlobeCameraController and invalidate drawing click.
+        this.pointer=this.touchPointers.size===1?{x:event.clientX,y:event.clientY,id:event.pointerId}:undefined;
+        return;
+      }
       event.preventDefault();event.stopImmediatePropagation();this.pointer={x:event.clientX,y:event.clientY,id:event.pointerId};
       if(event.isTrusted)canvas.setPointerCapture(event.pointerId);
     },{signal:this.events.signal,capture:true});
-    canvas.addEventListener('pointercancel',()=>{this.pointer=undefined;},{signal:this.events.signal});
+    canvas.addEventListener('pointercancel',event=>{this.touchPointers.delete(event.pointerId);this.pointer=undefined;},{signal:this.events.signal});
     canvas.addEventListener('pointermove',event=>{
       if(!this.isActive||this.pointer||event.buttons||performance.now()-this.lastPreview<40)return;this.lastPreview=performance.now();
       const started=performance.now(),p=this.pick(event);this.showPreview(p??undefined);this.previewMs=performance.now()-started;this.emit();
     },{signal:this.events.signal});
     canvas.addEventListener('pointerup',event=>{
-      if(!this.isActive||event.button!==0)return;event.preventDefault();event.stopImmediatePropagation();const start=this.pointer;this.pointer=undefined;
-      if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);
+      if(!this.isActive||event.button!==0)return;
+      const touch=event.pointerType==='touch',multiTouch=touch&&this.touchPointers.size>1;
+      if(touch)this.touchPointers.delete(event.pointerId);else{event.preventDefault();event.stopImmediatePropagation();}
+      const start=this.pointer;this.pointer=undefined;
+      if(!touch&&canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);
+      if(multiTouch)return;
       if(!start||start.id!==event.pointerId||Math.hypot(event.clientX-start.x,event.clientY-start.y)>4)return;
       try{const p=this.pick(event);if(!p){this.error='天空／无显示地表交点，未加入顶点。';this.emit();return;}
         // The second release of a double click must not add a duplicate endpoint.
@@ -134,7 +163,7 @@ export class EntityDrawingController {
     const candidate=this.definition(options,[[0,0,0],[.001,0,0],[.001,.001,0]],options.id??'__draw_validation');validateEntity(candidate);
     if(options.pick?.mode==='absolute-height'&&!Number.isFinite(options.pick.height))throw new EntityError('INVALID_ENTITY','Fixed-height drawing requires a height.');
     if(options.pick?.mode&&!['surface','ellipsoid','absolute-height'].includes(options.pick.mode))throw new EntityError('INVALID_ENTITY','Invalid drawing pick mode.');
-    this.cancel();this.options=structuredClone(options);this.positions=[];this.pointIds=[];this.lastId=null;this.lastPick=null;this.lastClick=null;this.doubleReleaseSkipped=false;this.error=null;this.pointer=undefined;
+    this.cancel();this.options=cloneDrawingData(options);this.positions=[];this.pointIds=[];this.lastId=null;this.lastPick=null;this.lastClick=null;this.doubleReleaseSkipped=false;this.error=null;this.pointer=undefined;this.touchPointers.clear();
     this.navigation=this.engine.controls.enabled;this.previousCursor=this.engine.renderer.domElement.style.cursor;this.engine.renderer.domElement.style.cursor='crosshair';
     this.engine.controls.cancelAnimation();this.engine.controls.enabled=options.navigation==='lock'?false:this.navigation;this.preview.setVisible(true);
     if(options.type==='polyline'||options.type==='polygon'){
@@ -170,7 +199,7 @@ export class EntityDrawingController {
   cancel():void {if(this.destroyed)return;if(this.options){this.end();this.error=null;this.lastId=null;this.emit();}}
   onChange(listener:(state:EntityDrawState)=>void):()=>void {this.assertAlive();this.listeners.add(listener);return()=>this.listeners.delete(listener);}
   dispose():void {if(this.destroyed)return;this.cancel();this.destroyed=true;this.events.abort();this.unsubscribeEntities();this.history.clear();this.styles.clear();this.listeners.clear();this.engine.removeSceneLayer(this.layerId);this.preview.dispose();}
-  private end():void {if(this.previewProbe!==undefined)cancelAnimationFrame(this.previewProbe);this.previewProbe=undefined;this.engine.controls.enabled=this.navigation;this.engine.renderer.domElement.style.cursor=this.previousCursor;this.options=undefined;this.pointer=undefined;this.preview.clear();this.preview.setVisible(false);this.positions=[];}
+  private end():void {if(this.previewProbe!==undefined)cancelAnimationFrame(this.previewProbe);this.previewProbe=undefined;this.engine.controls.enabled=this.navigation;this.engine.renderer.domElement.style.cursor=this.previousCursor;this.options=undefined;this.pointer=undefined;this.touchPointers.clear();this.preview.clear();this.preview.setVisible(false);this.positions=[];}
   private pick(event:PointerEvent):EntityPosition|null {
     const started=performance.now();
     const rect=this.engine.renderer.domElement.getBoundingClientRect(),result=this.engine.pickPositionDetailed({x:event.clientX-rect.left,y:event.clientY-rect.top},this.options?.pick);

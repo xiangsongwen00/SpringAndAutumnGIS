@@ -517,6 +517,8 @@ toolbar.close();          // 关闭并取消未完成输入
 
 CSS选择器为`.sag-tools`、`.sag-tool-panel`、`.sag-tool-panel--compact`；可在地图容器设置`--sag-toolbar-bottom`。默认7图标：底图、初始视角、指南针、偏移、地形、测量、绘制；有onLayers再加业务图层。对象管理位于绘制弹窗。底图/偏移为工具栏旁小弹窗，复杂工具为右侧面板。只有“开始”按钮才开启操作，清历史选项在开始时捕获，新对象成功提交后才清。
 
+移动端 Pointer Events 映射：单指拖动为 globe orbit；双指平移同时提供 look/tilt；双指距离变化写入与 wheel 相同的 zoom 通道。鼠标左/中/右键行为保持不变。
+
 ## 12. 生命周期、状态、错误与扩展入口
 
 ViewerError.code：INVALID_OPTIONS（容器/配置/参数）、DESTROYED、ABORTED、BASEMAP_LOAD_FAILED、TERRAIN_UNAVAILABLE。EntityError.code：INVALID_ENTITY、DUPLICATE_ID、NOT_FOUND、DESTROYED。Provider网络错误可含URL，应用日志不得泄露Key。异步捕获错误并保留原地图，不用不断新建Viewer作为失败重试。

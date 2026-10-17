@@ -1,6 +1,6 @@
 {
   "name": "spring-and-autumn-gis",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "private": false,
   "type": "module",
   "description": "Lightweight 3D GIS engine (library + demo).",

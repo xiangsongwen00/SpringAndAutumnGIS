@@ -83,6 +83,8 @@ export declare class Viewer {
     setTerrainEnabled(enabled: boolean): void;
     setLodGridVisible(visible: boolean): void;
     flyTo(view: GlobeFlyToOptions): void;
+    /** Orientation-only pitch; does not move the camera or change its altitude. */
+    setCameraPitch(pitch: number): void;
     getCameraViewState(): Readonly<{
         cameraLongitude: number;
         cameraLatitude: number;
